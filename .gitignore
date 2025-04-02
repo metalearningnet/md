@@ -1,0 +1,8 @@
+/model/
+/checkpoints/
+
+# Ignore Python-specific files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
