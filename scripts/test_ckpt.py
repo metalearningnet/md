@@ -25,8 +25,7 @@ class TestCkpt(unittest.TestCase):
         # Common test arguments
         self.test_args = {
             "model_path": self.save_path,
-            "dataset_name": "wikitext",
-            "dataset_config": "wikitext-2-raw-v1"
+            "dataset_name": "ag_news"
         }
 
     def test_evaluation(self):

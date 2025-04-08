@@ -12,7 +12,6 @@ SKILL_MEMORY = {
     "mac_depth": 1,
     "mac_segment_len": 2,
     "mi_coeff": 1.0,
-    "forward_coeff": 1.0,
     "entropy_coeff": 0.1,
     "adv_coeff": 0.5,
     "kl_coeff": 0.01

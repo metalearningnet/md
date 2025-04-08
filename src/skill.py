@@ -15,7 +15,6 @@ class SkillMemory(nn.Module):
                  mac_depth: int = 4,
                  mac_segment_len: int = 32,
                  mi_coeff: float = 1.0,
-                 forward_coeff: float = 1.0,
                  entropy_coeff: float = 0.1,
                  adv_coeff: float = 0.5,
                  kl_coeff: float = 0.01):
@@ -72,14 +71,6 @@ class SkillMemory(nn.Module):
         self.prior_mean = nn.Linear(hidden_dim, hidden_dim)
         self.prior_std = nn.Linear(hidden_dim, hidden_dim)
 
-        # ========== Forward Model ==========
-        self.forward_model = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, state_embed_dim)
-        )
-
         # ========== MD Objective Components ==========
         self.disc_gru = nn.GRU(hidden_dim * 2, hidden_dim, batch_first=True)
         self.disc_linear = nn.Linear(hidden_dim, 1)
@@ -93,7 +84,6 @@ class SkillMemory(nn.Module):
 
         # ========== Loss Coefficients ==========
         self.mi_coeff = mi_coeff
-        self.forward_coeff = forward_coeff
         self.entropy_coeff = entropy_coeff
         self.adv_coeff = adv_coeff
         self.kl_coeff = kl_coeff
@@ -142,7 +132,7 @@ class SkillMemory(nn.Module):
         }
 
     def compute_losses(self, batch):
-        states, actions, next_states = batch
+        states, actions = batch
         outputs = self.forward(states)
         
         # ===== 1. I(S;M) =====
@@ -157,29 +147,23 @@ class SkillMemory(nn.Module):
         mi_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores)) + \
                   F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
 
-        # ===== 2. Forward Prediction =====
-        forward_input = torch.cat([outputs["state_embed"][:, :-1], m_seq_aligned[:, :-1]], dim=-1)
-        forward_pred = self.forward_model(forward_input)
-        forward_loss = F.mse_loss(forward_pred, next_states[:, 1:])
-
-        # ===== 3. Action Entropy =====
+        # ===== 2. Action Entropy =====
         action_logits = self.policy(torch.cat([outputs["state_embed"], m_seq_aligned], dim=-1))
         entropy = Categorical(logits=action_logits).entropy().mean()
 
-        # ===== 4. Adversarial Loss =====
+        # ===== 3. Adversarial Loss =====
         actions_expanded = actions.unsqueeze(-1).expand(-1, -1, self.action_dim)
         real_logits = self.mmi_discriminator(torch.cat([actions_expanded, m_seq_aligned.detach()], dim=-1))
         fake_logits = self.mmi_discriminator(torch.cat([actions_expanded.detach(), m_seq_aligned], dim=-1))
         adv_loss = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits)) + \
                    F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
 
-        # ===== 5. KL Regularization =====
+        # ===== 4. KL Regularization =====
         kl_loss = kl_divergence(outputs["mem_dist"], outputs["prior_dist"]).mean()
 
         # ===== Total Loss =====
         total_loss = (
             self.mi_coeff * mi_loss +
-            self.forward_coeff * forward_loss +
             self.entropy_coeff * -entropy +
             self.adv_coeff * adv_loss +
             self.kl_coeff * kl_loss
@@ -189,40 +173,39 @@ class SkillMemory(nn.Module):
             "total_loss": total_loss,
             "loss_components": {
                 "mi_loss": mi_loss.item(),
-                "forward_loss": forward_loss.item(),
                 "entropy": entropy.item(),
                 "adv_loss": adv_loss.item(),
                 "kl_loss": kl_loss.item()
             }
         }
 
-    def get_action(self, state, deterministic=False):
-        """Generate action for given state and skill"""
+    def generate(self, states):
+        """Generate action logits for given states"""
         with torch.no_grad():
             # ===== 1. Input Handling =====
             device = next(self.parameters()).device
 
             # Ensure proper tensor dimensions
-            original_dims = state.dim()
+            original_dims = states.dim()
             if original_dims == 1:  # Single sample (state_dim,)
-                state = state.unsqueeze(0).unsqueeze(0)  # [1, 1, state_dim]
+                states = states.unsqueeze(0).unsqueeze(0)  # [1, 1, state_dim]
                 seq_len = 1
             elif original_dims == 2:  # Batch without sequence [B, state_dim]
-                state = state.unsqueeze(1)  # [B, 1, state_dim]
+                states = states.unsqueeze(1)  # [B, 1, state_dim]
                 seq_len = 1
             else:  # Full sequence [B, T, state_dim]
-                seq_len = state.size(1)
+                seq_len = states.size(1)
 
             # Convert to proper types
-            state = state.float().to(device)
+            states = states.float().to(device)
 
             # ===== 2. Embedding Processing =====
             # State embedding (always 3D: [B, T, H])
-            state_embed = self.state_embedding(state)
+            state_embed = self.state_embedding(states)
 
             # ===== 3. MAC Processing =====
             # Prepare valid token indices
-            batch_size = state.size(0)
+            batch_size = states.size(0)
             dummy_tokens = torch.zeros(
                 batch_size, seq_len,
                 dtype=torch.long,
@@ -238,7 +221,7 @@ class SkillMemory(nn.Module):
             assert mac_output.shape[-1] == self.hidden_dim, f"MAC output dim {mac_output.shape[-1]} != hidden_dim {self.hidden_dim}"
 
             # ===== 4. Memory Projection =====
-            m = self.memory_proj(mac_output[:, -1, :])  # Last timestep
+            m = self.memory_proj(mac_output).squeeze(2)
 
             # ===== 5. Action Generation =====
             policy_input = torch.cat([
@@ -246,17 +229,9 @@ class SkillMemory(nn.Module):
                 m
             ], dim=-1)
             
-            logits = self.policy(policy_input)
-
-            # ===== 6. Output Formatting =====
-            if deterministic:
-                action = logits.argmax(dim=-1)
-            else:
-                action = Categorical(logits=logits).sample()
-
-            # Restore original dimensions
+            action_logits = self.policy(policy_input)
             if original_dims == 1:
-                action = action.squeeze(0)
+                action_logits = action_logits.squeeze(0)
                 m = m.squeeze(0)
 
-            return action, m
+            return action_logits, m

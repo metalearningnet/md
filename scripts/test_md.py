@@ -53,11 +53,11 @@ class TestMD(unittest.TestCase):
         self.assertEqual(outputs['lm_logits'].shape, 
                         (self.batch_size, self.seq_len * 2, self.model.lm_vocab_size))
         self.assertEqual(outputs['action_logits'].shape,
-                        (self.batch_size, self.seq_len * 2, self.model.skill_memory.action_dim))
+                        (self.batch_size, self.seq_len, self.model.skill_memory.action_dim))
         
         # Check memory outputs
-        self.assertEqual(outputs['memory_output']['m_seq'].shape[0], self.batch_size)
-        self.assertEqual(outputs['memory_output']['m_seq'].shape[-1], self.model.skill_memory.hidden_dim)
+        self.assertEqual(outputs['skill_memory'].shape[0], self.batch_size)
+        self.assertEqual(outputs['skill_memory'].shape[-1], self.model.skill_memory.hidden_dim)
     
     def test_parameter_update(self):
         params = []
@@ -101,13 +101,13 @@ class TestMD(unittest.TestCase):
         # Check action projection dimensions
         self.assertEqual(
             outputs['action_logits'].shape,
-            (self.batch_size, self.seq_len * 2, self.model.skill_memory.action_dim)
+            (self.batch_size, self.seq_len, self.model.skill_memory.action_dim)
         )
         
         # Validate memory outputs
-        mem_out = outputs['memory_output']
-        self.assertEqual(mem_out['m_seq'].shape[0], self.batch_size)
-        self.assertEqual(mem_out['m_seq'].shape[-1], self.model.skill_memory.hidden_dim)
+        mem_out = outputs['skill_memory']
+        self.assertEqual(mem_out.shape[0], self.batch_size)
+        self.assertEqual(mem_out.shape[-1], self.model.skill_memory.hidden_dim)
     
     def test_parameter_freezing(self):
         """Ensure pretrained weights are frozen while adapters are trainable"""
@@ -116,7 +116,7 @@ class TestMD(unittest.TestCase):
             self.assertFalse(param.requires_grad, f"LLM parameter {name} should be frozen")
             
         # Verify trainable components
-        components = ['adapter', 'action_proj', 'skill_memory']
+        components = ['action_proj', 'skill_memory']
         for comp in components:
             for param in getattr(self.model, comp).parameters():
                 self.assertTrue(param.requires_grad, f"{comp} parameter should be trainable")

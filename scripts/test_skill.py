@@ -20,7 +20,6 @@ class TestSkill(unittest.TestCase):
         # Test data (now using continuous states)
         self.states = torch.randn(self.batch_size, self.seq_len, self.state_dim)
         self.actions = torch.randint(0, self.action_dim, (self.batch_size, self.seq_len))
-        self.next_states = torch.randn(self.batch_size, self.seq_len, self.state_dim)
         
         # Updated MD configuration
         self.skill_memory = SkillMemory(
@@ -38,7 +37,6 @@ class TestSkill(unittest.TestCase):
         self.assertTrue(hasattr(self.skill_memory, 'mac'))
         self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
         self.assertTrue(hasattr(self.skill_memory, 'policy'))
-        self.assertTrue(hasattr(self.skill_memory, 'forward_model'))
         
         # Check output dimensions
         self.assertEqual(self.skill_memory.policy[-1].out_features, self.action_dim)
@@ -48,33 +46,41 @@ class TestSkill(unittest.TestCase):
         """Test float vs long input handling"""
         # Float states
         float_state = torch.randn(self.state_dim)
-        _, m = self.skill_memory.get_action(float_state)
-        self.assertEqual(m.shape[-1], self.hidden_dim)  # Verify hidden dimension
+        _, m = self.skill_memory.generate(float_state)
+        self.assertEqual(m.shape[-1], self.hidden_dim)
         
         # Integer states (simulating tokens)
         int_state = torch.randint(0, 100, (self.state_dim,))
-        _, m = self.skill_memory.get_action(int_state)
+        _, m = self.skill_memory.generate(int_state)
         self.assertEqual(m.shape[-1], self.hidden_dim)
 
     def test_input_type_handling(self):
         """Test float vs long input handling"""
         # Float states
         float_state = torch.randn(self.state_dim)
-        action, _ = self.skill_memory.get_action(float_state)
-        self.assertTrue(isinstance(action.item(), int))
+        action_logits, _ = self.skill_memory.generate(float_state)
+        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
+        self.assertTrue(
+            action_logits.dtype in (torch.float32, torch.float64),
+            "Tensor should be float32 or float64"
+        )
         
         # Integer states (simulating tokens)
         int_state = torch.randint(0, 100, (self.state_dim,))
-        action, _ = self.skill_memory.get_action(int_state)
-        self.assertTrue(isinstance(action.item(), int))
-
+        action_logits, _ = self.skill_memory.generate(int_state)
+        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
+        self.assertTrue(
+            action_logits.dtype in (torch.float32, torch.float64),
+            "Tensor should be float32 or float64"
+        )
+        
     def test_loss_computation(self):
         """Test loss components are computed"""
-        batch = (self.states, self.actions, self.next_states)
+        batch = (self.states, self.actions)
         losses = self.skill_memory.compute_losses(batch)
         
         # Check all loss components exist
-        required_losses = ['mi_loss', 'forward_loss', 'entropy', 'adv_loss', 'kl_loss']
+        required_losses = ['mi_loss', 'entropy', 'adv_loss', 'kl_loss']
         self.assertIn('total_loss', losses)
         self.assertIn('loss_components', losses)
         for loss_name in required_losses:
@@ -87,14 +93,8 @@ class TestSkill(unittest.TestCase):
     def test_action_generation(self):
         """Test action generation"""
         state = torch.randn(self.state_dim)
-        
-        # Test both modes
-        action_det, m = self.skill_memory.get_action(state, deterministic=True)
-        self.assertTrue(0 <= action_det.item() < self.action_dim)
-        self.assertEqual(m.squeeze().shape, (self.hidden_dim,))
-        
-        action_stoch, m = self.skill_memory.get_action(state, deterministic=False)
-        self.assertTrue(0 <= action_stoch.item() < self.action_dim)
+        action_logits, m = self.skill_memory.generate(state)
+        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
         self.assertEqual(m.squeeze().shape, (self.hidden_dim,))
 
     def test_gradient_flow(self):
@@ -102,8 +102,7 @@ class TestSkill(unittest.TestCase):
         self.skill_memory.train()
         batch = (
             self.states,
-            self.actions,
-            self.next_states
+            self.actions
         )
         
         losses = self.skill_memory.compute_losses(batch)
