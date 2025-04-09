@@ -194,6 +194,7 @@ class TestSkill(unittest.TestCase):
 
     def test_device_portability(self):
         """Test model can move between devices"""
+        # Test CUDA if available
         if torch.cuda.is_available():
             try:
                 # Move to GPU
@@ -203,15 +204,35 @@ class TestSkill(unittest.TestCase):
                 # Forward pass on GPU
                 outputs = gpu_model(gpu_states)
                 self.assertEqual(outputs['m_seq'].device.type, 'cuda',
-                              "Output should be on GPU")
+                            "Output should be on GPU")
                 
                 # Move back to CPU
                 cpu_model = gpu_model.cpu()
                 cpu_outputs = cpu_model(self.states)
                 self.assertEqual(cpu_outputs['m_seq'].device.type, 'cpu',
-                              "Output should be on CPU")
+                            "Output should be on CPU")
             except RuntimeError as e:
-                self.fail(f"Device portability failed: {str(e)}")
+                self.fail(f"CUDA device portability failed: {str(e)}")
+        
+        # Test MPS if available (for Apple Silicon)
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            try:
+                # Move to MPS
+                mps_model = self.skill_memory.to('mps')
+                mps_states = self.states.to('mps')
+                
+                # Forward pass on MPS
+                outputs = mps_model(mps_states)
+                self.assertEqual(outputs['m_seq'].device.type, 'mps',
+                            "Output should be on MPS")
+                
+                # Move back to CPU
+                cpu_model = mps_model.cpu()
+                cpu_outputs = cpu_model(self.states)
+                self.assertEqual(cpu_outputs['m_seq'].device.type, 'cpu',
+                            "Output should be on CPU")
+            except RuntimeError as e:
+                self.fail(f"MPS device portability failed: {str(e)}")
 
 if __name__ == '__main__':
     unittest.main()

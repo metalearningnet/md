@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from pathlib import Path
-from utils import info, cfg
 from skill import SkillMemory
 from typing import Dict, Optional
+from utils import warn, info, cfg, device_type
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 class MD(nn.Module):
@@ -27,16 +27,20 @@ class MD(nn.Module):
         self.skill_memory = self._init_skill_memory()
 
         # 3. Load pretrained model weights
-        self.lm = AutoModelForCausalLM.from_pretrained(
-            pretrained_model_dir,
-            config=self.lm_config
-        )
+        self.lm = self._init_lm(pretrained_model_dir)
         
         # 4. Configure model components
         self._init_action_projection()
         
         if freeze_pretrained:
             self._freeze_pretrained()
+
+    def _init_lm(self, model_dir: str):
+        return AutoModelForCausalLM.from_pretrained(
+            model_dir,
+            config=self.lm_config,
+            trust_remote_code=True
+        )
 
     def _init_skill_memory(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""
@@ -96,7 +100,7 @@ class MD(nn.Module):
         return {
             'skill_memory': m,
             'lm_logits': lm_out.logits,
-            'action_logits': action_embeds
+            'action_logits': action_logits
         }
 
     def _create_position_ids(self, input_ids, action_embeds):

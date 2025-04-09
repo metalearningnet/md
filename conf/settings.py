@@ -24,4 +24,3 @@ LOADER = {
 
 EPOCHS = 1
 BATCH_SIZE = 1
-VERBOSE = False

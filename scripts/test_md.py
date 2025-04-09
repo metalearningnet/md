@@ -8,7 +8,6 @@ _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
 from md import MD
-from utils import device_type
 
 class TestMD(unittest.TestCase):
     def setUp(self):
@@ -166,39 +165,73 @@ class TestMD(unittest.TestCase):
         inputs = self._create_dummy_inputs()
         devices = [
             torch.device("cpu"),
-            torch.device("cuda:0") if torch.cuda.is_available() else None
+            torch.device("cuda:0") if torch.cuda.is_available() else None,
+            torch.device("mps") if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else None
         ]
         
         for device in devices:
             if device is None:
                 continue
                 
-            self.model.to(device)
-            device_inputs = {k: v.to(device) for k, v in inputs.items()}
-            outputs = self.model(**device_inputs)
-            
-            # Compare device types directly
-            self.assertEqual(outputs['lm_logits'].device.type, device.type)
-            # Optional: Verify specific index if needed
-            if device.type == 'cuda':
-                self.assertEqual(outputs['lm_logits'].device.index, 0)
+            try:
+                # Move model and inputs to target device
+                self.model.to(device)
+                device_inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                # Forward pass
+                outputs = self.model(**device_inputs)
+                
+                # Verify output device matches
+                self.assertEqual(outputs['lm_logits'].device.type, device.type,
+                            f"Output device {outputs['lm_logits'].device.type} "
+                            f"doesn't match expected {device.type}")
+                
+                # Verify CUDA device index when applicable
+                if device.type == 'cuda':
+                    self.assertEqual(outputs['lm_logits'].device.index, 0,
+                                "CUDA device index should be 0")
+                
+                # Verify MPS specific checks if needed
+                if device.type == 'mps':
+                    # Add any MPS-specific verification here
+                    pass
+                    
+            finally:
+                # Clean up by moving model back to CPU
+                self.model.cpu()
+                # Clear any gradients that might have been created
+                for param in self.model.parameters():
+                    if param.grad is not None:
+                        param.grad = None
 
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_mixed_precision(self):
-        """Test FP16 compatibility"""        
+        """Test FP16 compatibility on supported devices"""
         inputs = self._create_dummy_inputs()
-        with torch.autocast(
-            device_type=device_type, 
-            dtype=torch.float16 if device_type == "cuda" else None, 
-            enabled=(device_type == "cuda")
-        ):
-            outputs = self.model(**inputs)
-            loss = outputs['lm_logits'].mean() + outputs['action_logits'].mean()
-            loss.backward()
-        # Verify no NaNs in gradients
-        for param in self.model.parameters():
-            if param.grad is not None:
-                self.assertFalse(torch.isnan(param.grad).any())
+        
+        # Test CUDA if available
+        if torch.cuda.is_available():
+            device_type = "cuda"
+            with torch.autocast(
+                device_type=device_type,
+                dtype=torch.float16,
+                enabled=True
+            ):
+                try:
+                    outputs = self.model.to(device_type)(**{k: v.to(device_type) for k, v in inputs.items()})
+                    loss = outputs['lm_logits'].mean() + outputs['action_logits'].mean()
+                    loss.backward()
+                    
+                    # Verify no NaNs in gradients
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            self.assertFalse(torch.isnan(param.grad).any(), 
+                                        "Found NaN in CUDA gradients")
+                finally:
+                    # Clean up by moving model back to CPU
+                    self.model.cpu()
+                    for param in self.model.parameters():
+                        if param.grad is not None:
+                            param.grad = None
 
 if __name__ == "__main__":
     unittest.main()

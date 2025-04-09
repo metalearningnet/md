@@ -10,8 +10,7 @@ usage() {
 
 install_model() {
     echo "[INFO] Installing model..."
-    python3 scripts/get_model.py
-    if [ $? -ne 0 ]; then
+    if ! python3 scripts/get_model.py; then
         echo "[ERROR] Model installation failed. Exiting..."
         exit 1
     fi
@@ -31,7 +30,6 @@ while [ $# -gt 0 ]; do
             ;;
         *)
             echo "[ERROR] Unknown option '$1'. Use -h or --help for usage."
-            usage
             exit 1
             ;;
     esac
@@ -42,27 +40,18 @@ case "$MODE" in
         install_model
         ;;
     *)
-        if [ ! -d $MODEL_DIR ]; then
-            echo "[INFO] Model directory not found. Installing model first..."
-            install_model
-        fi
-
         echo "[INFO] Installing Python packages..."
-        pip install transformers
-        pip install sentencepiece
-        pip install accelerate
-        pip install evaluate
-        pip install tensordict
-        pip install einops
-        pip install einx
-        pip install axial_positional_embedding
-        pip install rotary-embedding-torch
-        pip install x-transformers
-        pip install hyper_connections
-        
-        if [ $? -ne 0 ]; then
+        PACKAGES=(
+            transformers sentencepiece accelerate evaluate tensordict einops einx
+            axial_positional_embedding rotary-embedding-torch x-transformers hyper_connections
+        )
+        if ! pip install "${PACKAGES[@]}"; then
             echo "[ERROR] Python package installation failed. Exiting..."
             exit 1
+        fi
+
+        if [ ! -d "$MODEL_DIR" ]; then
+            echo "[WARN] Model directory not found. Run '$0 --model' to install the model."
         fi
         ;;
 esac

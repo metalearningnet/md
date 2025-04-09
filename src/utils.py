@@ -7,7 +7,11 @@ _root_dir = Path(__file__).parent.parent
 _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
-from settings import VERBOSE, MODEL, SKILL_MEMORY, LOADER, BATCH_SIZE, EPOCHS
+import settings
+from settings import MODEL, SKILL_MEMORY, LOADER, BATCH_SIZE, EPOCHS
+
+WARN = getattr(settings, 'WARN', True)
+VERBOSE = getattr(settings, 'VERBOSE', False)
 
 USE_SDPA = False
 MD_FILE = 'md.pt'
@@ -18,6 +22,10 @@ ACTION_START = 1 << 32 # Starting position for action embeddings
 def info(s):
     if VERBOSE:
         print(f"[INFO] {s}")
+
+def warn(s):
+    if WARN:
+        print(f"[WARN] {s}")
 
 def get_device():
     if torch.cuda.is_available():
@@ -105,7 +113,6 @@ def calculate_lm_loss(outputs, batch, loss_fn, device):
     )
 
 def md_train(model, optimizer, loader, device, scaler, scheduler, clip_grad_norm=1.0):
-    """Enhanced training epoch with mixed precision and gradient clipping"""
     model.train()
     metrics = {
         'total_loss': 0.0,
