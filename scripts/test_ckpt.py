@@ -25,6 +25,7 @@ class TestCkpt(unittest.TestCase):
         # Common test arguments
         self.test_args = {
             "model_path": self.save_path,
+            "batch_size": 16,
             "dataset_name": "ag_news"
         }
 

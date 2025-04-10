@@ -179,7 +179,7 @@ class MDLoader(Dataset):
                 "raw_text": text,
                 "states": states.cpu(),
                 "input_ids": tokens[:-1],
-                "labels": tokens[1:],  # This will be used for both LM and action loss
+                "labels": tokens[1:],
             }
         except Exception as e:
             raise RuntimeError(f"Failed processing example {idx}: {str(e)}")
@@ -310,7 +310,7 @@ class MDLoader(Dataset):
 
     def get_dataloader(
         self, 
-        batch_size: int = cfg.batch_size,
+        batch_size: int,
         shuffle: Optional[bool] = None,
         drop_last: bool = False
     ) -> DataLoader:
@@ -328,7 +328,7 @@ class MDLoader(Dataset):
 
     def get_dataloaders(
         self, 
-        batch_size: int = cfg.batch_size,
+        batch_size: int,
         val_batch_size: Optional[int] = None,
         val_split: Optional[float] = None,
         seed: int = 42

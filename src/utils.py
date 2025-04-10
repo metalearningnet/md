@@ -1,5 +1,6 @@
 import sys
 import torch
+from tqdm import tqdm
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -8,16 +9,22 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, SKILL_MEMORY, LOADER, BATCH_SIZE, EPOCHS
+from settings import MODEL, SKILL_MEMORY, LOADER
 
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
 USE_SDPA = False
+
 MD_FILE = 'md.pt'
 SAVE_DIR = Path('checkpoints')
 MODEL_DIR = Path(__file__).parent.parent  / 'model'
-ACTION_START = 1 << 32 # Starting position for action embeddings
+
+ACCELERATOR = "auto"
+PRECISION = "16-mixed"
+
+# Starting position for action embeddings
+ACTION_START = 1 << 32
 
 def info(s):
     if VERBOSE:
@@ -27,36 +34,19 @@ def warn(s):
     if WARN:
         print(f"[WARN] {s}")
 
-def get_device():
-    if torch.cuda.is_available():
-        # NVIDIA GPU is available
-        device_type = "cuda"
-        info("CUDA is available. Using GPU.")
-    elif torch.backends.mps.is_available():
-        # Apple Silicon GPU is available (MPS backend)
-        device_type = "mps"
-        info("Apple Silicon GPU is available. Using MPS.")
-    else:
-        # Fallback to CPU
-        device_type = "cpu"
-        info("No GPU available. Using CPU.")
-    
-    return device_type, torch.device(device_type)
-
-device_type, device = get_device()
-
 @dataclass
 class Cfg:
     model: dict
-    epochs: int
     loader: dict
     md_file: str
     use_sdpa: bool
     save_dir: Path
-    batch_size: int
     model_dir: Path
+    precision: str
+    accelerator: str
     action_start: int
     skill_memory: dict
+    
     
     @property
     def model_name(self):
@@ -73,20 +63,20 @@ class Cfg:
 cfg = Cfg(
     model=MODEL,
     loader=LOADER,
-    epochs=EPOCHS,
     md_file=MD_FILE,
     save_dir=SAVE_DIR,
     use_sdpa=USE_SDPA,
     model_dir=MODEL_DIR,
-    batch_size=BATCH_SIZE,
+    precision=PRECISION,
+    accelerator=ACCELERATOR,
     action_start=ACTION_START,
     skill_memory=SKILL_MEMORY
 )
 
-def calculate_lm_loss(outputs, batch, loss_fn, device):
+def calculate_lm_loss(outputs, batch, loss_fn):
     # Get dimensions
     lm_logits = outputs['lm_logits']
-    input_ids = batch['input_ids'].to(device)
+    input_ids = batch['input_ids']
     _, logits_seq_len = lm_logits.size(0), lm_logits.size(1)
     input_len = input_ids.size(1)
     
@@ -112,7 +102,7 @@ def calculate_lm_loss(outputs, batch, loss_fn, device):
         labels.reshape(-1)[mask]
     )
 
-def md_train(model, optimizer, loader, device, scaler, scheduler, clip_grad_norm=1.0):
+def md_train(model, optimizer, loader, scheduler, fabric):
     model.train()
     metrics = {
         'total_loss': 0.0,
@@ -121,39 +111,44 @@ def md_train(model, optimizer, loader, device, scaler, scheduler, clip_grad_norm
     
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
-    for batch in loader:
+    pbar = tqdm(
+        loader,
+        desc="Training",
+        leave=False,
+        disable=not fabric.is_global_zero,
+        dynamic_ncols=True
+    )
+
+    for batch in pbar:
         optimizer.zero_grad()
+
+        # Forward pass
+        outputs = model(
+            states=batch['states'],
+            input_ids=batch['input_ids'],
+            attention_mask=batch['attention_mask']
+        )
         
-        with torch.autocast(
-            device_type=device_type, 
-            dtype=torch.float16 if device_type == "cuda" else None, 
-            enabled=(device_type == "cuda")
-        ):
-            # Forward pass
-            outputs = model(
-                states=batch['states'].to(device),
-                input_ids=batch['input_ids'].to(device),
-                attention_mask=batch['attention_mask'].to(device)
-            )
-            
-            # Loss calculations
-            lm_loss = calculate_lm_loss(outputs, batch, lm_loss_fn, device)
-            total_loss = lm_loss
+        # Loss calculations
+        loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            warn("NaN/Inf loss detected, skipping batch")
+            continue
+
+        has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
+        has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
+        if has_nan or has_inf:
+            warn("NaN/Inf gradients detected, skipping update")
+            optimizer.zero_grad()
+            continue
         
-        # Backprop with scaling
-        scaler.scale(total_loss).backward()
-        
-        # Gradient clipping
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-        
-        # Optimizer step
-        scaler.step(optimizer)
-        scaler.update()
+        fabric.backward(loss)
+        fabric.clip_gradients(model, optimizer, max_norm=1.0, error_if_nonfinite=False)
+        optimizer.step()
         scheduler.step()
         
         # Update metrics
-        metrics['total_loss'] += total_loss.item()
+        metrics['total_loss'] += loss.item()
         metrics['num_batches'] += 1
     
     # Normalize metrics
@@ -162,23 +157,29 @@ def md_train(model, optimizer, loader, device, scaler, scheduler, clip_grad_norm
     
     return metrics
 
-def md_validate(model, loader, device) -> dict:
+def md_validate(model, loader, fabric) -> dict:
     model.eval()
     metrics = {
         'total_loss': 0.0,
-        'perplexity': 0.0,
+        'avg_loss': 0.0,
         'num_samples': 0,
         'num_tokens': 0
     }
     
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
-    with torch.no_grad(), torch.autocast(device_type=device_type, enabled=(device_type == "cuda")):
-        for batch in loader:
+    with torch.no_grad():
+        pbar = tqdm(
+            loader, 
+            desc="Validating", 
+            disable=not fabric.is_global_zero,
+            dynamic_ncols=True
+        )
+        for batch in pbar:
             # Device transfer
-            states = batch['states'].to(device)
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            states = batch['states']
+            input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
 
             # Forward pass
             outputs = model(states=states, input_ids=input_ids, attention_mask=attention_mask)
@@ -197,7 +198,6 @@ def md_validate(model, loader, device) -> dict:
             assert sliced_lm_logits.size(1) == lm_labels.size(1), "LM dimension mismatch"
 
             # --- Loss Computations ---
-            # LM Loss
             lm_loss = lm_loss_fn(
                 sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
                 lm_labels.flatten()[lm_mask]
@@ -208,13 +208,15 @@ def md_validate(model, loader, device) -> dict:
             metrics['num_samples'] += input_ids.size(0)
             metrics['num_tokens'] += lm_mask.sum().item()
 
+    gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
+    gathered_samples = fabric.all_gather(torch.tensor(metrics['num_samples'])).sum()
+    if fabric.is_global_zero and gathered_samples > 0:
+        avg_loss = gathered_loss / gathered_samples
+        metrics['avg_loss'] = avg_loss
+        print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
+
     # --- Metric Normalization ---
     if metrics['num_samples'] > 0:
         metrics['total_loss'] /= metrics['num_samples']
 
-        if metrics['num_tokens'] > 0:
-            metrics['lm_loss'] /= metrics['num_tokens']
-            metrics['perplexity'] = torch.exp(torch.tensor(metrics['lm_loss'])).item()
-
-    del metrics['num_samples'], metrics['num_tokens']
     return metrics

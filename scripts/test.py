@@ -1,6 +1,7 @@
 import sys
 import torch
 import argparse
+import lightning as L
 from pathlib import Path
 
 _src_dir = Path(__file__).parent.parent / 'src'
@@ -8,31 +9,33 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, device
+from utils import md_validate, cfg
 
-def test(model_path: Path, dataset_name: str, dataset_config: str = None):
+def test(model_path: Path, batch_size: int, dataset_name: str, dataset_config: str = None):
     """Main evaluation function"""
+    fabric = L.Fabric(accelerator=cfg.accelerator, precision=cfg.precision)
+    fabric.launch()
+
+    checkpoint = torch.load(model_path)
+    model_state_dict = checkpoint['model']
     model = MD.from_pretrained()
-    model.load_state_dict(torch.load(model_path))
-    model = model.to(device)
+    model.load_state_dict(model_state_dict)
+    model = fabric.setup(model)
     
-    # Prepare test dataset with test split
     loader = MDLoader(
         dataset_name=dataset_name,
         dataset_config=dataset_config,
         split="test"
     )
-    test_loader = loader.get_dataloader(shuffle=False)
     
-    # Use md_validate instead of md_test
-    test_metrics = md_validate(model, test_loader, device)
-    
-    # Rename metrics for consistency (optional)
-    test_metrics['action_accuracy'] = test_metrics.pop('action_acc', 0.0)
-    
+    test_loader = loader.get_dataloader(batch_size=batch_size, shuffle=False)
+    test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
+    test_metrics = md_validate(model, test_loader, fabric)
+
     print("\nTest Results:")
     for k, v in test_metrics.items():
         print(f"{k:20}: {v:.4f}")
+    
     return test_metrics
 
 def main():
@@ -43,6 +46,8 @@ def main():
                       help="HF dataset configuration name")
     parser.add_argument("--save_dir", type=str, default="checkpoints",
                       help="Checkpoint directory")
+    parser.add_argument("--batch_size", type=int, default=1,
+                      help="Training batch size")
     args = parser.parse_args()
     
     save_dir = Path(args.save_dir)
@@ -51,9 +56,12 @@ def main():
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}")
     
-    test(model_path=model_path,
+    test(
+        model_path=model_path,
+        batch_size=args.batch_size,
         dataset_name=args.name, 
-        dataset_config=args.config)
+        dataset_config=args.config,
+    )
 
 if __name__ == "__main__":
     main()

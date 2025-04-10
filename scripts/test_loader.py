@@ -189,7 +189,7 @@ class TestLoader(unittest.TestCase):
         # Empty dataset split
         empty_loader = MDLoader(dataset_name="", dataset=Dataset.from_dict({}))
         with self.assertRaises(ValueError):
-            empty_loader.get_dataloaders(val_split=0.2)
+            empty_loader.get_dataloaders(batch_size=self.test_config["batch_size"], val_split=0.2)
 
     def test_embeddings_consistency(self):
         """Test if states match MDLoader's EXACT generation pipeline"""
@@ -258,7 +258,7 @@ class TestLoader(unittest.TestCase):
         # Test different split ratios
         for split_ratio in [0.2, 0.5, 0.8]:
             train_loader, val_loader = full_loader.get_dataloaders(
-                batch_size=2,
+                batch_size=self.test_config["batch_size"],
                 val_split=split_ratio
             )
             
@@ -290,7 +290,7 @@ class TestLoader(unittest.TestCase):
             state_window=self.test_config["state_window"]
         )
         train_loader, val_loader = main_loader.get_dataloaders(
-            batch_size=2,
+            batch_size=self.test_config["batch_size"],
             val_split=0.3
         )
         
@@ -311,15 +311,15 @@ class TestLoader(unittest.TestCase):
         )
         
         # Get two splits with same seed
-        l1_train, l1_val = loader.get_dataloaders(val_split=0.2, seed=42)
-        l2_train, l2_val = loader.get_dataloaders(val_split=0.2, seed=42)
+        l1_train, l1_val = loader.get_dataloaders(batch_size=self.test_config["batch_size"], val_split=0.2, seed=42)
+        l2_train, l2_val = loader.get_dataloaders(batch_size=self.test_config["batch_size"], val_split=0.2, seed=42)
         
         # Compare indices
         self.assertEqual(l1_train.dataset.indices, l2_train.dataset.indices)
         self.assertEqual(l1_val.dataset.indices, l2_val.dataset.indices)
         
         # Test different seeds produce different splits
-        _, l3_val = loader.get_dataloaders(val_split=0.2, seed=24)
+        _, l3_val = loader.get_dataloaders(batch_size=self.test_config["batch_size"], val_split=0.2, seed=24)
         self.assertNotEqual(l1_val.dataset.indices, l3_val.dataset.indices)
 
     def test_predefined_splits(self):
@@ -333,7 +333,6 @@ class TestLoader(unittest.TestCase):
                 )
                 self.assertGreater(len(loader), 0)
             except ValueError:
-                # Handle datasets without this split
                 pass
 
 if __name__ == "__main__":

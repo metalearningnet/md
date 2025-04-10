@@ -42,7 +42,7 @@ case "$MODE" in
     *)
         echo "[INFO] Installing Python packages..."
         PACKAGES=(
-            transformers sentencepiece accelerate evaluate tensordict einops einx
+            transformers sentencepiece accelerate evaluate tensordict einops einx lightning
             axial_positional_embedding rotary-embedding-torch x-transformers hyper_connections
         )
         if ! pip install "${PACKAGES[@]}"; then

@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from pathlib import Path
+from utils import info, cfg
 from skill import SkillMemory
 from typing import Dict, Optional
-from utils import warn, info, cfg, device_type
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 class MD(nn.Module):
@@ -20,6 +20,7 @@ class MD(nn.Module):
         self.lm_hidden_size = self.lm_config.hidden_size
         self.lm_vocab_size = self.lm_config.vocab_size
         self.lm_config.use_sdpa = cfg.use_sdpa
+        self.lm_dir = pretrained_model_dir
         self.state_embed_dim = self.lm_hidden_size
         info(f"Base LLM (name: {cfg.model_name} hidden_size: {self.lm_hidden_size} vocab_size: {self.lm_vocab_size})")
      
@@ -27,7 +28,7 @@ class MD(nn.Module):
         self.skill_memory = self._init_skill_memory()
 
         # 3. Load pretrained model weights
-        self.lm = self._init_lm(pretrained_model_dir)
+        self.lm = self._init_lm()
         
         # 4. Configure model components
         self._init_action_projection()
@@ -35,9 +36,9 @@ class MD(nn.Module):
         if freeze_pretrained:
             self._freeze_pretrained()
 
-    def _init_lm(self, model_dir: str):
+    def _init_lm(self):
         return AutoModelForCausalLM.from_pretrained(
-            model_dir,
+            self.lm_dir,
             config=self.lm_config,
             trust_remote_code=True
         )
@@ -46,9 +47,9 @@ class MD(nn.Module):
         """Initialize SkillMemory with LM-compatible dimensions"""
         skill_params = cfg.skill_memory.copy()
         skill_params.update({
+            'hidden_dim': self.lm_hidden_size,
             'action_dim': self.lm_hidden_size,
-            'state_embed_dim': self.lm_hidden_size,
-            'hidden_dim': self.lm_hidden_size
+            'state_embed_dim': self.lm_hidden_size
         })
         return SkillMemory(**skill_params)
 

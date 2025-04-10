@@ -21,6 +21,3 @@ LOADER = {
     "max_length": 4,
     "state_window": 2
 }
-
-EPOCHS = 1
-BATCH_SIZE = 1
