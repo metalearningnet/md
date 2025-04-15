@@ -20,13 +20,17 @@ class TestCkpt(unittest.TestCase):
         
         # Create dummy model and save
         self.dummy_model = MD()
-        torch.save(self.dummy_model.state_dict(), self.save_path)
+        torch.save({'model': self.dummy_model.state_dict()}, self.save_path)
         
         # Common test arguments
         self.test_args = {
-            "model_path": self.save_path,
-            "batch_size": 16,
-            "dataset_name": "ag_news"
+            'model_path': self.save_path,
+            'batch_size': 16,
+            'dataset_name': 'ag_news',
+            'fabric_config': {
+                'accelerator': cfg.accelerator,
+                'precision': cfg.precision
+            }
         }
 
     def test_evaluation(self):
@@ -35,7 +39,7 @@ class TestCkpt(unittest.TestCase):
         
         # Verify metrics were returned
         self.assertIsInstance(metrics, dict)
-        self.assertIn("total_loss", metrics)
+        self.assertIn('total_loss', metrics)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

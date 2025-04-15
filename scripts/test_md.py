@@ -164,9 +164,9 @@ class TestMD(unittest.TestCase):
         """Verify model works on different devices"""
         inputs = self._create_dummy_inputs()
         devices = [
-            torch.device("cpu"),
-            torch.device("cuda:0") if torch.cuda.is_available() else None,
-            torch.device("mps") if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else None
+            torch.device('cpu'),
+            torch.device('cuda:0') if torch.cuda.is_available() else None,
+            torch.device('mps') if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available() else None
         ]
         
         for device in devices:
@@ -210,7 +210,7 @@ class TestMD(unittest.TestCase):
         
         # Test CUDA if available
         if torch.cuda.is_available():
-            device_type = "cuda"
+            device_type = 'cuda'
             with torch.autocast(
                 device_type=device_type,
                 dtype=torch.float16,
@@ -233,5 +233,5 @@ class TestMD(unittest.TestCase):
                         if param.grad is not None:
                             param.grad = None
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

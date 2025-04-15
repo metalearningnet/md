@@ -125,10 +125,10 @@ class SkillMemory(nn.Module):
         mem_dist = Normal(m_seq, mem_std.expand_as(m_seq))
         
         return {
-            "mem_dist": mem_dist,
-            "prior_dist": Normal(prior_mean, prior_std),
-            "state_embed": state_embed,
-            "m_seq": m_seq
+            'mem_dist': mem_dist,
+            'prior_dist': Normal(prior_mean, prior_std),
+            'state_embed': state_embed,
+            'm_seq': m_seq
         }
 
     def compute_losses(self, batch):
@@ -136,11 +136,11 @@ class SkillMemory(nn.Module):
         outputs = self.forward(states)
         
         # ===== 1. I(S;M) =====
-        m_seq_aligned = outputs["m_seq"].squeeze(2)
-        pos_pairs = torch.cat([outputs["state_embed"], m_seq_aligned], dim=-1)
+        m_seq_aligned = outputs['m_seq'].squeeze(2)
+        pos_pairs = torch.cat([outputs['state_embed'], m_seq_aligned], dim=-1)
         neg_outputs = self.forward(states)
-        neg_m_seq_aligned = neg_outputs["m_seq"].squeeze(2)
-        neg_pairs = torch.cat([outputs["state_embed"], neg_m_seq_aligned], dim=-1)
+        neg_m_seq_aligned = neg_outputs['m_seq'].squeeze(2)
+        neg_pairs = torch.cat([outputs['state_embed'], neg_m_seq_aligned], dim=-1)
         
         pos_scores = self.disc_linear(self.disc_gru(pos_pairs)[0][:, -1])
         neg_scores = self.disc_linear(self.disc_gru(neg_pairs)[0][:, -1])
@@ -148,7 +148,7 @@ class SkillMemory(nn.Module):
                   F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
 
         # ===== 2. Action Entropy =====
-        action_logits = self.policy(torch.cat([outputs["state_embed"], m_seq_aligned], dim=-1))
+        action_logits = self.policy(torch.cat([outputs['state_embed'], m_seq_aligned], dim=-1))
         entropy = Categorical(logits=action_logits).entropy().mean()
 
         # ===== 3. Adversarial Loss =====
@@ -159,7 +159,7 @@ class SkillMemory(nn.Module):
                    F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
 
         # ===== 4. KL Regularization =====
-        kl_loss = kl_divergence(outputs["mem_dist"], outputs["prior_dist"]).mean()
+        kl_loss = kl_divergence(outputs['mem_dist'], outputs['prior_dist']).mean()
 
         # ===== Total Loss =====
         total_loss = (
@@ -170,12 +170,12 @@ class SkillMemory(nn.Module):
         )
         
         return {
-            "total_loss": total_loss,
-            "loss_components": {
-                "mi_loss": mi_loss.item(),
-                "entropy": entropy.item(),
-                "adv_loss": adv_loss.item(),
-                "kl_loss": kl_loss.item()
+            'total_loss': total_loss,
+            'loss_components': {
+                'mi_loss': mi_loss.item(),
+                'entropy': entropy.item(),
+                'adv_loss': adv_loss.item(),
+                'kl_loss': kl_loss.item()
             }
         }
 

@@ -11,7 +11,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_train, md_validate, cfg
+from utils import md_train, md_validate, cfg, add_dist_config
 
 def train(name: str, config: dict) -> None:
     """
@@ -31,9 +31,10 @@ def train(name: str, config: dict) -> None:
             - weight_decay: Weight decay (float)
             - save_dir: Checkpoint directory (str)
             - save_interval: Checkpoint frequency (int)
+            - fabric_config: Configuration options for the Lightning Fabric setup (dict)
     """
     
-    fabric = L.Fabric(accelerator=cfg.accelerator, precision=cfg.precision)
+    fabric = L.Fabric(**config['fabric_config'])
     fabric.launch()
 
     # Initialize model
@@ -43,7 +44,7 @@ def train(name: str, config: dict) -> None:
     trainable_params = []
     for param_group in model.get_trainable_parameters().values():
         trainable_params += [p for p in param_group if p.requires_grad]
-    
+
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=config.get('lr'),
@@ -72,11 +73,16 @@ def train(name: str, config: dict) -> None:
         seed=config.get('seed')
     )
     train_loader = fabric.setup_dataloaders(train_loader, use_distributed_sampler=True)
-    val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
+    if val_loader:
+        val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
    
     # Training utilities
+    if hasattr(optimizer, 'optimizer'):  # For DeepSpeed wrapped optimizers
+        scheduler_optimizer = optimizer.optimizer
+    else:
+        scheduler_optimizer = optimizer
     nr_epochs = config.get('epochs')
-    scheduler = CosineAnnealingLR(optimizer, T_max=nr_epochs)
+    scheduler = CosineAnnealingLR(scheduler_optimizer, T_max=nr_epochs)
     
     # Training loop
     best_val_loss = np.inf
@@ -98,14 +104,14 @@ def train(name: str, config: dict) -> None:
             f"LR: {optimizer.param_groups[0]['lr']:.2e}"
         ]
         
-        val_metrics = md_validate(model, val_loader, fabric) if val_loader else {}
+        val_metrics = md_validate(model, val_loader, fabric)
         if fabric.is_global_zero:
             log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
         
         print(" | ".join(log_info))
         
         # Save best checkpoint
-        if val_loader and val_metrics.get('total_loss', np.inf) < best_val_loss:
+        if val_metrics.get('total_loss', np.inf) < best_val_loss:
             best_val_loss = val_metrics['total_loss']
             torch.save({
                 'model': model.state_dict(),
@@ -126,37 +132,47 @@ def train(name: str, config: dict) -> None:
             print(f"Saved epoch {epoch+1} checkpoint")
 
 def main():
-    parser = argparse.ArgumentParser(description="Train MD Model")
+    parser = argparse.ArgumentParser(description="Train the MD Model")
     
     # Dataset configuration
     parser.add_argument("--name", required=True, 
-                      help="HuggingFace dataset name")
+                        help="HuggingFace dataset name")
     parser.add_argument("--config", default=None,
-                      help="HF dataset configuration name")
+                        help="HF dataset configuration name")
     parser.add_argument("--split", type=str, default=None,
-                      help="Predefined dataset split")
+                        help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
-                      help="Train/val split ratio for datasets without predefined splits")
+                        help="Train/val split ratio for datasets without predefined splits")
     parser.add_argument("--seed", type=int, default=42,
-                      help="Random seed for reproducibility")
+                        help="Random seed for reproducibility")
 
     # Training configuration
     parser.add_argument("--lr", type=float, default=1e-4,
-                      help="Learning rate")
+                        help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
-                      help="Number of training epochs")
+                        help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=1,
-                      help="Training batch size")
+                        help="Training batch size")
     parser.add_argument("--val_split", type=float, default=0.1,
-                      help="Validation split ratio")
+                        help="Validation split ratio")
     parser.add_argument("--weight_decay", type=float, default=0.01,
-                      help="Weight decay")
+                        help="Weight decay")
 
     # System configuration
     parser.add_argument("--save_dir", type=str, default=None,
-                      help="Checkpoint directory")
+                        help="Checkpoint directory")
     parser.add_argument("--save_interval", type=int, default=1,
-                      help="Checkpoint saving frequency")
+                        help="Checkpoint saving frequency")
+
+    # Distributed training configuration
+    parser.add_argument("--dist", action="store_true", default=False,
+                        help="Enable distributed training")
+    parser.add_argument("--addr", type=str, default=None,
+                        help="Master address for distributed training")
+    parser.add_argument("--port", type=int, default=None,
+                        help="Master port for distributed training")
+    parser.add_argument("--nodes", type=int, default=None,
+                        help="The number of nodes for distributed training")
 
     args = parser.parse_args()
     
@@ -175,7 +191,11 @@ def main():
         'batch_size': args.batch_size,
 
         # System parameters
-        'save_interval': args.save_interval
+        'save_interval': args.save_interval,
+        'fabric_config': {
+            'accelerator': cfg.accelerator,
+            'precision': cfg.precision
+        }
     }
     
     if args.save_dir:
@@ -183,8 +203,19 @@ def main():
 
     if args.config:
         config['dataset_config'] = args.config
+
+    if args.dist:
+        add_dist_config(
+            config['fabric_config'],
+            main_addr=args.addr,
+            main_port=args.port,
+            num_nodes=args.nodes,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            epochs=args.epochs
+        )
     
     train(name=args.name, config=config)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

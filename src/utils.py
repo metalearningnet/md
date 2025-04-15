@@ -1,15 +1,28 @@
+import os
 import sys
+import yaml
+import time
 import torch
+import socket
+import signal
+import uvicorn
+import requests
+import subprocess
 from tqdm import tqdm
 from pathlib import Path
+from fastapi import FastAPI
+from pydantic import BaseModel
 from dataclasses import dataclass
+from threading import Thread, Lock
+
+NODE_RANK_COORDINATOR_PORT = 10001
 
 _root_dir = Path(__file__).parent.parent
 _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, SKILL_MEMORY, LOADER
+from settings import MODEL, SKILL_MEMORY, LOADER, PRECISION, ACCELERATOR
 
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
@@ -18,13 +31,15 @@ USE_SDPA = False
 
 MD_FILE = 'md.pt'
 SAVE_DIR = Path('checkpoints')
-MODEL_DIR = Path(__file__).parent.parent  / 'model'
-
-ACCELERATOR = "auto"
-PRECISION = "16-mixed"
+ROOT_DIR = Path(__file__).parent.parent
+MODEL_DIR = ROOT_DIR  / 'model'
+CONF_DIR = ROOT_DIR / 'conf'
+DIST_FILE = 'dist.yaml'
 
 # Starting position for action embeddings
 ACTION_START = 1 << 32
+
+RETRY_MAX = 5
 
 def info(s):
     if VERBOSE:
@@ -46,7 +61,6 @@ class Cfg:
     accelerator: str
     action_start: int
     skill_memory: dict
-    
     
     @property
     def model_name(self):
@@ -72,6 +86,97 @@ cfg = Cfg(
     action_start=ACTION_START,
     skill_memory=SKILL_MEMORY
 )
+
+class RegisterRequest(BaseModel):
+    hostname: str
+
+class NodeRankCoordinator:
+    def __init__(self, num_nodes: int):
+        self.app = FastAPI()
+        self.ranks: Dict[str, int] = {}
+        self.num_nodes = num_nodes
+        self.lock = Lock()
+        self.shutdown_flag = False
+        self.setup_routes()
+
+    def setup_routes(self):
+        @self.app.post('/register')
+        async def register(req: RegisterRequest):
+            hostname = req.hostname
+            with self.lock:
+                if hostname in self.ranks:
+                    return {'node_rank': self.ranks[hostname]}
+
+                if len(self.ranks) >= self.num_nodes:
+                    return {'error': 'Cluster at capacity'}, 400
+
+                assigned_rank = len(self.ranks) + 1
+                self.ranks[hostname] = assigned_rank
+                info(f"Assigned rank {assigned_rank} to {hostname}")
+
+                # Check if all ranks are assigned
+                if len(self.ranks) == self.num_nodes - 1:
+                    info("All ranks assigned. Shutting down node rank coordinator...")
+                    Thread(target=self.graceful_shutdown, daemon=True).start()
+
+                return {'node_rank': assigned_rank}
+
+    def graceful_shutdown(self):
+        """Give clients time to receive responses before shutting down"""
+        time.sleep(2)
+        os._exit(0)
+
+    def start(self):
+        free_port(NODE_RANK_COORDINATOR_PORT)
+        Thread(
+            target=uvicorn.run,
+            args=(self.app,),
+            kwargs={'host': '0.0.0.0', 'port': NODE_RANK_COORDINATOR_PORT, 'log_level': 'error'},
+            daemon=True
+        ).start()
+
+def load_dist_config():
+    with open(CONF_DIR / DIST_FILE) as f:
+        return yaml.safe_load(f)
+
+def add_dist_config(
+        fabric_config: dict, 
+        main_addr: str = None, 
+        main_port: int = None, 
+        num_nodes: int = None, 
+        lr: float = None, 
+        weight_decay: float = None, 
+        epochs: int = None
+    ):
+    dist_config = load_dist_config()
+    if num_nodes != None:
+        dist_config['num_nodes'] = num_nodes
+    if main_port != None:
+        dist_config['main_port'] = main_port
+    if main_addr != None:
+        dist_config['main_addr'] = main_addr
+    if dist_config['num_nodes'] > 1:
+        assert dist_config.get('main_addr'), (
+            'Main address must be specified for distributed training or testing. '
+            'Please check your configuration file.'
+        )
+        node_rank = get_node_rank(
+            dist_config['main_addr'],
+            dist_config['main_port'],
+            dist_config['num_nodes']
+        )
+        os.environ["NODE_RANK"] = str(node_rank)
+        os.environ["MASTER_ADDR"] = dist_config['main_addr']
+        os.environ["MASTER_PORT"] = str(dist_config['main_port'])
+        fabric_config.update({'num_nodes': dist_config['num_nodes']})
+    fabric_config['strategy'] = dist_config['strategy']
+    if dist_config['strategy'] == 'deepspeed':
+        from lightning.fabric.strategies import DeepSpeedStrategy
+        if lr:
+            dist_config['deepspeed']['optimizer']['params']['lr'] = lr
+        if weight_decay:
+            dist_config['deepspeed']['optimizer']['params']['weight_decay'] = weight_decay
+        fabric_config['strategy'] = DeepSpeedStrategy(config=dist_config['deepspeed'])
 
 def calculate_lm_loss(outputs, batch, loss_fn):
     # Get dimensions
@@ -113,7 +218,7 @@ def md_train(model, optimizer, loader, scheduler, fabric):
     
     pbar = tqdm(
         loader,
-        desc="Training",
+        desc='Training',
         leave=False,
         disable=not fabric.is_global_zero,
         dynamic_ncols=True
@@ -158,6 +263,9 @@ def md_train(model, optimizer, loader, scheduler, fabric):
     return metrics
 
 def md_validate(model, loader, fabric) -> dict:
+    if loader == None:
+        return {}
+    
     model.eval()
     metrics = {
         'total_loss': 0.0,
@@ -171,7 +279,7 @@ def md_validate(model, loader, fabric) -> dict:
     with torch.no_grad():
         pbar = tqdm(
             loader, 
-            desc="Validating", 
+            desc='Validating', 
             disable=not fabric.is_global_zero,
             dynamic_ncols=True
         )
@@ -220,3 +328,47 @@ def md_validate(model, loader, fabric) -> dict:
         metrics['total_loss'] /= metrics['num_samples']
 
     return metrics
+
+def free_port(port):
+    try:
+        result = subprocess.check_output(
+            ["lsof", "-t", f"-i:{port}"], text=True
+        ).strip()
+        
+        if result:
+            pids = result.split("\n")
+            info(f"Port {port} is in use by PID(s): {pids}")
+            for pid in pids:
+                os.kill(int(pid), signal.SIGKILL)
+            info(f"Port {port} is now freed.")
+    except subprocess.CalledProcessError:
+        pass
+
+def get_node_rank(main_address: str, main_port: int, num_nodes: int) -> int:
+    hostname = socket.gethostname()
+    host_ip = socket.gethostbyname(hostname)
+    is_main_node = (host_ip == socket.gethostbyname(main_address))
+
+    if is_main_node:
+        info("Starting node rank coordinator...")
+        free_port(main_port)
+        coordinator = NodeRankCoordinator(num_nodes)
+        coordinator.start()
+        return 0
+    else:
+        for attempt in range(RETRY_MAX):
+            try:
+                response = requests.post(
+                    f"http://{main_address}:{NODE_RANK_COORDINATOR_PORT}/register",
+                    json={'hostname': hostname},
+                    timeout=2
+                )
+                if response.status_code == 200:
+                    info(f'node_rank: {response.json()['node_rank']}')
+                    return response.json()['node_rank']
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == RETRY_MAX - 1:
+                    break
+                time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"Failed to contact node rank coordinator at {main_address}")

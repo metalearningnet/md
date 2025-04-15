@@ -1,0 +1,53 @@
+# ------------------------------
+# Hardware Setup
+# ------------------------------
+
+# Distributed training strategy.
+# Options:
+#   - "ddp" for Distributed Data Parallel
+#   - "deepspeed" for DeepSpeed integration
+#   - "fsdp" for Fully Sharded Data Parallel
+strategy: "deepspeed"
+
+# Number of nodes used in distributed training.
+# Set >1 for multi-node training.
+num_nodes: 1
+
+# IP address or hostname of the rank 0 (master) node.
+# Leave empty for single-node training.
+main_address: ""
+
+# Communication port for distributed training.
+main_port: 1112
+
+# ------------------------------
+# DeepSpeed Configuration
+# Only applicable if strategy == "deepspeed"
+# ------------------------------
+deepspeed:
+  # Micro-batch size per GPU
+  train_micro_batch_size_per_gpu: 32
+
+  # Number of steps to accumulate gradients before updating weights
+  gradient_accumulation_steps: 1
+
+  # Optimizer settings
+  optimizer:
+    type: AdamW
+    params:
+      lr: 3e-5
+      weight_decay: 0.01
+
+  zero_optimization:
+    stage: 3 # ZeRO Stage 3: optimizer, gradient, and parameter partitioning
+
+    offload_optimizer:
+      device: "none" # Options: "cpu" or "none"
+      # pin_memory: true  # Optional: use pinned memory if offloading to CPU
+
+    offload_param:
+      device: "none" # Options: "cpu" or "none"
+      # pin_memory: true  # Optional
+
+    overlap_comm: true # Allow overlapping communication and computation
+    contiguous_gradients: true # Allocate gradients contiguously for speed

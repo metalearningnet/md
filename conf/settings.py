@@ -21,3 +21,7 @@ LOADER = {
     "max_length": 4,
     "state_window": 2
 }
+
+ACCELERATOR = "auto" # Options: "cpu", "gpu", "tpu", or "mps"
+
+PRECISION = "bf16-mixed" # Options: "16-mixed", "32-true"

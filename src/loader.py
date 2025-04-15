@@ -22,7 +22,7 @@ class MDLoader(Dataset):
         dataset: Optional[Union[Dataset, DatasetDict]] = None
     ):
         """
-        Memory-efficient data loader for MD model training
+        Data loader for MD model
         
         Args:
             dataset_name: HF dataset identifier
@@ -98,7 +98,7 @@ class MDLoader(Dataset):
         
         # Filter short sequences
         self.dataset = self.dataset.filter(
-            lambda x: len(self.tokenizer.encode(x["text"])) >= self.min_sequence_length,
+            lambda x: len(self.tokenizer.encode(x['text'])) >= self.min_sequence_length,
             num_proc=os.cpu_count()
         )
 
@@ -112,7 +112,7 @@ class MDLoader(Dataset):
     ):
         """Load dataset from HuggingFace Hub"""
         try:
-            load_kwargs = {"name": dataset_config} if dataset_config else {}
+            load_kwargs = {'name': dataset_config} if dataset_config else {}
             
             if split:
                 self.dataset = load_dataset(dataset_name, **load_kwargs, split=split)
@@ -156,14 +156,14 @@ class MDLoader(Dataset):
         """Process single example with enhanced error handling"""
         try:
             example = self.dataset[idx]
-            text = example.get("text", example.get("content", ""))
+            text = example.get('text', example.get('content', ''))
             
             # Tokenization with truncation
             tokens = self.tokenizer.encode(
                 text,
                 max_length=self.max_length,
                 truncation=True,
-                return_tensors="pt"
+                return_tensors='pt'
             )[0]
 
             if len(tokens) < self.min_sequence_length:
@@ -176,10 +176,10 @@ class MDLoader(Dataset):
             states = self._compute_states(embeddings, tokens)
             
             return {
-                "raw_text": text,
-                "states": states.cpu(),
-                "input_ids": tokens[:-1],
-                "labels": tokens[1:],
+                'raw_text': text,
+                'states': states.cpu(),
+                'input_ids': tokens[:-1],
+                'labels': tokens[1:],
             }
         except Exception as e:
             raise RuntimeError(f"Failed processing example {idx}: {str(e)}")
@@ -215,25 +215,15 @@ class MDLoader(Dataset):
         return states
 
     def _process_example(self, example: dict) -> dict:
-        """
-        Process a single example for testing/validation purposes
-        Maintains original non-vectorized state computation for reference
-        
-        Args:
-            example: Raw example dictionary from the dataset
-            
-        Returns:
-            Dictionary containing processed example data
-        """
         try:
-            text = example.get("text", example.get("content", ""))
+            text = example.get('text')
             
             # Tokenize with truncation
             tokens = self.tokenizer.encode(
                 text, 
                 max_length=self.max_length, 
                 truncation=True,
-                return_tensors="pt"
+                return_tensors='pt'
             )[0]
 
             if len(tokens) < self.min_sequence_length:
@@ -262,10 +252,10 @@ class MDLoader(Dataset):
                 states = torch.zeros(0, embeddings.size(-1), device=self.device)
 
             return {
-                "raw_text": text,
-                "states": states.cpu(),
-                "input_ids": tokens[:-1].cpu(),
-                "labels": tokens[1:].cpu(),
+                'raw_text': text,
+                'states': states.cpu(),
+                'input_ids': tokens[:-1].cpu(),
+                'labels': tokens[1:].cpu(),
             }
             
         except Exception as e:
@@ -274,7 +264,7 @@ class MDLoader(Dataset):
     def collate_fn(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Corrected collate function with proper mask dimensions"""
         # Process text sequences
-        input_ids = [item["input_ids"] for item in batch]
+        input_ids = [item['input_ids'] for item in batch]
         padded_inputs = pad_sequence(
             input_ids,
             batch_first=True,
@@ -282,7 +272,7 @@ class MDLoader(Dataset):
         )
         
         # Process state representations
-        states = [item["states"] for item in batch]
+        states = [item['states'] for item in batch]
         padded_states = pad_sequence(
             states,
             batch_first=True,
@@ -295,17 +285,17 @@ class MDLoader(Dataset):
 
         # Ensure labels have same seq_len as inputs
         labels = pad_sequence(
-            [item["labels"] for item in batch],
+            [item['labels'] for item in batch],
             batch_first=True,
             padding_value=-100
         )
         
         return {
-            "states": padded_states,
-            "state_mask": state_mask,
-            "input_ids": padded_inputs,
-            "attention_mask": attention_mask,
-            "labels": labels
+            'states': padded_states,
+            'state_mask': state_mask,
+            'input_ids': padded_inputs,
+            'attention_mask': attention_mask,
+            'labels': labels
         }
 
     def get_dataloader(
