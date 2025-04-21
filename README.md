@@ -4,7 +4,7 @@
 MD (Memory Disentangling) is a neural network architecture designed to enhance cognitive behaviors by integrating meta-learning capabilities into a dedicated memory system. The model focuses on organizing and utilizing skill knowledge , which is established through meta-learning. It supports efficient adaptation to dynamic and complex information encountered at test time, enabled by its test-time scaling capabilities.
 
 ## Installation
-To install dependencies:
+To install dependencies, run:
 ```bash
 ./install.sh
 ```
@@ -14,10 +14,16 @@ To train the MD model:
 ./run.sh --train
 ```
 
-## Testing
-To run the test suite:
+## Evaluation
+To evaluate the model using the test suite:
 ```bash
 ./run.sh --test
+```
+
+## Data Preparation 
+To prepare the training data:
+```bash
+./run.sh --prepare
 ```
 
 ## Key Features
@@ -31,4 +37,4 @@ To run the test suite:
   Performance improves with longer input sequences through adaptive memory utilization
 
 ## License
-This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.  
+This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.

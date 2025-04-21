@@ -135,11 +135,11 @@ def main():
     parser.add_argument("--name", type=str, default="princeton-nlp/gemma2-ultrafeedback-armorm", 
                         help="Dataset name")
     parser.add_argument("--config", type=str, default=None,
-                        help="HF dataset configuration name")
+                        help="Dataset configuration name")
     parser.add_argument("--split", type=str, default="train",
                         help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
-                        help="Train/val split ratio for datasets without predefined splits")
+                        help="Train/test split ratio")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
 

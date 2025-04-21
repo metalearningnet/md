@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
+from transformers import modeling_utils
 from alignment.data import maybe_insert_system_message, is_openai_format
 
 NODE_RANK_COORDINATOR_PORT = 10001
@@ -28,7 +29,8 @@ from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
-USE_SDPA = False
+REMOVE_UNUSED_COLUMNS = False
+ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
 
 MD_FILE = 'md.pt'
 SAVE_DIR = Path('checkpoints')
@@ -55,13 +57,14 @@ class Cfg:
     model: dict
     loader: dict
     md_file: str
-    use_sdpa: bool
     save_dir: Path
     model_dir: Path
+    attn_impl: str
     precision: str
     optimizer: dict
     accelerator: str
     suffix_start: int
+    remove_unused_columns: bool
     
     @property
     def lm_name(self):
@@ -108,12 +111,13 @@ cfg = Cfg(
     loader=LOADER,
     md_file=MD_FILE,
     save_dir=SAVE_DIR,
-    use_sdpa=USE_SDPA,
+    attn_impl=ATTN_IMPL,
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
     accelerator=ACCELERATOR,
-    suffix_start=SUFFIX_START
+    suffix_start=SUFFIX_START,
+    remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
 
 class RegisterRequest(BaseModel):
@@ -244,6 +248,7 @@ def get_po(model):
         training_args = parser.parse(cfg.po_conf_file)
         training_args.max_length = cfg.max_length
         training_args.max_prompt_length = cfg.max_prompt_length
+        training_args.remove_unused_columns = cfg.remove_unused_columns
         return SimPOTrainer(model=model, args=training_args, tokenizer=model.tokenizer)
 
 def md_train(model, optimizer, loader, scheduler, fabric):
@@ -472,3 +477,12 @@ def apply_chat_template(
     example['text_rejected'] = apply_and_trim(rejected_messages)
     
     return example
+
+def get_device():
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        device = torch.device("mps")
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    else:
+        device = torch.device("cpu")
+    return device

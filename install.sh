@@ -55,10 +55,12 @@ case "$OS" in
     Linux)
         CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev)
         DEEPSPEED_SUPPORTED=true
+        FLASH_ATTN_SUPPORTED=true
         ;;
     Darwin)
         CONDA_PACKAGES=()
         DEEPSPEED_SUPPORTED=false
+        FLASH_ATTN_SUPPORTED=false
         ;;
     *) log_error "Unsupported OS: $OS" ;;
 esac
@@ -86,6 +88,13 @@ else
         x-transformers hyper_connections pyyaml fastapi uvicorn pydantic
         trl peft vllm assoc_scan
     )
+
+    if $FLASH_ATTN_SUPPORTED; then
+        PYTHON_PACKAGES+=("flash-attn")
+    else
+        log_warn "Skipping flash-attn (requires Linux)"
+    fi
+
     "$PYTHON" -m pip install --no-cache-dir "${PYTHON_PACKAGES[@]}" || \
         log_error "Python package installation failed"
 

@@ -10,7 +10,8 @@ class MD(nn.Module):
     def __init__(
         self,
         pretrained_model_dir: Path = cfg.model_dir,
-        freeze_pretrained: bool = True
+        freeze_pretrained: bool = True,
+        flash_attn: bool = True
     ):
         super().__init__()
 
@@ -20,7 +21,7 @@ class MD(nn.Module):
         self.lm_hidden_size = self.config.hidden_size
         self.lm_num_tokens = self.config.vocab_size
         self.lm_dir = pretrained_model_dir
-        self.config.use_sdpa = cfg.use_sdpa
+        self.flash_attn = flash_attn
         info(f"Base LM (name: {cfg.lm_name} hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
      
         # Initialize SkillMemory with compatible dimensions
@@ -38,8 +39,10 @@ class MD(nn.Module):
     def _init_lm(self):
         return AutoModelForCausalLM.from_pretrained(
             self.lm_dir,
+            torch_dtype="auto",
             config=self.config,
-            trust_remote_code=True
+            trust_remote_code=True,
+            attn_implementation=cfg.attn_impl if self.flash_attn else 'sdpa'
         )
 
     def _init_skill_memory(self) -> nn.Module:

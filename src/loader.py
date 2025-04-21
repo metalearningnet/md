@@ -5,9 +5,9 @@ from accelerate import PartialState
 from datasets.features import Value
 from transformers import AutoTokenizer
 from torch.nn.utils.rnn import pad_sequence
-from utils import cfg, info, apply_chat_template
 from typing import Optional, Union, Tuple, Dict, Any
 from datasets import load_dataset, Dataset, DatasetDict
+from utils import cfg, info, apply_chat_template, get_device
 from torch.utils.data import DataLoader, Dataset, random_split
 
 class MDLoader(Dataset):
@@ -290,7 +290,7 @@ class MDLoader(Dataset):
             self.dataset = self.dataset.filter(
                 lambda x: x is not None and all(
                     key in x and x[key] is not None
-                    for key in ["prompt_input_ids", "chosen_input_ids", "rejected_input_ids"]
+                    for key in ['prompt_input_ids', 'chosen_input_ids', 'rejected_input_ids']
                 ),
                 num_proc=num_proc
             )
@@ -372,6 +372,18 @@ class MDLoader(Dataset):
             raise RuntimeError(f"Failed processing example {idx}: {str(e)}")
     
     def _collate(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+        if not batch:
+            return {
+                'chosen_input_ids': torch.tensor([[]], dtype=torch.long),
+                'chosen_attention_mask': torch.tensor([[]], dtype=torch.long),
+                'chosen_labels': torch.tensor([[]], dtype=torch.long),
+                'rejected_input_ids': torch.tensor([[]], dtype=torch.long),
+                'rejected_attention_mask': torch.tensor([[]], dtype=torch.long),
+                'rejected_labels': torch.tensor([[]], dtype=torch.long),
+                'prompt_input_ids': torch.tensor([[]], dtype=torch.long),
+                'prompt_attention_mask': torch.tensor([[]], dtype=torch.long),
+            }
+        
         def clean_sequence(seq):
             """Remove None values from sequence and convert to integers"""
             return [int(x) if x is not None else self.tokenizer.pad_token_id for x in seq]
@@ -383,9 +395,9 @@ class MDLoader(Dataset):
                 continue
                 
             required_fields = [
-                "chosen_input_ids", "rejected_input_ids",
-                "chosen_attention_mask", "rejected_attention_mask",
-                "prompt_input_ids", "prompt_attention_mask"
+                'chosen_input_ids', 'rejected_input_ids',
+                'chosen_attention_mask', 'rejected_attention_mask',
+                'prompt_input_ids', 'prompt_attention_mask'
             ]
             
             # Check all required fields exist
@@ -393,53 +405,53 @@ class MDLoader(Dataset):
                 continue
                 
             # Clean sequences by replacing None with pad_token_id
-            item["chosen_input_ids"] = clean_sequence(item["chosen_input_ids"])
-            item["rejected_input_ids"] = clean_sequence(item["rejected_input_ids"])
-            item["prompt_input_ids"] = clean_sequence(item["prompt_input_ids"])
+            item['chosen_input_ids'] = clean_sequence(item['chosen_input_ids'])
+            item['rejected_input_ids'] = clean_sequence(item['rejected_input_ids'])
+            item['prompt_input_ids'] = clean_sequence(item['prompt_input_ids'])
             
             # Check sequences are not empty after cleaning
-            if (len(item["chosen_input_ids"]) > 0 and 
-                len(item["rejected_input_ids"]) > 0 and
-                len(item["prompt_input_ids"]) > 0):
+            if (len(item['chosen_input_ids']) > 0 and 
+                len(item['rejected_input_ids']) > 0 and
+                len(item['prompt_input_ids']) > 0):
                 valid_items.append(item)
 
         if not valid_items:
             # Return empty tensors with proper shape
             return {
-                "chosen_input_ids": torch.tensor([[]], dtype=torch.long),
-                "chosen_attention_mask": torch.tensor([[]], dtype=torch.long),
-                "chosen_labels": torch.tensor([[]], dtype=torch.long),
-                "rejected_input_ids": torch.tensor([[]], dtype=torch.long),
-                "rejected_attention_mask": torch.tensor([[]], dtype=torch.long),
-                "rejected_labels": torch.tensor([[]], dtype=torch.long),
-                "prompt_input_ids": torch.tensor([[]], dtype=torch.long),
-                "prompt_attention_mask": torch.tensor([[]], dtype=torch.long),
+                'chosen_input_ids': torch.tensor([[]], dtype=torch.long),
+                'chosen_attention_mask': torch.tensor([[]], dtype=torch.long),
+                'chosen_labels': torch.tensor([[]], dtype=torch.long),
+                'rejected_input_ids': torch.tensor([[]], dtype=torch.long),
+                'rejected_attention_mask': torch.tensor([[]], dtype=torch.long),
+                'rejected_labels': torch.tensor([[]], dtype=torch.long),
+                'prompt_input_ids': torch.tensor([[]], dtype=torch.long),
+                'prompt_attention_mask': torch.tensor([[]], dtype=torch.long),
             }
 
         # Process sequences
         def process_sequences(items, prefix=""):
             sequences = {
-                "input_ids": [],
-                "attention_mask": [],
-                "labels": []
+                'input_ids': [],
+                'attention_mask': [],
+                'labels': []
             }
             
             for item in items:
                 # Convert to tensors
-                sequences["input_ids"].append(torch.tensor(item[f"{prefix}input_ids"], dtype=torch.long))
-                sequences["attention_mask"].append(torch.tensor(item[f"{prefix}attention_mask"], dtype=torch.long))
+                sequences['input_ids'].append(torch.tensor(item[f'{prefix}input_ids'], dtype=torch.long))
+                sequences['attention_mask'].append(torch.tensor(item[f'{prefix}attention_mask'], dtype=torch.long))
                 # Use input_ids as labels if specific labels not provided
-                label_data = item.get(f"{prefix}labels", item[f"{prefix}input_ids"])
-                sequences["labels"].append(torch.tensor(label_data, dtype=torch.long))
+                label_data = item.get(f'{prefix}labels', item[f'{prefix}input_ids'])
+                sequences['labels'].append(torch.tensor(label_data, dtype=torch.long))
             
             return sequences
 
         # Process all sequence types
-        chosen = process_sequences(valid_items, "chosen_")
-        rejected = process_sequences(valid_items, "rejected_")
+        chosen = process_sequences(valid_items, 'chosen_')
+        rejected = process_sequences(valid_items, 'rejected_')
         prompt = {
-            "input_ids": [torch.tensor(item["prompt_input_ids"], dtype=torch.long) for item in valid_items],
-            "attention_mask": [torch.tensor(item["prompt_attention_mask"], dtype=torch.long) for item in valid_items]
+            'input_ids': [torch.tensor(item['prompt_input_ids'], dtype=torch.long) for item in valid_items],
+            'attention_mask': [torch.tensor(item['prompt_attention_mask'], dtype=torch.long) for item in valid_items]
         }
 
         # Pad sequences
@@ -452,18 +464,18 @@ class MDLoader(Dataset):
 
         return {
             # Chosen sequences
-            "chosen_input_ids": pad_sequences(chosen["input_ids"], self.tokenizer.pad_token_id),
-            "chosen_attention_mask": pad_sequences(chosen["attention_mask"], 0),
-            "chosen_labels": pad_sequences(chosen["labels"], self.label_pad_token_id),
+            'chosen_input_ids': pad_sequences(chosen['input_ids'], self.tokenizer.pad_token_id),
+            'chosen_attention_mask': pad_sequences(chosen['attention_mask'], 0),
+            'chosen_labels': pad_sequences(chosen['labels'], self.label_pad_token_id),
             
             # Rejected sequences
-            "rejected_input_ids": pad_sequences(rejected["input_ids"], self.tokenizer.pad_token_id),
-            "rejected_attention_mask": pad_sequences(rejected["attention_mask"], 0),
-            "rejected_labels": pad_sequences(rejected["labels"], self.label_pad_token_id),
+            'rejected_input_ids': pad_sequences(rejected['input_ids'], self.tokenizer.pad_token_id),
+            'rejected_attention_mask': pad_sequences(rejected['attention_mask'], 0),
+            'rejected_labels': pad_sequences(rejected['labels'], self.label_pad_token_id),
             
             # Prompt sequences
-            "prompt_input_ids": pad_sequences(prompt["input_ids"], self.tokenizer.pad_token_id),
-            "prompt_attention_mask": pad_sequences(prompt["attention_mask"], 0),
+            'prompt_input_ids': pad_sequences(prompt['input_ids'], self.tokenizer.pad_token_id),
+            'prompt_attention_mask': pad_sequences(prompt['attention_mask'], 0),
         }
     
     def collate_fn(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -500,15 +512,15 @@ class MDLoader(Dataset):
         shuffle: Optional[bool] = None,
         drop_last: bool = False
     ) -> DataLoader:
+        num_workers = 0 if get_device().type == 'mps' else os.cpu_count()
         return DataLoader(
             self,
             batch_size=batch_size,
             collate_fn=self.collate_fn,
             shuffle=shuffle if shuffle is not None else True,
             pin_memory=torch.cuda.is_available(),
-            num_workers=os.cpu_count(),
-            drop_last=drop_last,
-            persistent_workers=True
+            num_workers=num_workers,
+            drop_last=drop_last
         )
 
     def get_dataloaders(
@@ -528,7 +540,7 @@ class MDLoader(Dataset):
             [len(self) - val_size, val_size],
             generator=torch.Generator().manual_seed(seed)
         )
-
+        num_workers = 0 if get_device().type == 'mps' else os.cpu_count()
         return (
             DataLoader(
                 train_set,
@@ -536,7 +548,7 @@ class MDLoader(Dataset):
                 collate_fn=self.collate_fn,
                 shuffle=True,
                 pin_memory=torch.cuda.is_available(),
-                num_workers=os.cpu_count()
+                num_workers=num_workers
             ),
             DataLoader(
                 val_set,
@@ -544,6 +556,6 @@ class MDLoader(Dataset):
                 collate_fn=self.collate_fn,
                 shuffle=False,
                 pin_memory=torch.cuda.is_available(),
-                num_workers=os.cpu_count()
+                num_workers=num_workers
             )
         )
