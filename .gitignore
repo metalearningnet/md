@@ -1,5 +1,7 @@
 /model/
+/datasets/
 /checkpoints/
+/trainer_output/
 
 # Ignore Python-specific files
 __pycache__/

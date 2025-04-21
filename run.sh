@@ -4,15 +4,13 @@ PROJECT_DIR=$(dirname "$(readlink -f "$0")")
 PYTHON=python3
 
 usage() {
-    echo "Usage: $0 [--unittest [skill|md|loader|ckpt]] [--train] [--test]"
+    echo "Usage: $0 [--unittest [skill|md|loader|ckpt]] [--train] [--test] [--prepare]"
     echo ""
     echo "Options:"
-    echo "  --unittest [skill|md|loader|ckpt]   Run unit tests for the specified category (e.g., skill, md, loader, or ckpt)."
-    echo "                                   Example: $0 --unittest skill"
-    echo "  --train                        Start the training process."
-    echo "                                   Example: $0 --train --name ag_news"
-    echo "  --test                         Start the testing process."
-    echo "                                   Example: $0 --test"
+    echo "  --unittest [skill|md|loader|ckpt]  Run unit tests for the specified category."
+    echo "  --train                            Start the training process."
+    echo "  --test                             Start the testing process."
+    echo "  --prepare                          Prepare the data for processing."
     echo ""
     exit 1
 }
@@ -47,7 +45,6 @@ case "$1" in
         fi
         run_unittest "$@"
         ;;
-
     --train)
         shift
         echo "[INFO] Starting the training process..."
@@ -58,7 +55,6 @@ case "$1" in
             exit 1
         fi
         ;;
-
     --test)
         shift
         echo "[INFO] Starting the testing process..."
@@ -69,7 +65,16 @@ case "$1" in
             exit 1
         fi
         ;;
-
+    --prepare)
+        echo "[INFO] Preparing data for processing..."
+        seeds=(13 21 42 79 100)
+        for seed in "${seeds[@]}"; do
+            $PYTHON $PROJECT_DIR/scripts/decode.py --seed $seed
+        done
+        for script in "post_process.py" "reward_model_annotate.py"; do
+            $PYTHON "$PROJECT_DIR/scripts/$script"
+        done
+	    ;;
     *)
         usage
         ;;

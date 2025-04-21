@@ -84,6 +84,7 @@ else
         tensordict einops einx lightning
         axial_positional_embedding rotary-embedding-torch
         x-transformers hyper_connections pyyaml fastapi uvicorn pydantic
+        trl peft vllm assoc_scan
     )
     "$PYTHON" -m pip install --no-cache-dir "${PYTHON_PACKAGES[@]}" || \
         log_error "Python package installation failed"
