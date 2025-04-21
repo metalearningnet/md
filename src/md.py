@@ -14,48 +14,47 @@ class MD(nn.Module):
     ):
         super().__init__()
 
-        # 1. Load pretrained model configuration first
+        # Load pretrained model configuration first
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir)
-        self.lm_config = AutoConfig.from_pretrained(pretrained_model_dir)
-        self.lm_hidden_size = self.lm_config.hidden_size
-        self.lm_vocab_size = self.lm_config.vocab_size
-        self.lm_config.use_sdpa = cfg.use_sdpa
+        self.config = AutoConfig.from_pretrained(pretrained_model_dir)
+        self.lm_hidden_size = self.config.hidden_size
+        self.lm_num_tokens = self.config.vocab_size
         self.lm_dir = pretrained_model_dir
-        self.state_embed_dim = self.lm_hidden_size
-        info(f"Base LLM (name: {cfg.model_name} hidden_size: {self.lm_hidden_size} vocab_size: {self.lm_vocab_size})")
+        self.config.use_sdpa = cfg.use_sdpa
+        info(f"Base LM (name: {cfg.lm_name} hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
      
-        # 2. Initialize SkillMemory with compatible dimensions
+        # Initialize SkillMemory with compatible dimensions
         self.skill_memory = self._init_skill_memory()
 
-        # 3. Load pretrained model weights
+        # Load pretrained model weights
         self.lm = self._init_lm()
         
-        # 4. Configure model components
+        # Configure model components
         self._init_action_projection()
-        
+
         if freeze_pretrained:
             self._freeze_pretrained()
 
     def _init_lm(self):
         return AutoModelForCausalLM.from_pretrained(
             self.lm_dir,
-            config=self.lm_config,
+            config=self.config,
             trust_remote_code=True
         )
 
     def _init_skill_memory(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""
-        skill_params = cfg.skill_memory.copy()
+        skill_params = cfg.skill
         skill_params.update({
+            'num_tokens': self.lm_num_tokens,
             'hidden_dim': self.lm_hidden_size,
-            'action_dim': self.lm_hidden_size,
-            'state_embed_dim': self.lm_hidden_size
+            'action_dim': self.lm_hidden_size
         })
         return SkillMemory(**skill_params)
 
     def _init_action_projection(self):
         """Adapter between SkillMemory and LM"""
-        self.action_proj = nn.Linear(self.skill_memory.action_dim, self.lm_config.hidden_size)
+        self.action_proj = nn.Linear(self.skill_memory.action_dim, self.config.hidden_size)
 
     def _freeze_pretrained(self):
         """Freeze LM parameters while keeping adapters trainable"""
@@ -68,29 +67,23 @@ class MD(nn.Module):
 
     def forward(
         self,
-        states: torch.Tensor,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        seq_len = input_ids.shape[1]
-        if states.shape[1] != seq_len:
-            raise ValueError(
-                f"States length {states.shape[1]} "
-                f"must match input_ids length {seq_len}"
-            )
+        state_embeds = self.lm.get_input_embeddings()(input_ids)
         
-        # 1. Process through SkillMemory
-        action_logits, m = self.skill_memory.generate(states)
+        # Process through SkillMemory
+        action_logits = self.skill_memory.generate(state_embeds)
         
-        # 2. Adapt actions
+        # Adapt actions
         action_embeds = self.action_proj(action_logits)
         
-        # 3. Combine with text inputs
-        inputs_embeds = self._combine_inputs(input_ids, action_embeds)
+        # Combine with text inputs
+        inputs_embeds = self._combine_inputs(state_embeds, action_embeds)
         position_ids = self._create_position_ids(input_ids, action_embeds)
         attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
         
-        # 4. Forward through LM
+        # Forward through LM
         lm_out = self.lm(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -99,8 +92,8 @@ class MD(nn.Module):
         )
         
         return {
-            'skill_memory': m,
-            'lm_logits': lm_out.logits,
+            'states': state_embeds,
+            'logits': lm_out.logits,
             'action_logits': action_logits
         }
 
@@ -111,7 +104,7 @@ class MD(nn.Module):
         batch_size = input_ids.size(0)
         position_ids = torch.cat([
             torch.arange(original_len, device=input_ids.device),
-            torch.arange(cfg.action_start, cfg.action_start + action_len, device=input_ids.device)
+            torch.arange(cfg.suffix_start, cfg.suffix_start + action_len, device=input_ids.device)
         ]).unsqueeze(0)
         position_ids = position_ids.expand(batch_size, -1)
         return position_ids
@@ -126,38 +119,35 @@ class MD(nn.Module):
         ones_tensor = torch.ones(batch_size, action_embeds.shape[1], device=input_ids.device)
         combined_mask = torch.cat([attention_mask, ones_tensor], dim=1)
         return combined_mask
-        
-    def _combine_inputs(
-        self,
-        input_ids: torch.Tensor,
-        actioin_embeds: torch.Tensor
+    
+    def _combine_inputs(self,
+        state_embeds: torch.Tensor,
+        action_embeds: torch.Tensor
     ) -> torch.Tensor:
-        """Fuse memory context with text inputs using position-aware encoding"""
-        text_embeds = self.lm.get_input_embeddings()(input_ids)
-        return torch.cat([text_embeds, actioin_embeds], dim=1)
+        return torch.cat([state_embeds, action_embeds], dim=1)
 
     def generate(
         self,
-        states: torch.Tensor,
         input_ids: torch.Tensor,
         **generation_kwargs
     ) -> torch.Tensor:
         with torch.no_grad():
             attention_mask = generation_kwargs.get('attention_mask')
+            state_embeds = self.lm.get_input_embeddings()(input_ids)
         
-            # 1. Get memory context
-            action_logits, _ = self.skill_memory.generate(states)
+            # Get memory context
+            action_logits = self.skill_memory.generate(state_embeds)
             action_embeds = self.action_proj(action_logits)
             
-            # 2. Prepare inputs
-            inputs_embeds = self._combine_inputs(input_ids, action_embeds)
+            # Prepare inputs
+            input_embeds = self._combine_inputs(state_embeds, action_embeds)
             position_ids = self._create_position_ids(input_ids, action_embeds)
             attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
             generation_kwargs['attention_mask'] = attention_mask
             
-            # 3. Generate with adjusted mask
+            # Generate with adjusted mask
             return self.lm.generate(
-                inputs_embeds=inputs_embeds,
+                inputs_embeds=input_embeds,
                 position_ids=position_ids,
                 **generation_kwargs
             )
@@ -174,7 +164,6 @@ class MD(nn.Module):
         )
 
     def get_trainable_parameters(self) -> Dict[str, nn.Parameter]:
-        """Utility method for training"""
         return {
             'skill_memory': list(self.skill_memory.parameters()),
             'action_proj': list(self.action_proj.parameters())

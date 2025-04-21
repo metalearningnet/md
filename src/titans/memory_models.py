@@ -1,8 +1,9 @@
 import torch
 from torch import nn, cat
-from einops import rearrange
 import torch.nn.functional as F
-from torch.nn import Module, Parameter, ParameterList
+from torch.nn import Module, ModuleList, Parameter, ParameterList
+
+from einops import rearrange
 
 # functions
 

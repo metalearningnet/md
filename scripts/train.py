@@ -13,27 +13,24 @@ from md import MD
 from loader import MDLoader
 from utils import md_train, md_validate, cfg, add_dist_config
 
-def train(name: str, config: dict) -> None:
+def train(config: dict):
     """
-    Main training function with unified configuration
-    
-    Args:
-        name: Hugging Face dataset name
-        config: Configuration dictionary containing:
-            - dataset_config: HF dataset configuration name (str)
-            - split: Dataset split name (str)
-            - split_ratio: Train/val split ratio (float)
-            - seed: Random seed (int)
-            - lr: Learning rate (float)
-            - epochs: Number of epochs (int)
-            - batch_size: Training batch size (int)
-            - val_split: Validation split ratio (float)
-            - weight_decay: Weight decay (float)
-            - save_dir: Checkpoint directory (str)
-            - save_interval: Checkpoint frequency (int)
-            - fabric_config: Configuration options for the Lightning Fabric setup (dict)
+    config:
+        - name: Dataset name (str)
+        - dataset_config: Dataset configuration name (str)
+        - split: Dataset split name (e.g., "train") (str)
+        - split_ratio: Proportion of the dataset to be allocated for training or testing (float)
+        - seed: Random seed (int)
+        - lr: Learning rate (float)
+        - epochs: Number of epochs (int)
+        - batch_size: Training batch size (int)
+        - val_split: Proportion of the training set to be used for validation (float)
+        - weight_decay: Weight decay (float)
+        - save_dir: Checkpoint directory (str)
+        - save_interval: Checkpoint frequency (int)
+        - fabric_config: Configuration options for the Lightning Fabric setup (dict)
     """
-    
+    name = config['name']
     fabric = L.Fabric(**config['fabric_config'])
     fabric.launch()
 
@@ -135,11 +132,11 @@ def main():
     parser = argparse.ArgumentParser(description="Train the MD Model")
     
     # Dataset configuration
-    parser.add_argument("--name", required=True, 
-                        help="HuggingFace dataset name")
-    parser.add_argument("--config", default=None,
+    parser.add_argument("--name", type=str, default="princeton-nlp/gemma2-ultrafeedback-armorm", 
+                        help="Dataset name")
+    parser.add_argument("--config", type=str, default=None,
                         help="HF dataset configuration name")
-    parser.add_argument("--split", type=str, default=None,
+    parser.add_argument("--split", type=str, default="train",
                         help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
                         help="Train/val split ratio for datasets without predefined splits")
@@ -176,8 +173,9 @@ def main():
 
     args = parser.parse_args()
     
-    # Create comprehensive config dictionary
     config = {
+        'name': args.name,
+
         # Dataset parameters
         'seed': args.seed,
         'split': args.split,
@@ -211,11 +209,10 @@ def main():
             main_port=args.port,
             num_nodes=args.nodes,
             lr=args.lr,
-            weight_decay=args.weight_decay,
-            epochs=args.epochs
+            weight_decay=args.weight_decay
         )
     
-    train(name=args.name, config=config)
+    train(config)
 
 if __name__ == '__main__':
     main()

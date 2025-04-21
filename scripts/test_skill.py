@@ -13,18 +13,13 @@ class TestSkill(unittest.TestCase):
     def setUp(self):
         self.batch_size = 4
         self.seq_len = 10
-        self.state_dim = 128
         self.action_dim = 4
         self.hidden_dim = 64
         
-        # Test data (now using continuous states)
-        self.states = torch.randn(self.batch_size, self.seq_len, self.state_dim)
-        self.actions = torch.randint(0, self.action_dim, (self.batch_size, self.seq_len))
-        
-        # Updated MD configuration
+        # Test data
+        self.states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)    
         self.skill_memory = SkillMemory(
             action_dim=self.action_dim,
-            state_embed_dim=self.state_dim,
             hidden_dim=self.hidden_dim,
             mac_depth=1,
             mac_segment_len=4,
@@ -32,7 +27,6 @@ class TestSkill(unittest.TestCase):
         )
     
     def test_initialization(self):
-        """Test proper initialization of all components"""
         # Check critical components exist
         self.assertTrue(hasattr(self.skill_memory, 'mac'))
         self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
@@ -40,44 +34,18 @@ class TestSkill(unittest.TestCase):
         
         # Check output dimensions
         self.assertEqual(self.skill_memory.policy[-1].out_features, self.action_dim)
-        self.assertEqual(self.skill_memory.state_embedding.out_features, self.hidden_dim)
 
-    def test_input_type_handling(self):
-        """Test float vs long input handling"""
-        # Float states
-        float_state = torch.randn(self.state_dim)
-        _, m = self.skill_memory.generate(float_state)
-        self.assertEqual(m.shape[-1], self.hidden_dim)
-        
-        # Integer states (simulating tokens)
-        int_state = torch.randint(0, 100, (self.state_dim,))
-        _, m = self.skill_memory.generate(int_state)
-        self.assertEqual(m.shape[-1], self.hidden_dim)
-
-    def test_input_type_handling(self):
-        """Test float vs long input handling"""
-        # Float states
-        float_state = torch.randn(self.state_dim)
-        action_logits, _ = self.skill_memory.generate(float_state)
-        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
+    def test_action_logits(self):
+        float_state = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
+        action_logits = self.skill_memory.generate(float_state)
+        self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
         self.assertTrue(
             action_logits.dtype in (torch.float32, torch.float64),
             "Tensor should be float32 or float64"
         )
-        
-        # Integer states (simulating tokens)
-        int_state = torch.randint(0, 100, (self.state_dim,))
-        action_logits, _ = self.skill_memory.generate(int_state)
-        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
-        self.assertTrue(
-            action_logits.dtype in (torch.float32, torch.float64),
-            "Tensor should be float32 or float64"
-        )
-        
+    
     def test_loss_computation(self):
-        """Test loss components are computed"""
-        batch = (self.states, self.actions)
-        losses = self.skill_memory.compute_losses(batch)
+        losses = self.skill_memory.compute_losses(self.states)
         
         # Check all loss components exist
         required_losses = ['mi_loss', 'entropy', 'adv_loss', 'kl_loss']
@@ -91,21 +59,12 @@ class TestSkill(unittest.TestCase):
             self.assertTrue(isinstance(v, float))
 
     def test_action_generation(self):
-        """Test action generation"""
-        state = torch.randn(self.state_dim)
-        action_logits, m = self.skill_memory.generate(state)
-        self.assertEqual(action_logits.squeeze().shape, (self.action_dim,))
-        self.assertEqual(m.squeeze().shape, (self.hidden_dim,))
+        action_logits = self.skill_memory.generate(self.states)
+        self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
 
     def test_gradient_flow(self):
-        """Test gradients flow through all components"""
-        self.skill_memory.train()
-        batch = (
-            self.states,
-            self.actions
-        )
-        
-        losses = self.skill_memory.compute_losses(batch)
+        self.skill_memory.train()        
+        losses = self.skill_memory.compute_losses(self.states)
         losses['total_loss'].backward()
         
         # Components that MUST have gradients
@@ -138,8 +97,6 @@ class TestSkill(unittest.TestCase):
                             torch.allclose(param.grad, torch.zeros_like(param.grad)),
                             f"Zero gradient for critical param: {name}"
                         )
-                
-                # Warn about optional components (don't fail test)
                 elif any(comp in name for comp in optional_components):
                     if param.grad is None:
                         print(f"Warning: No gradient for optional param {name}")
@@ -147,29 +104,26 @@ class TestSkill(unittest.TestCase):
                         print(f"Warning: Zero gradient for conditional param {name}")
 
     def test_edge_cases(self):
-        """Test edge cases"""
         # Single timestep
         single_out = self.skill_memory(
-            torch.randn(self.batch_size, 1, self.state_dim)
+            torch.randn(self.batch_size, 1, self.hidden_dim)
         )
-        self.assertEqual(single_out['m_seq'].shape, (self.batch_size, 1, 1, self.hidden_dim))
+        self.assertEqual(single_out['m'].shape, (self.batch_size, 1, self.hidden_dim))
         
-        # Empty sequence (should handle gracefully)
-        empty_state = torch.randn(self.batch_size, 0, self.state_dim)
+        # Empty sequence
+        empty_state = torch.randn(self.batch_size, 0, self.hidden_dim)
         with self.assertRaisesRegex(AssertionError, "seq_len > 0"):
             self.skill_memory(empty_state)
 
     def test_variable_sequence_lengths(self):
-        """Test handling of different sequence lengths"""
         for seq_len in [1, 4, 7, 10, 15]:  # Test various lengths including boundary cases
-            states = torch.randn(self.batch_size, seq_len, self.state_dim)
+            states = torch.randn(self.batch_size, seq_len, self.hidden_dim)
             outputs = self.skill_memory(states)
-            self.assertEqual(outputs['m_seq'].shape, (self.batch_size, seq_len, 1, self.hidden_dim),
+            self.assertEqual(outputs['m'].shape, (self.batch_size, seq_len, self.hidden_dim),
                          f"Failed for seq_len={seq_len}")
 
     def test_extreme_input_values(self):
-        """Test numerical stability with extreme inputs"""
-        extreme_states = torch.randn(self.batch_size, self.seq_len, self.state_dim) * 1e6
+        extreme_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim) * 1e6
         outputs = self.skill_memory(extreme_states)
         
         # Check for NaN/Inf in outputs
@@ -179,7 +133,6 @@ class TestSkill(unittest.TestCase):
                 self.assertFalse(torch.isinf(v).any(), f"Inf in {k}")
 
     def test_mixed_precision_handling(self):
-        """Test model works with mixed precision"""
         try:
             # Convert model and inputs to half precision
             half_model = self.skill_memory.half()
@@ -187,13 +140,12 @@ class TestSkill(unittest.TestCase):
             
             # Forward pass should complete without errors
             outputs = half_model(half_states)
-            self.assertEqual(outputs['m_seq'].dtype, torch.float16,
+            self.assertEqual(outputs['m'].dtype, torch.float16,
                           "Output should maintain half precision")
         except RuntimeError as e:
             self.fail(f"Mixed precision failed: {str(e)}")
 
     def test_device_portability(self):
-        """Test model can move between devices"""
         # Test CUDA if available
         if torch.cuda.is_available():
             try:
@@ -203,13 +155,13 @@ class TestSkill(unittest.TestCase):
                 
                 # Forward pass on GPU
                 outputs = gpu_model(gpu_states)
-                self.assertEqual(outputs['m_seq'].device.type, 'cuda',
+                self.assertEqual(outputs['m'].device.type, 'cuda',
                             "Output should be on GPU")
                 
                 # Move back to CPU
                 cpu_model = gpu_model.cpu()
                 cpu_outputs = cpu_model(self.states)
-                self.assertEqual(cpu_outputs['m_seq'].device.type, 'cpu',
+                self.assertEqual(cpu_outputs['m'].device.type, 'cpu',
                             "Output should be on CPU")
             except RuntimeError as e:
                 self.fail(f"CUDA device portability failed: {str(e)}")
@@ -223,13 +175,13 @@ class TestSkill(unittest.TestCase):
                 
                 # Forward pass on MPS
                 outputs = mps_model(mps_states)
-                self.assertEqual(outputs['m_seq'].device.type, 'mps',
+                self.assertEqual(outputs['m'].device.type, 'mps',
                             "Output should be on MPS")
                 
                 # Move back to CPU
                 cpu_model = mps_model.cpu()
                 cpu_outputs = cpu_model(self.states)
-                self.assertEqual(cpu_outputs['m_seq'].device.type, 'cpu',
+                self.assertEqual(cpu_outputs['m'].device.type, 'cpu',
                             "Output should be on CPU")
             except RuntimeError as e:
                 self.fail(f"MPS device portability failed: {str(e)}")

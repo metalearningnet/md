@@ -11,26 +11,35 @@ from md import MD
 from loader import MDLoader
 from utils import md_validate, cfg, add_dist_config
 
-def test(model_path: Path, batch_size: int, dataset_name: str, dataset_config: str = None, fabric_config: dict = {}):
-    """Main evaluation function"""
-    fabric = L.Fabric(**fabric_config)
+def test(config: dict):
+    """
+    config:
+        - name: Dataset name (str)
+        - dataset_config: Dataset configuration name (str)
+        - split: Dataset split name (e.g., "test") (str)
+        - model_path: Model path (str)
+        - batch_size: Testing batch size (int)
+        - fabric_config: Configuration options for the Lightning Fabric setup (dict)
+        - num_batches: Number of batches (int)
+    """
+    fabric = L.Fabric(**config['fabric_config'])
     fabric.launch()
 
-    checkpoint = torch.load(model_path)
+    checkpoint = torch.load(config['model_path'])
     model_state_dict = checkpoint['model']
     model = MD.from_pretrained()
     model.load_state_dict(model_state_dict)
     model = fabric.setup(model)
     
     loader = MDLoader(
-        dataset_name=dataset_name,
-        dataset_config=dataset_config,
-        split='test'
+        dataset_name=config['name'],
+        dataset_config=config.get('dataset_config'),
+        split=config['split']
     )
     
-    test_loader = loader.get_dataloader(batch_size=batch_size, shuffle=False)
+    test_loader = loader.get_dataloader(batch_size=config['batch_size'], shuffle=False)
     test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
-    test_metrics = md_validate(model, test_loader, fabric)
+    test_metrics = md_validate(model, test_loader, fabric, config.get('num_batches', -1))
 
     print("\nTest Results:")
     for k, v in test_metrics.items():
@@ -42,10 +51,12 @@ def main():
     parser = argparse.ArgumentParser(description="Test the MD Model")
 
     # Testing configuration
-    parser.add_argument("--name", type=str, required=True, 
-                        help="HuggingFace dataset name")
+    parser.add_argument("--name", type=str, default="princeton-nlp/gemma2-ultrafeedback-armorm", 
+                        help="Dataset name")
     parser.add_argument("--config", type=str, default=None,
-                        help="HF dataset configuration name")
+                        help="Dataset configuration name")
+    parser.add_argument("--split", type=str, default="test",
+                        help="Dataset split name")
     parser.add_argument("--save_dir", type=str, default="checkpoints",
                         help="Checkpoint directory")
     parser.add_argument("--batch_size", type=int, default=1,
@@ -82,13 +93,16 @@ def main():
             num_nodes=args.nodes
         )
     
-    test(
-        model_path=model_path,
-        batch_size=args.batch_size,
-        dataset_name=args.name, 
-        dataset_config=args.config,
-        fabric_config=fabric_config
-    )
+    config = {
+        'name': args.name,
+        'dataset_config': args.config,
+        'split': args.split,
+        'model_path': model_path,
+        'batch_size': args.batch_size,
+        'fabric_config': fabric_config
+    }
+
+    test(config)
 
 if __name__ == '__main__':
     main()

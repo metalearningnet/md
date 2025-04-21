@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
+from alignment.data import maybe_insert_system_message, is_openai_format
 
 NODE_RANK_COORDINATOR_PORT = 10001
 
@@ -22,7 +23,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, SKILL_MEMORY, LOADER, PRECISION, ACCELERATOR
+from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER
 
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
@@ -37,7 +38,7 @@ CONF_DIR = ROOT_DIR / 'conf'
 DIST_FILE = 'dist.yaml'
 
 # Starting position for action embeddings
-ACTION_START = 1 << 32
+SUFFIX_START = 1 << 32
 
 RETRY_MAX = 5
 
@@ -58,21 +59,49 @@ class Cfg:
     save_dir: Path
     model_dir: Path
     precision: str
+    optimizer: dict
     accelerator: str
-    action_start: int
-    skill_memory: dict
+    suffix_start: int
     
     @property
-    def model_name(self):
-        return self.model['name']
+    def lm_name(self):
+        return self.model['lm']['name']
     
     @property
-    def loader_max_length(self):
-        return self.loader['max_length']
+    def skill(self):
+        return self.model['skill'].copy()
     
     @property
-    def loader_state_window(self):
-        return self.loader['state_window']
+    def lm_coef(self):
+        return self.model.get('lm_coef', 0.7)
+    
+    @property
+    def skill_coef(self):
+        return self.model.get('skill_coef', 0.3)
+    
+    @property
+    def min_length(self):
+        return self.loader.get('min_length', 1)
+    
+    @property
+    def max_length(self):
+        return self.loader.get('max_length', 512)
+
+    @property
+    def max_prompt_length(self):
+        return self.loader.get('max_prompt_length', 128)
+
+    @property
+    def truncation_mode(self):
+        return self.loader.get('truncation_mode', 'keep_end')
+    
+    @property
+    def po(self):
+        return self.optimizer['preference']
+    
+    @property
+    def po_conf_file(self):
+        return CONF_DIR / 'simpo.yaml' if self.optimizer['preference'] == 'SimPO' else ''
 
 cfg = Cfg(
     model=MODEL,
@@ -82,9 +111,9 @@ cfg = Cfg(
     use_sdpa=USE_SDPA,
     model_dir=MODEL_DIR,
     precision=PRECISION,
+    optimizer=OPTIMIZER,
     accelerator=ACCELERATOR,
-    action_start=ACTION_START,
-    skill_memory=SKILL_MEMORY
+    suffix_start=SUFFIX_START
 )
 
 class RegisterRequest(BaseModel):
@@ -145,8 +174,7 @@ def add_dist_config(
         main_port: int = None, 
         num_nodes: int = None, 
         lr: float = None, 
-        weight_decay: float = None, 
-        epochs: int = None
+        weight_decay: float = None
     ):
     dist_config = load_dist_config()
     if num_nodes != None:
@@ -207,13 +235,25 @@ def calculate_lm_loss(outputs, batch, loss_fn):
         labels.reshape(-1)[mask]
     )
 
+def get_po(model):
+    if cfg.po == 'SimPO':
+        from alignment import H4ArgumentParser
+        from simpo.simpo_config import SimPOConfig
+        from simpo.simpo_trainer import SimPOTrainer
+        parser = H4ArgumentParser((SimPOConfig,))
+        training_args = parser.parse(cfg.po_conf_file)
+        training_args.max_length = cfg.max_length
+        training_args.max_prompt_length = cfg.max_prompt_length
+        return SimPOTrainer(model=model, args=training_args, tokenizer=model.tokenizer)
+
 def md_train(model, optimizer, loader, scheduler, fabric):
     model.train()
+    po = get_po(model)
     metrics = {
         'total_loss': 0.0,
         'num_batches': 0
-    }
-    
+    } if po is None else {}
+
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     pbar = tqdm(
@@ -226,54 +266,62 @@ def md_train(model, optimizer, loader, scheduler, fabric):
 
     for batch in pbar:
         optimizer.zero_grad()
+        if po:
+            loss, metrics = po.get_batch_loss_metrics(model, batch, train_eval='train', cfg=cfg)
+            po.store_metrics(metrics=metrics, train_eval='train')
+        else:
+            outputs = model(
+                input_ids=batch['input_ids'],
+                attention_mask=batch['attention_mask']
+            )
 
-        # Forward pass
-        outputs = model(
-            states=batch['states'],
-            input_ids=batch['input_ids'],
-            attention_mask=batch['attention_mask']
-        )
+            loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
         
-        # Loss calculations
-        loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            warn("NaN/Inf loss detected, skipping batch")
-            continue
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                warn("NaN/Inf loss detected, skipping batch")
+                continue
 
-        has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
-        has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
-        if has_nan or has_inf:
-            warn("NaN/Inf gradients detected, skipping update")
-            optimizer.zero_grad()
-            continue
-        
+            has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
+            has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
+            if has_nan or has_inf:
+                warn("NaN/Inf gradients detected, skipping update")
+                optimizer.zero_grad()
+                continue
+            
         fabric.backward(loss)
         fabric.clip_gradients(model, optimizer, max_norm=1.0, error_if_nonfinite=False)
         optimizer.step()
         scheduler.step()
         
-        # Update metrics
-        metrics['total_loss'] += loss.item()
-        metrics['num_batches'] += 1
+        if po is None:
+            metrics['total_loss'] += loss.item()
+            metrics['num_batches'] += 1
     
-    # Normalize metrics
-    for k in ['total_loss']:
-        metrics[k] /= metrics['num_batches']
-    
+    if po is None:
+        for k in ['total_loss']:
+            metrics[k] /= metrics['num_batches']
+    else:
+        metrics = {}
+        train_metrics = po.get_metrics()['train']
+        for key, val in train_metrics.items():
+            metrics[key] = torch.tensor(val).mean().item()
+
     return metrics
 
-def md_validate(model, loader, fabric) -> dict:
+def md_validate(model, loader, fabric, num_batches=-1) -> dict:
     if loader == None:
         return {}
     
     model.eval()
+    po = get_po(model)
+
     metrics = {
         'total_loss': 0.0,
         'avg_loss': 0.0,
         'num_samples': 0,
         'num_tokens': 0
-    }
-    
+    } if po is None else {}
+
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
     with torch.no_grad():
@@ -284,48 +332,57 @@ def md_validate(model, loader, fabric) -> dict:
             dynamic_ncols=True
         )
         for batch in pbar:
-            # Device transfer
-            states = batch['states']
-            input_ids = batch['input_ids']
-            attention_mask = batch['attention_mask']
+            if po:
+                loss, metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval', cfg=cfg)
+                po.store_metrics(metrics=metrics, train_eval='eval')
+            else:
+                input_ids = batch['input_ids']
+                attention_mask = batch['attention_mask']
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                
+                lm_logits = outputs['lm_logits']
+                input_len = input_ids.size(1)
+                M = lm_logits.size(1) - input_len  # Memory context length
+                
+                sliced_lm_logits = lm_logits[:, M:M+input_len-1, :]
+                lm_labels = input_ids[:, 1:]
+                
+                lm_mask = (attention_mask[:, 1:] != 0).flatten()
+                assert sliced_lm_logits.size(1) == lm_labels.size(1), "LM dimension mismatch"
 
-            # Forward pass
-            outputs = model(states=states, input_ids=input_ids, attention_mask=attention_mask)
-            
-            # --- LM Loss Calculation ---
-            lm_logits = outputs['lm_logits']
-            input_len = input_ids.size(1)
-            M = lm_logits.size(1) - input_len  # Memory context length
-            
-            # Slice logits and labels
-            sliced_lm_logits = lm_logits[:, M:M+input_len-1, :]
-            lm_labels = input_ids[:, 1:]
-            
-            # LM Mask
-            lm_mask = (attention_mask[:, 1:] != 0).flatten()
-            assert sliced_lm_logits.size(1) == lm_labels.size(1), "LM dimension mismatch"
+                loss = lm_loss_fn(
+                    sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
+                    lm_labels.flatten()[lm_mask]
+                ) if lm_mask.any() else 0.0
+                
+                metrics['total_loss'] += loss.item()
+                metrics['num_samples'] += input_ids.size(0)
+                metrics['num_tokens'] += lm_mask.sum().item()
 
-            # --- Loss Computations ---
-            lm_loss = lm_loss_fn(
-                sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
-                lm_labels.flatten()[lm_mask]
-            ) if lm_mask.any() else 0.0
-            
-            # --- Metric Aggregation ---
-            metrics['total_loss'] += lm_loss.item()
-            metrics['num_samples'] += input_ids.size(0)
-            metrics['num_tokens'] += lm_mask.sum().item()
+            if num_batches > 0:
+                num_batches = num_batches - 1
+            if 0 == num_batches:
+                break
 
-    gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-    gathered_samples = fabric.all_gather(torch.tensor(metrics['num_samples'])).sum()
-    if fabric.is_global_zero and gathered_samples > 0:
-        avg_loss = gathered_loss / gathered_samples
-        metrics['avg_loss'] = avg_loss
-        print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
+    if po is None:
+        gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
+        gathered_samples = fabric.all_gather(torch.tensor(metrics['num_samples'])).sum()
+        if fabric.is_global_zero and gathered_samples > 0:
+            avg_loss = gathered_loss / gathered_samples
+            metrics['avg_loss'] = avg_loss
+            print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
 
-    # --- Metric Normalization ---
-    if metrics['num_samples'] > 0:
-        metrics['total_loss'] /= metrics['num_samples']
+        if metrics['num_samples'] > 0:
+            metrics['total_loss'] /= metrics['num_samples']
+    else:
+        metrics = {}
+        eval_metrics = po.get_metrics()['eval']
+        for key, val in eval_metrics.items():
+            metrics[key] = torch.tensor(val).mean().item()
+            gathered_vals = fabric.all_gather(torch.tensor(val))
+            if fabric.is_global_zero:
+                metrics[f'avg_{key}'] = gathered_vals.mean().item()
+                print(f"avg_{key}: {metrics[f'avg_{key}']}")
 
     return metrics
 
@@ -372,3 +429,46 @@ def get_node_rank(main_address: str, main_port: int, num_nodes: int) -> int:
                 time.sleep(2 ** attempt)
 
     raise RuntimeError(f"Failed to contact node rank coordinator at {main_address}")
+
+
+def apply_chat_template(
+    example,
+    tokenizer,
+    auto_insert_empty_system_msg: bool = True
+):
+    required_keys = {'chosen', 'rejected'}
+    if not required_keys.issubset(example.keys()):
+        raise ValueError(
+            f"Could not format example as dialogue! Require either "
+            f"`[chosen, rejected]` or `[prompt, chosen, rejected]` keys but found {list(example.keys())}"
+        )
+    
+    if not all(is_openai_format(msg) for msg in (example['chosen'], example['rejected'])):
+        raise ValueError("Could not format example as dialogue! Require OpenAI format for all messages.")
+
+    if 'prompt' in example and is_openai_format(example['prompt']):
+        prompt_messages = example['prompt']
+        chosen_messages = example['chosen']
+        rejected_messages = example['rejected']
+    else:
+        prompt_messages = example['chosen'][:-1]
+        chosen_messages = example['chosen'][-1:]
+        rejected_messages = example['rejected'][-1:]
+
+    if not (prompt_messages and chosen_messages and rejected_messages):
+        raise ValueError("Prompt, chosen, and rejected must be non-empty.")
+    
+    if auto_insert_empty_system_msg:
+        maybe_insert_system_message(prompt_messages, tokenizer)
+
+    def apply_and_trim(messages):
+        text = tokenizer.apply_chat_template(messages, tokenize=False)
+        if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
+            return text[len(tokenizer.bos_token):]
+        return text
+    
+    example['text_prompt'] = apply_and_trim(prompt_messages)
+    example['text_chosen'] = apply_and_trim(chosen_messages)
+    example['text_rejected'] = apply_and_trim(rejected_messages)
+    
+    return example

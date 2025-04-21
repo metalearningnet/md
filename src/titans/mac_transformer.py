@@ -40,7 +40,7 @@ def create_mac_block_mask(seq_len, window_size, persist_mem_len, sliding = False
             causal_mask = causal_mask & sliding_mask
 
         return is_persist_mem | (~is_persist_mem & causal_mask)
-        
+
     block_mask = create_block_mask(create_mac_mask, B = None, H = None, Q_LEN = seq_len, KV_LEN = seq_len + persist_mem_len, _compile = True)
     return block_mask
 
@@ -342,7 +342,7 @@ class SegmentedAttention(Module):
 
         if not exists(flex_attn_fn):
             block_mask = create_mac_block_mask(seq_len, self.total_segment_len, self.num_persist_mem_tokens, self.sliding)
-            
+
             flex_attn_fn = partial(flex_attention, block_mask = block_mask)
 
         # attention
@@ -494,12 +494,13 @@ class MemoryAsContextTransformer(Module):
         use_flex_attn = False,
         sliding_window_attn = False,
         neural_mem_weight_residual = False,
-        token_emb: None,
+        token_emb: Module | None = None,
     ):
         super().__init__()
 
         #############################
         # Original:
+        #############################
         # if not exists(token_emb):
         #     token_emb = nn.Embedding(num_tokens, dim)
         #############################
@@ -515,6 +516,7 @@ class MemoryAsContextTransformer(Module):
         self.segment_len = segment_len
 
         self.num_longterm_mem_tokens = num_longterm_mem_tokens
+        has_longterm_mems = num_longterm_mem_tokens > 0
 
         self.longterm_mems = nn.Parameter(torch.randn(num_longterm_mem_tokens, dim) * 0.02)
 
@@ -630,7 +632,17 @@ class MemoryAsContextTransformer(Module):
         self,
         seq_len
     ):
-        assert seq_len > 0, f"seq_len > 0"
+        
+        #############################
+        # Original:
+        #############################
+        # assert seq_len > 0
+        #############################
+        # Changed:
+        #############################
+        assert seq_len > 0, 'seq_len > 0'
+        #############################
+
         segment_len, num_mem = self.segment_len, self.num_longterm_mem_tokens
         return ((seq_len - 1) // segment_len) * num_mem + seq_len
 
@@ -707,22 +719,8 @@ class MemoryAsContextTransformer(Module):
         disable_flex_attn = False,
         cache = None,
         return_cache = False,
-        factorized_pos_emb = None,
-        memory_input=None
+        factorized_pos_emb = None
     ):
-        # ========== Input Handling ==========
-        if memory_input is not None:
-            x = memory_input  # Bypass token embedding
-        else:
-            x = self.token_emb(x)  # Original token processing
-
-        # ========== Dimension Handling ==========
-        if len(x.shape) == 4:
-            _, _, seq_len, _ = x.shape
-            x = x.squeeze(1)
-        else:
-            _, seq_len, _ = x.shape
-
 
         if return_loss:
             x, labels = x[:, :-1], x[:, 1:]
@@ -731,11 +729,15 @@ class MemoryAsContextTransformer(Module):
 
         #############################
         # Original:
+        #############################
         # batch, seq_len, neural_mem_segment_len, segment_len, num_longterm_mem_tokens, attn_window_size = *x.shape, self.neural_memory_segment_len, self.segment_len, self.num_longterm_mem_tokens, self.attn_window_size
+        #############################
         # Changed:
+        #############################
         neural_mem_segment_len = self.neural_memory_segment_len
         segment_len = self.segment_len
         attn_window_size = self.attn_window_size
+        _, seq_len, _ = x.shape
         #############################
 
         seq_len_with_mem = self.seq_len_with_longterm_mem(seq_len)
@@ -744,7 +746,13 @@ class MemoryAsContextTransformer(Module):
 
         #############################
         # Original:
+        #############################
         # x = self.token_emb(x)
+        #############################
+        # Changed:
+        #############################
+        if self.token_emb:
+            x = self.token_emb(x)
         #############################
 
         # intersperse longterm memory
@@ -752,7 +760,6 @@ class MemoryAsContextTransformer(Module):
         x, inverse_segment = pad_and_segment_with_inverse(x, segment_len, inverse_remove_pad = False)
 
         mems = repeat(self.longterm_mems, 'n d -> b n d', b = x.shape[0])
-
         x, inverse_pack_mems = pack_with_inverse((x, mems), 'b * d')
 
         x = inverse_segment(x)
@@ -776,7 +783,6 @@ class MemoryAsContextTransformer(Module):
 
         if use_flex_attn:
             block_mask = create_mac_block_mask(seq_len_with_mem, self.attn_window_size, self.num_persist_mem_tokens, self.sliding_window_attn)
-            
             flex_attn_fn = partial(flex_attention, block_mask = block_mask)
 
         # kv caching
@@ -939,20 +945,10 @@ class MemoryAsContextTransformer(Module):
 
         logits = self.to_logits(x)
 
-        #############################
-        # Original:
-        # if not return_loss:
-        #    if not return_cache:
-        #        return logits
-        #    return logits, next_cache
-        # return F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels)
-        # Changed:
         if not return_loss:
-            if return_cache:
-                return logits, next_cache
-            else:
-                return logits, None
-        else:
-            loss = F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels)
-            return loss, None
-        #############################
+            if not return_cache:
+                return logits
+
+            return logits, next_cache
+
+        return F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels)

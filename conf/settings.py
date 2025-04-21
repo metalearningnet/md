@@ -1,27 +1,41 @@
 MODEL = {
-    "name": "Qwen2.5-0.5B-Instruct",
-    "site": "Qwen/Qwen2.5-0.5B-Instruct"
+    # Language Model Configuration
+    'lm': {
+        "name": "Qwen2.5-0.5B-Instruct",
+        "site": "Qwen/Qwen2.5-0.5B-Instruct"
+    },
+
+    # Skill Memory Configuration
+    'skill': {
+        "mac_persistent_mem_tokens": 2,  # Number of tokens allocated for persistent memory in MAC (Memory as a Context) architecture.
+        "mac_longterm_mem_tokens": 2,  # Number of tokens allocated for long-term memory in MAC architecture.
+        "mac_depth": 1,  # Depth of the MAC architecture.
+        "mac_segment_len": 2,  # Length of segments processed by the MAC architecture.
+        "mi_coeff": 1.0,  # Coefficient for mutual information loss to encourage diverse memory usage.
+        "entropy_coeff": 0.1,  # Coefficient for entropy regularization to encourage exploration.
+        "adv_coeff": 0.5,  # Coefficient for adversarial learning.
+        "kl_coeff": 0.01  # Coefficient for KL divergence penalty to stabilize policy updates.
+    },
+
+    # Loss Balancing Coefficients
+    'lm_coef': 0.7,  # Language model loss weight
+    'skill_coef': 0.3  # Skill memory loss weight
 }
 
-SKILL_MEMORY = {
-    "action_dim": 2,
-    "state_embed_dim": 2,
-    "hidden_dim": 2,
-    "mac_persistent_mem_tokens": 2,
-    "mac_longterm_mem_tokens": 2,
-    "mac_depth": 1,
-    "mac_segment_len": 2,
-    "mi_coeff": 1.0,
-    "entropy_coeff": 0.1,
-    "adv_coeff": 0.5,
-    "kl_coeff": 0.01
+# Optimizer Configuration
+OPTIMIZER = {
+    "preference": "SimPO"
 }
 
+# Data Loader Configuration
 LOADER = {
-    "max_length": 4,
-    "state_window": 2
+    "max_length": 32,  # Maximum sequence length for input data.
+    "max_prompt_length": 16,  # Maximum length allowed for the prompt.
+    "truncation_mode": "keep_end"  # Truncation strategy: 'keep_end' retains the end, 'keep_start' keeps the beginning.
 }
 
-ACCELERATOR = "auto" # Options: "cpu", "gpu", "tpu", or "mps"
+# Accelerator Configuration
+ACCELERATOR = "auto"  # Options: "cpu", "gpu", "tpu", or "mps".
 
-PRECISION = "bf16-mixed" # Options: "16-mixed", "32-true"
+# Precision Configuration
+PRECISION = "bf16-mixed"  # Options: "16-mixed", "32-true".

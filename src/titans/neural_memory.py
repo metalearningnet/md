@@ -15,7 +15,7 @@ from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
 
 from tensordict import TensorDict
 
-from titans.associative_scan import AssocScan
+from assoc_scan import AssocScan
 
 from titans.memory_models import(
     MemoryMLP,
