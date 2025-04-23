@@ -86,7 +86,7 @@ else
         tensordict einops einx lightning
         axial_positional_embedding rotary-embedding-torch
         x-transformers hyper_connections pyyaml fastapi uvicorn pydantic
-        trl peft vllm assoc_scan
+        trl peft vllm assoc_scan tensorboard
     )
 
     if $FLASH_ATTN_SUPPORTED; then

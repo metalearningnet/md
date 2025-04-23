@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
 from transformers import modeling_utils
+from torch.utils.tensorboard import SummaryWriter
 from alignment.data import maybe_insert_system_message, is_openai_format
 
 NODE_RANK_COORDINATOR_PORT = 10001
@@ -26,6 +27,7 @@ sys.path.append(str(_conf_dir))
 import settings
 from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER
 
+LOG = getattr(settings, 'LOG', True)
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
@@ -33,14 +35,21 @@ REMOVE_UNUSED_COLUMNS = False
 ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
 
 MD_FILE = 'md.pt'
-SAVE_DIR = Path('checkpoints')
+
 ROOT_DIR = Path(__file__).parent.parent
 MODEL_DIR = ROOT_DIR  / 'model'
 CONF_DIR = ROOT_DIR / 'conf'
+OUT_DIR = ROOT_DIR / 'outputs'
+CKPT_DIR = OUT_DIR / 'checkpoints'
+LOG_DIR = OUT_DIR / 'logs'
+TRAIN_LOG = LOG_DIR / 'train'
+TEST_LOG = LOG_DIR / 'test'
 DIST_FILE = 'dist.yaml'
 
 # Starting position for action embeddings
 SUFFIX_START = 1 << 32
+
+LOG_INTERVAL = 1
 
 RETRY_MAX = 5
 
@@ -54,16 +63,21 @@ def warn(s):
 
 @dataclass
 class Cfg:
+    log: bool
     model: dict
     loader: dict
     md_file: str
-    save_dir: Path
-    model_dir: Path
+    log_dir: Path
+    test_log: str
+    train_log: str
     attn_impl: str
     precision: str
+    ckpt_dir: Path
+    model_dir: Path
     optimizer: dict
     accelerator: str
     suffix_start: int
+    log_interval: int
     remove_unused_columns: bool
     
     @property
@@ -107,16 +121,21 @@ class Cfg:
         return CONF_DIR / 'simpo.yaml' if self.optimizer['preference'] == 'SimPO' else ''
 
 cfg = Cfg(
+    log=LOG,
     model=MODEL,
     loader=LOADER,
     md_file=MD_FILE,
-    save_dir=SAVE_DIR,
+    log_dir=LOG_DIR,
+    ckpt_dir=CKPT_DIR,
+    test_log=TEST_LOG,
+    train_log=TRAIN_LOG,
     attn_impl=ATTN_IMPL,
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
     accelerator=ACCELERATOR,
     suffix_start=SUFFIX_START,
+    log_interval=LOG_INTERVAL,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
 
@@ -212,7 +231,7 @@ def add_dist_config(
 
 def calculate_lm_loss(outputs, batch, loss_fn):
     # Get dimensions
-    lm_logits = outputs['lm_logits']
+    lm_logits = outputs['logits']
     input_ids = batch['input_ids']
     _, logits_seq_len = lm_logits.size(0), lm_logits.size(1)
     input_len = input_ids.size(1)
@@ -251,14 +270,16 @@ def get_po(model):
         training_args.remove_unused_columns = cfg.remove_unused_columns
         return SimPOTrainer(model=model, args=training_args, tokenizer=model.tokenizer)
 
-def md_train(model, optimizer, loader, scheduler, fabric):
+def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batches=-1, log_path=None, log_interval=1):
     model.train()
     po = get_po(model)
+    
     metrics = {
         'total_loss': 0.0,
         'num_batches': 0
-    } if po is None else {}
+    }
 
+    writer = SummaryWriter(log_path) if log_path else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     pbar = tqdm(
@@ -272,8 +293,8 @@ def md_train(model, optimizer, loader, scheduler, fabric):
     for batch in pbar:
         optimizer.zero_grad()
         if po:
-            loss, metrics = po.get_batch_loss_metrics(model, batch, train_eval='train', cfg=cfg)
-            po.store_metrics(metrics=metrics, train_eval='train')
+            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train', cfg=cfg)
+            po.store_metrics(metrics=train_metrics, train_eval='train')
         else:
             outputs = model(
                 input_ids=batch['input_ids'],
@@ -298,22 +319,35 @@ def md_train(model, optimizer, loader, scheduler, fabric):
         optimizer.step()
         scheduler.step()
         
-        if po is None:
-            metrics['total_loss'] += loss.item()
-            metrics['num_batches'] += 1
+        metrics['total_loss'] += loss.item()
+        metrics['num_batches'] += 1
+
+        if writer:
+            progress = int(metrics['num_batches'] / len(loader) * 100)
+            global_step = num_epochs * len(loader) + metrics['num_batches']
+            if progress % log_interval == 0 or metrics['num_batches'] == len(loader):
+                writer.add_scalar("Loss/batch", loss.item(), global_step)
+
+        if num_batches > 0:
+            num_batches -= 1
+            
+        if num_batches == 0:
+            break
     
     if po is None:
         for k in ['total_loss']:
             metrics[k] /= metrics['num_batches']
     else:
-        metrics = {}
         train_metrics = po.get_metrics()['train']
         for key, val in train_metrics.items():
             metrics[key] = torch.tensor(val).mean().item()
 
+    if writer:
+        writer.close()
+    
     return metrics
 
-def md_validate(model, loader, fabric, num_batches=-1) -> dict:
+def md_validate(model, loader, fabric, num_batches=-1, log_path=None, log_interval=1) -> dict:
     if loader == None:
         return {}
     
@@ -321,12 +355,12 @@ def md_validate(model, loader, fabric, num_batches=-1) -> dict:
     po = get_po(model)
 
     metrics = {
-        'total_loss': 0.0,
-        'avg_loss': 0.0,
-        'num_samples': 0,
-        'num_tokens': 0
-    } if po is None else {}
+        'num_batches': 0,
+        'total_loss': 0.0
+    }
 
+    num_samples = 0
+    writer = SummaryWriter(log_path) if log_path else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
     with torch.no_grad():
@@ -338,14 +372,14 @@ def md_validate(model, loader, fabric, num_batches=-1) -> dict:
         )
         for batch in pbar:
             if po:
-                loss, metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval', cfg=cfg)
-                po.store_metrics(metrics=metrics, train_eval='eval')
+                loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval', cfg=cfg)
+                po.store_metrics(metrics=eval_metrics, train_eval='eval')
             else:
                 input_ids = batch['input_ids']
                 attention_mask = batch['attention_mask']
                 outputs = model(input_ids=input_ids, attention_mask=attention_mask)
                 
-                lm_logits = outputs['lm_logits']
+                lm_logits = outputs['logits']
                 input_len = input_ids.size(1)
                 M = lm_logits.size(1) - input_len  # Memory context length
                 
@@ -359,28 +393,33 @@ def md_validate(model, loader, fabric, num_batches=-1) -> dict:
                     sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
                     lm_labels.flatten()[lm_mask]
                 ) if lm_mask.any() else 0.0
-                
-                metrics['total_loss'] += loss.item()
-                metrics['num_samples'] += input_ids.size(0)
-                metrics['num_tokens'] += lm_mask.sum().item()
 
+                num_samples += input_ids.size(0)
+            
+            metrics['num_batches'] += 1
+            metrics['total_loss'] += loss.item()
+            if writer:
+                progress = int(metrics['num_batches'] / len(loader) * 100)
+                if progress % log_interval == 0 or metrics['num_batches'] == len(loader):
+                    writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
+            
             if num_batches > 0:
-                num_batches = num_batches - 1
-            if 0 == num_batches:
+                num_batches -= 1
+            
+            if num_batches == 0:
                 break
 
     if po is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-        gathered_samples = fabric.all_gather(torch.tensor(metrics['num_samples'])).sum()
+        gathered_samples = fabric.all_gather(torch.tensor(num_samples)).sum()
         if fabric.is_global_zero and gathered_samples > 0:
             avg_loss = gathered_loss / gathered_samples
             metrics['avg_loss'] = avg_loss
             print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
 
-        if metrics['num_samples'] > 0:
-            metrics['total_loss'] /= metrics['num_samples']
+        if num_samples > 0:
+            metrics['total_loss'] /= num_samples
     else:
-        metrics = {}
         eval_metrics = po.get_metrics()['eval']
         for key, val in eval_metrics.items():
             metrics[key] = torch.tensor(val).mean().item()
@@ -389,6 +428,9 @@ def md_validate(model, loader, fabric, num_batches=-1) -> dict:
                 metrics[f'avg_{key}'] = gathered_vals.mean().item()
                 print(f"avg_{key}: {metrics[f'avg_{key}']}")
 
+    if writer:
+        writer.close()
+    
     return metrics
 
 def free_port(port):
@@ -480,9 +522,9 @@ def apply_chat_template(
 
 def get_device():
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
-        device = torch.device("mps")
+        device = torch.device('mps')
     elif torch.cuda.is_available():
-        device = torch.device("cuda")
+        device = torch.device('cuda')
     else:
-        device = torch.device("cpu")
+        device = torch.device('cpu')
     return device

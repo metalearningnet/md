@@ -1,12 +1,12 @@
 MODEL = {
     # Language Model Configuration
-    'lm': {
+    "lm": {
         "name": "Qwen2.5-0.5B-Instruct",
         "site": "Qwen/Qwen2.5-0.5B-Instruct"
     },
 
     # Skill Memory Configuration
-    'skill': {
+    "skill": {
         "mac_persistent_mem_tokens": 2,  # Number of tokens allocated for persistent memory in MAC (Memory as a Context) architecture.
         "mac_longterm_mem_tokens": 2,  # Number of tokens allocated for long-term memory in MAC architecture.
         "mac_depth": 1,  # Depth of the MAC architecture.
@@ -18,8 +18,8 @@ MODEL = {
     },
 
     # Loss Balancing Coefficients
-    'lm_coef': 0.7,  # Language model loss weight
-    'skill_coef': 0.3  # Skill memory loss weight
+    "lm_coef": 0.7,  # Language model loss weight
+    "skill_coef": 0.3  # Skill memory loss weight
 }
 
 # Optimizer Configuration

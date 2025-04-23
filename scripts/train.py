@@ -26,16 +26,32 @@ def train(config: dict):
         - batch_size: Training batch size (int)
         - val_split: Proportion of the training set to be used for validation (float)
         - weight_decay: Weight decay (float)
-        - save_dir: Checkpoint directory (str)
+        - ckpt_dir: Checkpoint directory (str)
         - save_interval: Checkpoint frequency (int)
         - fabric_config: Configuration options for the Lightning Fabric setup (dict)
+        - batches: Number of batches (int)
     """
+
     name = config['name']
-    fabric = L.Fabric(**config['fabric_config'])
+    lr = config.get('lr', 1e-4)
+    seed = config.get('seed', 42)
+    dummy = config.get('dummy', False)
+    split = config.get('split', 'train')
+    num_epochs = config.get('epochs', 1)
+    val_split=config.get('val_split', 0.1)
+    num_batches = config.get('batches', -1)
+    fabric_config = config['fabric_config']
+    batch_size = config.get('batch_size', 1)
+    split_ratio = config.get('split_ratio', 0.0)
+    dataset_config = config.get('dataset_config')
+    weight_decay = config.get('weight_decay', 0.01)
+    ckpt_dir = Path(config.get('ckpt_dir', cfg.ckpt_dir))
+    
+    fabric = L.Fabric(**fabric_config)
     fabric.launch()
 
     # Initialize model
-    model = MD.from_pretrained()
+    model = MD.from_pretrained() if not dummy else MD()
 
     # Configure optimizer
     trainable_params = []
@@ -44,30 +60,30 @@ def train(config: dict):
 
     optimizer = torch.optim.AdamW(
         trainable_params,
-        lr=config.get('lr'),
-        weight_decay=config.get('weight_decay')
+        lr=lr,
+        weight_decay=weight_decay
     )
-
+    
     model, optimizer = fabric.setup(model, optimizer)
     
     # Configure dataset loader
     loader_args = {
         'dataset_name': name,
-        'split': config.get('split'),
-        'split_ratio': config.get('split_ratio'),
-        'seed': config.get('seed')
+        'split': split,
+        'split_ratio': split_ratio,
+        'seed': seed
     }
 
-    if config.get('dataset_config'):
-        loader_args['dataset_config'] = config['dataset_config']
+    if dataset_config:
+        loader_args['dataset_config'] = dataset_config
     
     loader = MDLoader(**loader_args)
     
     # Create dataloaders
     train_loader, val_loader = loader.get_dataloaders(
-        batch_size=config.get('batch_size'),
-        val_split=config.get('val_split'),
-        seed=config.get('seed')
+        batch_size=batch_size,
+        val_split=val_split,
+        seed=seed
     )
     train_loader = fabric.setup_dataloaders(train_loader, use_distributed_sampler=True)
     if val_loader:
@@ -78,22 +94,31 @@ def train(config: dict):
         scheduler_optimizer = optimizer.optimizer
     else:
         scheduler_optimizer = optimizer
-    nr_epochs = config.get('epochs')
-    scheduler = CosineAnnealingLR(scheduler_optimizer, T_max=nr_epochs)
+    scheduler = CosineAnnealingLR(scheduler_optimizer, T_max=num_epochs)
     
     # Training loop
     best_val_loss = np.inf
-    save_dir = Path(config.get('save_dir', cfg.save_dir))
-    save_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.log:
+        cfg.log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = cfg.train_log
+        log_interval = cfg.log_interval
+    else:
+        log_path = None
+        log_interval = 0
     
-    for epoch in range(nr_epochs):
-        print(f"\nEpoch {epoch+1}/{nr_epochs}")
+    for epoch in range(num_epochs):
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
         train_metrics = md_train(
             model=model,
             optimizer=optimizer,
             loader=train_loader,
             scheduler=scheduler,
-            fabric=fabric
+            fabric=fabric,
+            num_epochs=num_epochs,
+            num_batches=num_batches,
+            log_path=log_path,
+            log_interval=log_interval
         )
         
         log_info = [
@@ -101,7 +126,7 @@ def train(config: dict):
             f"LR: {optimizer.param_groups[0]['lr']:.2e}"
         ]
         
-        val_metrics = md_validate(model, val_loader, fabric)
+        val_metrics = md_validate(model, val_loader, fabric, num_batches=num_batches)
         if fabric.is_global_zero:
             log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
         
@@ -117,14 +142,14 @@ def train(config: dict):
                 'epoch': epoch,
                 'metrics': val_metrics,
                 'config': config
-            }, save_dir / cfg.md_file)
+            }, ckpt_dir / cfg.md_file)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
         
         # Periodic checkpointing
         if (epoch + 1) % config.get('save_interval', 1) == 0:
             torch.save(
                 model.state_dict(),
-                save_dir / f"epoch_{epoch+1}.pt"
+                ckpt_dir / f"epoch_{epoch+1}.pt"
             )
             print(f"Saved epoch {epoch+1} checkpoint")
 
@@ -156,7 +181,7 @@ def main():
                         help="Weight decay")
 
     # System configuration
-    parser.add_argument("--save_dir", type=str, default=None,
+    parser.add_argument("--ckpt_dir", type=str, default=cfg.ckpt_dir,
                         help="Checkpoint directory")
     parser.add_argument("--save_interval", type=int, default=1,
                         help="Checkpoint saving frequency")
@@ -189,15 +214,13 @@ def main():
         'batch_size': args.batch_size,
 
         # System parameters
+        'ckpt_dir': args.ckpt_dir,
         'save_interval': args.save_interval,
         'fabric_config': {
             'accelerator': cfg.accelerator,
             'precision': cfg.precision
         }
     }
-    
-    if args.save_dir:
-        config['save_dir'] = args.save_dir
 
     if args.config:
         config['dataset_config'] = args.config

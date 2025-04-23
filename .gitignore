@@ -1,6 +1,6 @@
 /model/
+/outputs/
 /datasets/
-/checkpoints/
 /trainer_output/
 
 # Ignore Python-specific files
