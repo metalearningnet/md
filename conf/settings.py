@@ -1,8 +1,8 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "name": "Qwen2.5-0.5B-Instruct",
-        "site": "Qwen/Qwen2.5-0.5B-Instruct",
+        "name": "Qwen2.5-1.5B",
+        "site": "Qwen/Qwen2.5-1.5B",
         "checkpoint": True  # Gradient checkpointing to reduce memory usage
     },
 
@@ -31,7 +31,9 @@ MODEL = {
 
     # Loss Balancing Coefficients
     "lm_coef": 0.7,  # Language model loss weight
-    "skill_coef": 0.3  # Skill memory loss weight
+    "skill_coef": 0.3,  # Skill memory loss weight
+
+    "use_cache": False
 }
 
 # Optimizer Configuration

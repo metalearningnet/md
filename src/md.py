@@ -13,8 +13,9 @@ class MD(nn.Module):
         freeze_pretrained: bool = True,
         checkpoint_pretrained: bool = cfg.checkpoint_pretrained,
         skill_config = cfg.skill_config,
-        flash_attn: str = cfg.attn_impl,
-        suffix_start: int = cfg.suffix_start
+        attn: str = cfg.attn,
+        suffix_start: int = cfg.suffix_start,
+        use_cache: bool = cfg.use_cache
     ):
         super().__init__()
         
@@ -24,9 +25,11 @@ class MD(nn.Module):
         self.lm_hidden_size = self.config.hidden_size
         self.lm_num_tokens = self.config.vocab_size
         self.lm_dir = pretrained_model_dir
+        self.config.use_cache = use_cache
         self.skill_config = skill_config
-        self.flash_attn = flash_attn
         self.suffix_start = suffix_start
+        self.attn = attn
+        
         info(f"LM (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
      
         # Initialize SkillMemory with compatible dimensions
@@ -47,7 +50,7 @@ class MD(nn.Module):
             torch_dtype='auto',
             config=self.config,
             trust_remote_code=True,
-            attn_implementation=self.flash_attn
+            attn_implementation=self.attn
         )
         if self.checkpoint_pretrained:
             lm.gradient_checkpointing_enable()

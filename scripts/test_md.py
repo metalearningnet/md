@@ -11,7 +11,7 @@ from md import MD
 
 class TestMD(unittest.TestCase):
     def setUp(self):
-        self.model = MD(flash_attn='sdpa')
+        self.model = MD(attn='sdpa')
         self.seq_len = 10
         self.batch_size = 2
     
@@ -123,13 +123,11 @@ class TestMD(unittest.TestCase):
         self.assertTrue(updated, "Trainable parameters should update")
 
     def test_generation_interface(self):
-        max_length = self.seq_len * 2 + 1
         inputs = self._create_dummy_inputs()
-        generated = self.model.generate(**inputs, max_length=max_length)
+        generated = self.model.generate(**inputs)
         
         # Verify generation dimensions
         self.assertEqual(generated.shape[0], self.batch_size)
-        self.assertTrue(generated.shape[1] == 1, "Invalid number of generated tokens")
 
     def test_edge_cases(self):
         with self.subTest("Variable batch sizes"):

@@ -64,13 +64,13 @@ def warn(s):
 @dataclass
 class Cfg:
     log: bool
+    attn: str
     model: dict
     loader: dict
     md_file: str
     log_dir: Path
     test_log: str
     train_log: str
-    attn_impl: str
     precision: str
     ckpt_dir: Path
     model_dir: Path
@@ -83,6 +83,10 @@ class Cfg:
     @property
     def lm_name(self):
         return self.model['lm']['name']
+    
+    @property
+    def use_cache(self):
+        return self.model['use_cache']
     
     @property
     def checkpoint_pretrained(self):
@@ -128,12 +132,12 @@ cfg = Cfg(
     log=LOG,
     model=MODEL,
     loader=LOADER,
+    attn=ATTN_IMPL,
     md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
     train_log=TRAIN_LOG,
-    attn_impl=ATTN_IMPL,
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
