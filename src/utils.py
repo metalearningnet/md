@@ -79,13 +79,17 @@ class Cfg:
     suffix_start: int
     log_interval: int
     remove_unused_columns: bool
-    
+        
     @property
     def lm_name(self):
         return self.model['lm']['name']
     
     @property
-    def skill(self):
+    def checkpoint_pretrained(self):
+        return self.model['lm']['checkpoint']
+    
+    @property
+    def skill_config(self):
         return self.model['skill'].copy()
     
     @property

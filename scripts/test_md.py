@@ -11,7 +11,7 @@ from md import MD
 
 class TestMD(unittest.TestCase):
     def setUp(self):
-        self.model = MD(flash_attn=False)
+        self.model = MD(flash_attn='sdpa')
         self.seq_len = 10
         self.batch_size = 2
     

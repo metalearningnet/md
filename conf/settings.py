@@ -2,19 +2,31 @@ MODEL = {
     # Language Model Configuration
     "lm": {
         "name": "Qwen2.5-0.5B-Instruct",
-        "site": "Qwen/Qwen2.5-0.5B-Instruct"
+        "site": "Qwen/Qwen2.5-0.5B-Instruct",
+        "checkpoint": True  # Gradient checkpointing to reduce memory usage
     },
 
     # Skill Memory Configuration
     "skill": {
+        # ===== Memory Configuration =====
         "mac_persistent_mem_tokens": 2,  # Number of tokens allocated for persistent memory in MAC (Memory as a Context) architecture.
         "mac_longterm_mem_tokens": 2,  # Number of tokens allocated for long-term memory in MAC architecture.
         "mac_depth": 1,  # Depth of the MAC architecture.
         "mac_segment_len": 2,  # Length of segments processed by the MAC architecture.
+        
+        # ===== Loss Coefficients =====
         "mi_coeff": 1.0,  # Coefficient for mutual information loss to encourage diverse memory usage.
         "entropy_coeff": 0.1,  # Coefficient for entropy regularization to encourage exploration.
         "adv_coeff": 0.5,  # Coefficient for adversarial learning.
-        "kl_coeff": 0.01  # Coefficient for KL divergence penalty to stabilize policy updates.
+        "kl_coeff": 0.01,  # Coefficient for KL divergence penalty to stabilize policy updates.
+        
+        # ===== Gradient Checkpointing =====
+        "checkpoint": {  # Memory-for-compute tradeoff settings
+            "mac": True,  # Checkpoint MAC layers
+            "policy": True,  # Checkpoint policy network
+            "prior": True,  # Checkpoint skill prior network
+            "discriminators": True  # Checkpoint mutual information discriminators
+        }
     },
 
     # Loss Balancing Coefficients

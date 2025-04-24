@@ -3,6 +3,7 @@ import torch.nn as nn
 from utils import info
 import torch.nn.functional as F
 from titans import MemoryAsContextTransformer
+from torch.utils.checkpoint import checkpoint
 from torch.distributions import Normal, kl_divergence, Categorical
 
 class SkillMemory(nn.Module):
@@ -17,9 +18,18 @@ class SkillMemory(nn.Module):
                  mi_coeff: float = 1.0,
                  entropy_coeff: float = 0.1,
                  adv_coeff: float = 0.5,
-                 kl_coeff: float = 0.01):
+                 kl_coeff: float = 0.01,
+                 checkpoint: dict = None):
+        
         super().__init__()
         info(f"Skill memory (action_dim: {action_dim} hidden_dim: {hidden_dim})")
+
+        ckpt_config = checkpoint or {}
+        self.checkpoint_mac = ckpt_config.get('mac', False)
+        self.checkpoint_policy = ckpt_config.get('policy', False)
+        self.checkpoint_prior = ckpt_config.get('prior', False)
+        self.checkpoint_discriminators = ckpt_config.get('discriminators', False)
+
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         
@@ -66,21 +76,42 @@ class SkillMemory(nn.Module):
         self.entropy_coeff = entropy_coeff
         self.adv_coeff = adv_coeff
         self.kl_coeff = kl_coeff
-
+    
     def get_action_logits(self, states, m):
         policy_input = torch.cat([states, m], dim=-1)
-        action_logits = self.policy(policy_input)
+        
+        if self.checkpoint_policy:
+            def run_policy(policy_input):
+                return self.policy(policy_input)
+            action_logits = checkpoint(run_policy, policy_input)
+        else:
+            action_logits = self.policy(policy_input)
+            
         return action_logits, m
 
     def forward(self, states):        
         # ===== Process Through MAC =====
-        mac_output = self.mac(states)
-        m = self.mac_output_proj(mac_output)
+        if self.checkpoint_mac:
+            def run_mac(states):
+                mac_output = self.mac(states)
+                return self.mac_output_proj(mac_output)
+            m = checkpoint(run_mac, states)
+        else:
+            mac_output = self.mac(states)
+            m = self.mac_output_proj(mac_output)
 
         # ===== Skill-Conditioned Prior =====
-        prior_out, _ = self.prior_net(m)
-        prior_mean = self.prior_mean(prior_out)
-        prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
+        if self.checkpoint_prior:
+            def run_prior(m):
+                prior_out, _ = self.prior_net(m)
+                prior_mean = self.prior_mean(prior_out)
+                prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
+                return prior_mean, prior_std
+            prior_mean, prior_std = checkpoint(run_prior, m)
+        else:
+            prior_out, _ = self.prior_net(m)
+            prior_mean = self.prior_mean(prior_out)
+            prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
 
         # ===== Memory Distribution =====
         mem_std = F.softplus(self.memory_var) + 1e-4
@@ -109,15 +140,32 @@ class SkillMemory(nn.Module):
         neg_pairs = torch.cat([states, neg_m], dim=-1)
         pos_scores = self.disc_linear(self.disc_gru(pos_pairs)[0][:, -1])
         neg_scores = self.disc_linear(self.disc_gru(neg_pairs)[0][:, -1])
+
+        if self.checkpoint_discriminators:
+            def run_discriminator(pairs):
+                return self.disc_linear(self.disc_gru(pairs)[0][:, -1])
+            pos_scores = checkpoint(run_discriminator, pos_pairs)
+            neg_scores = checkpoint(run_discriminator, neg_pairs)
+        else:
+            pos_scores = self.disc_linear(self.disc_gru(pos_pairs)[0][:, -1])
+            neg_scores = self.disc_linear(self.disc_gru(neg_pairs)[0][:, -1])
+        
         mi_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores)) + \
                   F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
 
-        # ===== Action Entropy =====s
+        # ===== Action Entropy =====
         entropy = Categorical(logits=action_logits).entropy().mean()
         
-        # ===== Adversarial Loss =====s
-        real_logits = self.mmi_discriminator(torch.cat([action_logits, m.detach()], dim=-1))
-        fake_logits = self.mmi_discriminator(torch.cat([action_logits.detach(), m], dim=-1))
+        # ===== Adversarial Loss =====
+        if self.checkpoint_discriminators:
+            def run_mmi_discriminator(inputs):
+                return self.mmi_discriminator(inputs)
+            real_logits = checkpoint(run_mmi_discriminator, torch.cat([action_logits, m.detach()], dim=-1))
+            fake_logits = checkpoint(run_mmi_discriminator, torch.cat([action_logits.detach(), m], dim=-1))
+        else:
+            real_logits = self.mmi_discriminator(torch.cat([action_logits, m.detach()], dim=-1))
+            fake_logits = self.mmi_discriminator(torch.cat([action_logits.detach(), m], dim=-1))
+        
         adv_loss = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits)) + \
                    F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
 

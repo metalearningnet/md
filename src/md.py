@@ -11,18 +11,23 @@ class MD(nn.Module):
         self,
         pretrained_model_dir: Path = cfg.model_dir,
         freeze_pretrained: bool = True,
-        flash_attn: bool = True
+        checkpoint_pretrained: bool = cfg.checkpoint_pretrained,
+        skill_config = cfg.skill_config,
+        flash_attn: str = cfg.attn_impl,
+        suffix_start: int = cfg.suffix_start
     ):
         super().__init__()
-
-        # Load pretrained model configuration first
+        
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir)
         self.config = AutoConfig.from_pretrained(pretrained_model_dir)
+        self.checkpoint_pretrained = checkpoint_pretrained
         self.lm_hidden_size = self.config.hidden_size
         self.lm_num_tokens = self.config.vocab_size
         self.lm_dir = pretrained_model_dir
+        self.skill_config = skill_config
         self.flash_attn = flash_attn
-        info(f"Base LM (name: {cfg.lm_name} hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
+        self.suffix_start = suffix_start
+        info(f"LM (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
      
         # Initialize SkillMemory with compatible dimensions
         self.skill_memory = self._init_skill_memory()
@@ -37,23 +42,25 @@ class MD(nn.Module):
             self._freeze_pretrained()
 
     def _init_lm(self):
-        return AutoModelForCausalLM.from_pretrained(
+        lm = AutoModelForCausalLM.from_pretrained(
             self.lm_dir,
-            torch_dtype="auto",
+            torch_dtype='auto',
             config=self.config,
             trust_remote_code=True,
-            attn_implementation=cfg.attn_impl if self.flash_attn else 'sdpa'
+            attn_implementation=self.flash_attn
         )
+        if self.checkpoint_pretrained:
+            lm.gradient_checkpointing_enable()
+        return lm
 
     def _init_skill_memory(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""
-        skill_params = cfg.skill
-        skill_params.update({
+        self.skill_config.update({
             'num_tokens': self.lm_num_tokens,
             'hidden_dim': self.lm_hidden_size,
             'action_dim': self.lm_hidden_size
         })
-        return SkillMemory(**skill_params)
+        return SkillMemory(**self.skill_config)
 
     def _init_action_projection(self):
         """Adapter between SkillMemory and LM"""
@@ -107,7 +114,7 @@ class MD(nn.Module):
         batch_size = input_ids.size(0)
         position_ids = torch.cat([
             torch.arange(original_len, device=input_ids.device),
-            torch.arange(cfg.suffix_start, cfg.suffix_start + action_len, device=input_ids.device)
+            torch.arange(self.suffix_start, self.suffix_start + action_len, device=input_ids.device)
         ]).unsqueeze(0)
         position_ids = position_ids.expand(batch_size, -1)
         return position_ids
