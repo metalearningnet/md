@@ -31,6 +31,7 @@ LOG = getattr(settings, 'LOG', True)
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
+FREEZE_PRETRAINED = True
 REMOVE_UNUSED_COLUMNS = False
 ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
 
@@ -78,6 +79,7 @@ class Cfg:
     accelerator: str
     suffix_start: int
     log_interval: int
+    freeze_pretrained: bool
     remove_unused_columns: bool
         
     @property
@@ -144,6 +146,7 @@ cfg = Cfg(
     accelerator=ACCELERATOR,
     suffix_start=SUFFIX_START,
     log_interval=LOG_INTERVAL,
+    freeze_pretrained=FREEZE_PRETRAINED,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
 
@@ -301,7 +304,7 @@ def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batc
     for batch in pbar:
         optimizer.zero_grad()
         if po:
-            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train', cfg=cfg)
+            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
             po.store_metrics(metrics=train_metrics, train_eval='train')
         else:
             outputs = model(
@@ -380,7 +383,7 @@ def md_validate(model, loader, fabric, num_batches=-1, log_path=None, log_interv
         )
         for batch in pbar:
             if po:
-                loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval', cfg=cfg)
+                loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval')
                 po.store_metrics(metrics=eval_metrics, train_eval='eval')
             else:
                 input_ids = batch['input_ids']

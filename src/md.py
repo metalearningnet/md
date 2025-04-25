@@ -7,30 +7,23 @@ from typing import Dict, Optional
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 class MD(nn.Module):
-    def __init__(
-        self,
-        pretrained_model_dir: Path = cfg.model_dir,
-        freeze_pretrained: bool = True,
-        checkpoint_pretrained: bool = cfg.checkpoint_pretrained,
-        skill_config = cfg.skill_config,
-        attn: str = cfg.attn,
-        suffix_start: int = cfg.suffix_start,
-        use_cache: bool = cfg.use_cache
-    ):
+    def __init__(self, config=cfg, attn:str=None):
         super().__init__()
-        
-        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_dir)
-        self.config = AutoConfig.from_pretrained(pretrained_model_dir)
-        self.checkpoint_pretrained = checkpoint_pretrained
+
+        self.lm_dir = config.model_dir
+        self.lm_coef = config.lm_coef
+        self.skill_coef = config.skill_coef
+        self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
+        self.config = AutoConfig.from_pretrained(self.lm_dir)
+        self.checkpoint_pretrained = config.checkpoint_pretrained
         self.lm_hidden_size = self.config.hidden_size
         self.lm_num_tokens = self.config.vocab_size
-        self.lm_dir = pretrained_model_dir
-        self.config.use_cache = use_cache
-        self.skill_config = skill_config
-        self.suffix_start = suffix_start
-        self.attn = attn
+        self.config.use_cache = config.use_cache
+        self.skill_config = config.skill_config
+        self.suffix_start = config.suffix_start
+        self.attn = config.attn if attn is None else attn
         
-        info(f"LM (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
+        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
      
         # Initialize SkillMemory with compatible dimensions
         self.skill_memory = self._init_skill_memory()
@@ -41,7 +34,7 @@ class MD(nn.Module):
         # Configure model components
         self._init_action_projection()
 
-        if freeze_pretrained:
+        if config.freeze_pretrained:
             self._freeze_pretrained()
 
     def _init_lm(self):
@@ -168,13 +161,9 @@ class MD(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        pretrained_model_dir: Path = cfg.model_dir,
         **kwargs
     ) -> 'MD':
-        return cls(
-            pretrained_model_dir=pretrained_model_dir,
-            **kwargs
-        )
+        return cls(**kwargs)
 
     def get_trainable_parameters(self) -> Dict[str, nn.Parameter]:
         return {
