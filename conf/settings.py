@@ -1,8 +1,8 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "name": "Qwen2.5-1.5B",
-        "site": "Qwen/Qwen2.5-1.5B",
+        "name": "Qwen2.5-0.5B",
+        "site": "Qwen/Qwen2.5-0.5B",
         "checkpoint": True  # Gradient checkpointing to reduce memory usage
     },
 
@@ -13,7 +13,9 @@ MODEL = {
         "mac_longterm_mem_tokens": 2,  # Number of tokens allocated for long-term memory in MAC architecture.
         "mac_depth": 1,  # Depth of the MAC architecture.
         "mac_segment_len": 2,  # Length of segments processed by the MAC architecture.
-        
+        "mac_neural_memory_qkv_receives_diff_views": False,  # Allow Q/K/V to come from different views/layers.
+        "mac_neural_mem_weight_residual": False,  # Add residual connections between memory weight updates.
+
         # ===== Loss Coefficients =====
         "mi_coeff": 1.0,  # Coefficient for mutual information loss to encourage diverse memory usage.
         "entropy_coeff": 0.1,  # Coefficient for entropy regularization to encourage exploration.

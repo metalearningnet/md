@@ -15,6 +15,8 @@ class SkillMemory(nn.Module):
                  mac_longterm_mem_tokens: int = 64,
                  mac_depth: int = 4,
                  mac_segment_len: int = 32,
+                 mac_neural_memory_qkv_receives_diff_views: bool = False,
+                 mac_neural_mem_weight_residual: bool = False,
                  mi_coeff: float = 1.0,
                  entropy_coeff: float = 0.1,
                  adv_coeff: float = 0.5,
@@ -41,7 +43,8 @@ class SkillMemory(nn.Module):
             segment_len=mac_segment_len,
             num_persist_mem_tokens=mac_persistent_mem_tokens,
             num_longterm_mem_tokens=mac_longterm_mem_tokens,
-            neural_memory_segment_len=mac_segment_len,
+            neural_memory_qkv_receives_diff_views=mac_neural_memory_qkv_receives_diff_views,
+            neural_mem_weight_residual=mac_neural_mem_weight_residual,
             token_emb=None
         )
         self.mac_output_proj = nn.Linear(num_tokens, hidden_dim)
