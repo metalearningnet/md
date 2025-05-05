@@ -616,7 +616,8 @@ class SimPOTrainer(Trainer):
             **model_kwargs,
         )
         states = model_out['states']
-        all_logits = model_out['logits'][:, :model_out['logits'].size(-2) // 2, :]
+        if states is not None:
+            all_logits = model_out['logits'][:, :model_out['logits'].size(-2) // 2, :]
         all_logps = self.get_batch_logps(
             all_logits,
             concatenated_batch["concatenated_labels"],
@@ -692,41 +693,39 @@ class SimPOTrainer(Trainer):
             states
         ) = self.concatenated_forward(model, batch)
 
-        if model.lm_coef == 0.0:
-            total_loss = model.skill_memory.compute_losses(states)['total_loss']
-            metrics[f"{prefix}loss_skill"] = total_loss
-        else:
-            losses, chosen_rewards, rejected_rewards = self.simpo_loss(
-                policy_chosen_logps,
-                policy_rejected_logps,
-            )
+        losses, chosen_rewards, rejected_rewards = self.simpo_loss(
+            policy_chosen_logps,
+            policy_rejected_logps,
+        )
 
-            loss = losses.mean()
+        lm_loss = losses.mean()
+        loss = lm_loss
 
-            if self.sft_weight > 0.0:
-                if not self.is_encoder_decoder:
-                    policy_chosen_logits = policy_chosen_logits[..., :-1, :].contiguous()
-                    chosen_labels = chosen_labels[..., 1:].clone()
-                loss_func = nn.CrossEntropyLoss()
-                sft_loss = loss_func(policy_chosen_logits.view(-1, policy_chosen_logits.shape[-1]), chosen_labels.view(-1))
-                loss = self.sft_weight * sft_loss + loss
-                metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
-            
-            reward_accuracies = (chosen_rewards > rejected_rewards).float()
-            loss_skill = model.skill_memory.compute_losses(states)['total_loss']
-            total_loss = model.lm_coef * loss + model.skill_coef * loss_skill
-
-            metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
-            metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
-            metrics[f"{prefix}rewards/accuracies"] = reward_accuracies.mean().cpu()
-            metrics[f"{prefix}rewards/margins"] = (chosen_rewards - rejected_rewards).mean().cpu()
-            metrics[f"{prefix}logps/rejected"] = policy_rejected_logps.detach().mean().cpu()
-            metrics[f"{prefix}logps/chosen"] = policy_chosen_logps.detach().mean().cpu()
-            metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().mean().cpu()
-            metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
-            metrics[f"{prefix}loss_lm"] = loss
-            metrics[f"{prefix}loss_skill"] = loss_skill
-
+        if self.sft_weight > 0.0:
+            if not self.is_encoder_decoder:
+                policy_chosen_logits = policy_chosen_logits[..., :-1, :].contiguous()
+                chosen_labels = chosen_labels[..., 1:].clone()
+            loss_func = nn.CrossEntropyLoss()
+            sft_loss = loss_func(policy_chosen_logits.view(-1, policy_chosen_logits.shape[-1]), chosen_labels.view(-1))
+            loss = self.sft_weight * sft_loss + loss
+            metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
+        
+        reward_accuracies = (chosen_rewards > rejected_rewards).float()
+        skill_loss = model.skill_memory.compute_losses(states)['total_loss']
+        total_loss = model.lm_coef * loss + model.skill_coef * skill_loss
+        
+        metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
+        metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
+        metrics[f"{prefix}rewards/accuracies"] = reward_accuracies.mean().cpu()
+        metrics[f"{prefix}rewards/margins"] = (chosen_rewards - rejected_rewards).mean().cpu()
+        metrics[f"{prefix}logps/rejected"] = policy_rejected_logps.detach().mean().cpu()
+        metrics[f"{prefix}logps/chosen"] = policy_chosen_logps.detach().mean().cpu()
+        metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().mean().cpu()
+        metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
+        metrics[f"{prefix}total_loss"] = total_loss
+        metrics[f"{prefix}skill_loss"] = skill_loss
+        metrics[f"{prefix}lm_loss"] = lm_loss
+        
         return total_loss, metrics
 
     def compute_loss(

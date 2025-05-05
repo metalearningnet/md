@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from pathlib import Path
 from utils import info, cfg
 from skill import SkillMemory
 from typing import Dict, Optional
@@ -76,31 +75,39 @@ class MD(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        state_embeds = self.lm.get_input_embeddings()(input_ids)
+        if self.skill_coef:
+            state_embeds = self.lm.get_input_embeddings()(input_ids)
+            
+            # Process through SkillMemory
+            action_logits = self.skill_memory.generate(state_embeds)
+            
+            # Adapt actions
+            action_embeds = self.action_proj(action_logits)
+            
+            # Combine with text inputs
+            inputs_embeds = self._combine_inputs(state_embeds, action_embeds)
+            position_ids = self._create_position_ids(input_ids, action_embeds)
+            attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
         
-        # Process through SkillMemory
-        action_logits = self.skill_memory.generate(state_embeds)
-        
-        # Adapt actions
-        action_embeds = self.action_proj(action_logits)
-        
-        # Combine with text inputs
-        inputs_embeds = self._combine_inputs(state_embeds, action_embeds)
-        position_ids = self._create_position_ids(input_ids, action_embeds)
-        attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
-        
-        # Forward through LM
-        lm_out = self.lm(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            output_hidden_states=True
-        )
+            # Forward through LM
+            lm_out = self.lm(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                output_hidden_states=True
+            )
+        else:
+            state_embeds = None
+            action_logits = None
+            lm_out = self.lm(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
         
         return {
             'states': state_embeds,
-            'logits': lm_out.logits,
-            'action_logits': action_logits
+            'action_logits': action_logits,
+            'logits': lm_out.logits
         }
 
     def _create_position_ids(self, input_ids, action_embeds):
@@ -138,26 +145,32 @@ class MD(nn.Module):
         **generation_kwargs
     ) -> torch.Tensor:
         with torch.no_grad():
-            attention_mask = generation_kwargs.get('attention_mask')
-            state_embeds = self.lm.get_input_embeddings()(input_ids)
-        
-            # Get memory context
-            action_logits = self.skill_memory.generate(state_embeds)
-            action_embeds = self.action_proj(action_logits)
+            if self.skill_coef:
+                attention_mask = generation_kwargs.get('attention_mask')
+                state_embeds = self.lm.get_input_embeddings()(input_ids)
             
-            # Prepare inputs
-            input_embeds = self._combine_inputs(state_embeds, action_embeds)
-            position_ids = self._create_position_ids(input_ids, action_embeds)
-            attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
-            generation_kwargs['attention_mask'] = attention_mask
+                # Get memory context
+                action_logits = self.skill_memory.generate(state_embeds)
+                action_embeds = self.action_proj(action_logits)
+                
+                # Prepare inputs
+                input_embeds = self._combine_inputs(state_embeds, action_embeds)
+                position_ids = self._create_position_ids(input_ids, action_embeds)
+                attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
+                generation_kwargs['attention_mask'] = attention_mask
             
-            # Generate with adjusted mask
-            return self.lm.generate(
-                inputs_embeds=input_embeds,
-                position_ids=position_ids,
-                **generation_kwargs
-            )
-
+                # Generate with adjusted mask
+                return self.lm.generate(
+                    inputs_embeds=input_embeds,
+                    position_ids=position_ids,
+                    **generation_kwargs
+                )
+            else:
+                return self.lm.generates(
+                    input_ids=input_ids,
+                    **generation_kwargs
+                )
+    
     @classmethod
     def from_pretrained(
         cls,
