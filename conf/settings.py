@@ -1,8 +1,8 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "name": "Qwen2-0.5B",
-        "site": "Qwen/Qwen2-0.5B",
+        "name": "Qwen2.5-0.5B",
+        "site": "Qwen/Qwen2.5-0.5B",
         "checkpoint": True  # Gradient checkpointing to reduce memory usage
     },
 
@@ -17,10 +17,10 @@ MODEL = {
         "mac_neural_mem_weight_residual": False,  # Add residual connections between memory weight updates.
 
         # ===== Loss Coefficients =====
-        "mi_coeff": 1.0,  # Weight for mutual information loss to encourage diverse memory usage.
+        "mi_coeff": 0.5,  # Weight for mutual information loss to encourage diverse memory usage.
         "entropy_coeff": 0.1,  # Weight for entropy regularization to encourage exploration.
-        "adv_coeff": 0.5,  # Weight for adversarial learning.
-        "kl_coeff": 0.01,  # Weight for KL divergence penalty to stabilize policy updates.
+        "adv_coeff": 0.2,  # Weight for adversarial learning.
+        "kl_coeff": 0.2,  # Weight for KL divergence penalty to stabilize policy updates.
         
         # ===== Gradient Checkpointing =====
         "checkpoint": {  # Memory-for-compute tradeoff settings
@@ -42,7 +42,7 @@ MODEL = {
 
 # Optimizer Configuration
 OPTIMIZER = {
-    "preference": "SimPO"
+    "preference": "SimPO"  # ["SimPO", "NCA"]
 }
 
 # Data Loader Configuration

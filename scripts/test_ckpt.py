@@ -10,12 +10,12 @@ from test import test
 _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
-from utils import cfg
+from utils import cfg, default_dataset
 
 class TestCkpt(unittest.TestCase):
-    def setUp(self):        
+    def setUp(self):
         self.train_args = {
-            'name': 'princeton-nlp/gemma2-ultrafeedback-armorm',
+            'name': default_dataset,
             'split': 'train',
             'epochs': 1,
             'batches': 1,
@@ -28,7 +28,7 @@ class TestCkpt(unittest.TestCase):
         }
 
         self.test_args = {
-            'name': 'princeton-nlp/gemma2-ultrafeedback-armorm',
+            'name': default_dataset,
             'split': 'test',
             'model_path': cfg.ckpt_dir / cfg.md_file,
             'batches': 1,

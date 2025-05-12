@@ -9,6 +9,7 @@ import uvicorn
 import requests
 import subprocess
 from tqdm import tqdm
+from typing import Dict
 from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -16,7 +17,6 @@ from dataclasses import dataclass
 from threading import Thread, Lock
 from transformers import modeling_utils
 from torch.utils.tensorboard import SummaryWriter
-from alignment.data import maybe_insert_system_message, is_openai_format
 
 NODE_RANK_COORDINATOR_PORT = 10001
 
@@ -117,18 +117,29 @@ class Cfg:
     @property
     def max_prompt_length(self):
         return self.loader.get('max_prompt_length', 128)
-
+    
+    @property
+    def max_target_length(self):
+        return self.loader.get('max_target_length', 128)
+    
     @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
     
     @property
     def po(self):
-        return self.optimizer['preference']
+        return self.optimizer.get('preference')
     
     @property
     def po_conf_file(self):
-        return CONF_DIR / 'simpo.yaml' if self.optimizer['preference'] == 'SimPO' else ''
+        preference = self.optimizer.get('preference')
+        
+        if preference == 'SimPO':
+            return CONF_DIR / 'simpo.yaml'
+        elif preference == 'NCA':
+            return CONF_DIR / 'nca.yaml'
+        else:
+            return ''
 
 cfg = Cfg(
     log=LOG,
@@ -149,6 +160,17 @@ cfg = Cfg(
     freeze_pretrained=FREEZE_PRETRAINED,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
+
+if cfg.po == 'NCA':
+    from nca.nca_utils import DatasetMap
+    from nca.nca_utils import nca_collate as collate
+    default_dataset = "ChenDRAG/ultrafeedback_reward"
+elif cfg.po == 'SimPO':
+    from simpo.simpo_utils import DatasetMap
+    from simpo.simpo_utils import simpo_collate as collate
+    default_dataset = "princeton-nlp/gemma2-ultrafeedback-armorm"
+else:
+    default_dataset = "ag_news"
 
 class RegisterRequest(BaseModel):
     hostname: str
@@ -271,15 +293,27 @@ def calculate_lm_loss(outputs, batch, loss_fn):
 
 def get_po(model):
     if cfg.po == 'SimPO':
+        from simpo.simpo_config import SimPOConfig as config
+        from simpo.simpo_trainer import SimPOTrainer as trainer
+    elif cfg.po == 'NCA':
+        from nca.nca_config import NCAConfig as config
+        from nca.nca_trainer import NCATrainer as trainer
+    else:
+        config = None
+        trainer = None
+    
+    if trainer:
         from alignment import H4ArgumentParser
-        from simpo.simpo_config import SimPOConfig
-        from simpo.simpo_trainer import SimPOTrainer
-        parser = H4ArgumentParser((SimPOConfig,))
+        parser = H4ArgumentParser((config,))
         training_args = parser.parse(cfg.po_conf_file)
         training_args.max_length = cfg.max_length
         training_args.max_prompt_length = cfg.max_prompt_length
         training_args.remove_unused_columns = cfg.remove_unused_columns
-        return SimPOTrainer(model=model, args=training_args, tokenizer=model.tokenizer)
+        return trainer(
+            model=model, 
+            args=training_args,
+            tokenizer=model.tokenizer
+        )
 
 def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batches=-1, log_path=None, log_interval=1):
     model.train()
@@ -487,49 +521,6 @@ def get_node_rank(main_address: str, main_port: int, num_nodes: int) -> int:
                 time.sleep(2 ** attempt)
 
     raise RuntimeError(f"Failed to contact node rank coordinator at {main_address}")
-
-
-def apply_chat_template(
-    example,
-    tokenizer,
-    auto_insert_empty_system_msg: bool = True
-):
-    required_keys = {'chosen', 'rejected'}
-    if not required_keys.issubset(example.keys()):
-        raise ValueError(
-            f"Could not format example as dialogue! Require either "
-            f"`[chosen, rejected]` or `[prompt, chosen, rejected]` keys but found {list(example.keys())}"
-        )
-    
-    if not all(is_openai_format(msg) for msg in (example['chosen'], example['rejected'])):
-        raise ValueError("Could not format example as dialogue! Require OpenAI format for all messages.")
-
-    if 'prompt' in example and is_openai_format(example['prompt']):
-        prompt_messages = example['prompt']
-        chosen_messages = example['chosen']
-        rejected_messages = example['rejected']
-    else:
-        prompt_messages = example['chosen'][:-1]
-        chosen_messages = example['chosen'][-1:]
-        rejected_messages = example['rejected'][-1:]
-
-    if not (prompt_messages and chosen_messages and rejected_messages):
-        raise ValueError("Prompt, chosen, and rejected must be non-empty.")
-    
-    if auto_insert_empty_system_msg:
-        maybe_insert_system_message(prompt_messages, tokenizer)
-
-    def apply_and_trim(messages):
-        text = tokenizer.apply_chat_template(messages, tokenize=False)
-        if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
-            return text[len(tokenizer.bos_token):]
-        return text
-    
-    example['text_prompt'] = apply_and_trim(prompt_messages)
-    example['text_chosen'] = apply_and_trim(chosen_messages)
-    example['text_rejected'] = apply_and_trim(rejected_messages)
-    
-    return example
 
 def get_device():
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():

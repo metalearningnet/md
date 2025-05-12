@@ -1,4 +1,4 @@
-# SimPO
+# SimPO: Simple Preference Optimization
 
 This directory contains the official implementation of [SimPO](https://arxiv.org/abs/2405.14734).
 For more details, refer to the original repository: 

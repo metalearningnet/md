@@ -26,15 +26,15 @@ To prepare the training data:
 ./run.sh --prepare
 ```
 
-## Key Features
-- 🧠 **Disentangled Memory Architecture**:  
-  Separate modules for persistent memory (task knowledge) and dynamic memory (skill trajectories)
-- ⚡ **Efficient Memory Updates**:  
-  Momentum-based gradient updates for stable long-term memorization
-- 🔄 **Modular Integration**:  
-  Compatible with existing Transformer architectures via the MAC (Memory as Context) module
-- 📈 **Test-Time Scaling**:  
-  Performance improves with longer input sequences through adaptive memory utilization
+## Key Features  
+- 🧠 **Disentangled Memory Architecture**  
+  Separate modules for *persistent memory* (retains general task knowledge) and *dynamic memory* (tracks evolving skill trajectories)  
+
+- ⚡ **Efficient Memory Updates**  
+  Uses gradient descent with momentum for fast and stable updates to the neural skill memory  
+
+- 📈 **Test-Time Scaling**  
+  Adapts to longer and more complex input sequences through effective memory utilization
 
 ## License
 This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.

@@ -2,14 +2,14 @@ import sys
 import torch
 import argparse
 import lightning as L
-from pathlib import Path
+from pathlib import Path, PosixPath
 
 _src_dir = Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, add_dist_config
+from utils import md_validate, cfg, add_dist_config, default_dataset
 
 def test(config: dict):
     """
@@ -24,17 +24,19 @@ def test(config: dict):
     """
     
     dataset_name = config['name']
+    dataset_config = config.get('dataset_config')
     split = config.get('split', 'test')
+    model_path = config.get('model_path', cfg.ckpt_dir / cfg.md_file)
+    batch_size = config.get('batch_size', 1)
     fabric_config = config['fabric_config']
     num_batches = config.get('batches', -1)
-    batch_size = config.get('batch_size', 1)
-    dataset_config = config.get('dataset_config')
-    model_path = config.get('model_path', cfg.ckpt_dir / cfg.md_file)
     
     fabric = L.Fabric(**fabric_config)
     fabric.launch()
 
-    checkpoint = torch.load(model_path)
+    with torch.serialization.safe_globals([PosixPath]):
+        checkpoint = torch.load(model_path, weights_only=True)
+    
     model_state_dict = checkpoint['model']
     model = MD.from_pretrained()
     model.load_state_dict(model_state_dict)
@@ -69,7 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description="Test the MD Model")
 
     # Testing configuration
-    parser.add_argument("--name", type=str, default="princeton-nlp/gemma2-ultrafeedback-armorm", 
+    parser.add_argument("--name", type=str, 
                         help="Dataset name")
     parser.add_argument("--config", type=str, default=None,
                         help="Dataset configuration name")
@@ -102,6 +104,9 @@ def main():
         'accelerator': cfg.accelerator,
         'precision': cfg.precision
     }
+    
+    if args.name is None:
+        args.name = default_dataset
     
     if args.dist:
         add_dist_config(

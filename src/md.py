@@ -17,6 +17,7 @@ class MD(nn.Module):
         self.checkpoint_pretrained = config.checkpoint_pretrained
         self.lm_hidden_size = self.config.hidden_size
         self.lm_num_tokens = self.config.vocab_size
+        self.max_length = self.config.max_length
         self.config.use_cache = config.use_cache
         self.skill_config = config.skill_config
         self.suffix_start = config.suffix_start
@@ -139,37 +140,57 @@ class MD(nn.Module):
     ) -> torch.Tensor:
         return torch.cat([state_embeds, action_embeds], dim=1)
 
+    def _generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None
+    ):
+        device = input_ids.device
+        batch_size = input_ids.shape[0]
+        generated_ids = input_ids.clone()
+        eos_flags = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for _ in range(self.max_length - input_ids.shape[1]):
+            if eos_flags.all():
+                break
+            
+            model_inputs = {
+                "input_ids": generated_ids,
+            }
+
+            if attention_mask is not None:
+                current_length = generated_ids.shape[1]
+                extended_attention_mask = torch.cat([
+                    attention_mask,
+                    torch.ones((batch_size, current_length - attention_mask.shape[1]), device=device)
+                ], dim=1)
+                model_inputs["attention_mask"] = extended_attention_mask
+
+            with torch.no_grad():
+                outputs = self.forward(**model_inputs)
+            
+            next_token_logits = outputs['logits'][:, -1, :]
+            next_tokens = torch.argmax(next_token_logits, dim=-1)
+            next_tokens = next_tokens.masked_fill(eos_flags, self.tokenizer.eos_token_id)
+            eos_flags = eos_flags | (next_tokens == self.tokenizer.eos_token_id)
+            generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
+
+        return generated_ids
+
     def generate(
         self,
         input_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
         **generation_kwargs
     ) -> torch.Tensor:
-        with torch.no_grad():
-            if self.skill_coef:
-                attention_mask = generation_kwargs.get('attention_mask')
-                state_embeds = self.lm.get_input_embeddings()(input_ids)
-            
-                # Get memory context
-                action_logits = self.skill_memory.generate(state_embeds)
-                action_embeds = self.action_proj(action_logits)
-                
-                # Prepare inputs
-                input_embeds = self._combine_inputs(state_embeds, action_embeds)
-                position_ids = self._create_position_ids(input_ids, action_embeds)
-                attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
-                generation_kwargs['attention_mask'] = attention_mask
-            
-                # Generate with adjusted mask
-                return self.lm.generate(
-                    inputs_embeds=input_embeds,
-                    position_ids=position_ids,
-                    **generation_kwargs
-                )
-            else:
-                return self.lm.generates(
-                    input_ids=input_ids,
-                    **generation_kwargs
-                )
+        if self.skill_coef:
+            return self._generate(input_ids, attention_mask)
+        else:
+            return self.lm.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs
+            )
     
     @classmethod
     def from_pretrained(

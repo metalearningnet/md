@@ -8,19 +8,19 @@ from torch.distributions import Normal, kl_divergence, Categorical
 
 class SkillMemory(nn.Module):
     def __init__(self,
-                 num_tokens: int = 4,
-                 action_dim: int = 64,
-                 hidden_dim: int = 32,
+                 num_tokens: int = 16384,
+                 action_dim: int = 256,
+                 hidden_dim: int = 256,
                  mac_persistent_mem_tokens: int = 64,
                  mac_longterm_mem_tokens: int = 64,
                  mac_depth: int = 4,
-                 mac_segment_len: int = 32,
+                 mac_segment_len: int = 256,
                  mac_neural_memory_qkv_receives_diff_views: bool = False,
                  mac_neural_mem_weight_residual: bool = False,
-                 mi_coeff: float = 1.0,
+                 mi_coeff: float = 0.5,
                  entropy_coeff: float = 0.1,
-                 adv_coeff: float = 0.5,
-                 kl_coeff: float = 0.01,
+                 adv_coeff: float = 0.2,
+                 kl_coeff: float = 0.2,
                  checkpoint: dict = None):
         
         super().__init__()
@@ -141,8 +141,6 @@ class SkillMemory(nn.Module):
         pos_pairs = torch.cat([states, m], dim=-1)
         neg_m = m[torch.randperm(m.size(0))]
         neg_pairs = torch.cat([states, neg_m], dim=-1)
-        pos_scores = self.disc_linear(self.disc_gru(pos_pairs)[0][:, -1])
-        neg_scores = self.disc_linear(self.disc_gru(neg_pairs)[0][:, -1])
 
         if self.checkpoint_discriminators:
             def run_discriminator(pairs):

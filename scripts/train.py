@@ -11,7 +11,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_train, md_validate, cfg, add_dist_config
+from utils import md_train, md_validate, cfg, add_dist_config, default_dataset
 
 def train(config: dict):
     """
@@ -33,25 +33,23 @@ def train(config: dict):
     """
 
     name = config['name']
-    lr = config.get('lr', 1e-4)
-    seed = config.get('seed', 42)
-    dummy = config.get('dummy', False)
-    split = config.get('split', 'train')
-    num_epochs = config.get('epochs', 1)
-    val_split=config.get('val_split', 0.1)
-    num_batches = config.get('batches', -1)
-    fabric_config = config['fabric_config']
-    batch_size = config.get('batch_size', 1)
-    split_ratio = config.get('split_ratio', 0.0)
     dataset_config = config.get('dataset_config')
+    split = config.get('split', 'train')
+    split_ratio = config.get('split_ratio', 0.0)
+    seed = config.get('seed', 42)
+    lr = config.get('lr', 1e-4)
+    num_epochs = config.get('epochs', 1)
+    batch_size = config.get('batch_size', 1)
+    val_split=config.get('val_split', 0.1)
     weight_decay = config.get('weight_decay', 0.01)
     ckpt_dir = Path(config.get('ckpt_dir', cfg.ckpt_dir))
+    save_interval = config.get('save_interval', 1)
+    fabric_config = config['fabric_config']
+    num_batches = config.get('batches', -1)
     
     fabric = L.Fabric(**fabric_config)
     fabric.launch()
-
-    # Initialize model
-    model = MD.from_pretrained() if not dummy else MD()
+    model = MD()
 
     # Configure optimizer
     trainable_params = []
@@ -146,7 +144,7 @@ def train(config: dict):
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
         
         # Periodic checkpointing
-        if (epoch + 1) % config.get('save_interval', 1) == 0:
+        if (epoch + 1) % save_interval == 0:
             torch.save(
                 model.state_dict(),
                 ckpt_dir / f"epoch_{epoch+1}.pt"
@@ -157,7 +155,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train the MD Model")
     
     # Dataset configuration
-    parser.add_argument("--name", type=str, default="princeton-nlp/gemma2-ultrafeedback-armorm", 
+    parser.add_argument("--name", type=str, 
                         help="Dataset name")
     parser.add_argument("--config", type=str, default=None,
                         help="Dataset configuration name")
@@ -197,6 +195,9 @@ def main():
                         help="The number of nodes for distributed training")
 
     args = parser.parse_args()
+
+    if args.name is None:
+        args.name = default_dataset
     
     config = {
         'name': args.name,

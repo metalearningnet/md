@@ -82,7 +82,7 @@ class TestMD(unittest.TestCase):
         # Check LM parameters frozen
         for name, param in self.model.lm.named_parameters():
             self.assertFalse(param.requires_grad, f"LLM parameter {name} should be frozen")
-            
+        
         # Verify trainable components
         components = ['action_proj', 'skill_memory']
         for comp in components:
@@ -113,8 +113,8 @@ class TestMD(unittest.TestCase):
 
     def test_generation_interface(self):
         inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt")
-        generated = self.model.generate(input_ids=inputs['input_ids'])
-        self.assertEqual(generated.shape[0], 1)
+        outputs = self.model.generate(input_ids=inputs['input_ids'])
+        self.assertEqual(outputs.shape[0], 1)
 
     def test_edge_cases(self):
         with self.subTest("Variable batch sizes"):
