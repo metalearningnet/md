@@ -45,18 +45,17 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-VLLM_SUPPORTED=true
+VLLM_SUPPORTED=false
+FLASH_ATTN_SUPPORTED=false
 
 case "$OS" in
     Linux)
-        CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev)
+        CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev libaio)
         DEEPSPEED_SUPPORTED=true
-        FLASH_ATTN_SUPPORTED=true
         ;;
     Darwin)
         CONDA_PACKAGES=()
         DEEPSPEED_SUPPORTED=false
-        FLASH_ATTN_SUPPORTED=false
         ;;
     *) log_error "Unsupported platform: $OS" ;;
 esac
@@ -79,29 +78,29 @@ else
         tensordict einops einx lightning
         axial_positional_embedding rotary-embedding-torch
         x-transformers hyper_connections pyyaml fastapi uvicorn pydantic
-        trl peft assoc_scan tensorboard
+        trl peft assoc_scan tensorboard wandb
     )
 
     pip install "${PYTHON_PACKAGES[@]}" || \
         log_error "Python package installation failed"
 
-    if $VLLM_SUPPORTED; then
+    if [ "$VLLM_SUPPORTED" = true ]; then
         log_info "Installing vllm..."
         pip install vllm || log_warn "vllm installation failed"
     else
         log_warn "Skipping vllm"
     fi
 
-    if $FLASH_ATTN_SUPPORTED; then
+    if [ "$FLASH_ATTN_SUPPORTED" = true ]; then
         log_info "Installing flash-attn..."
         pip install flash-attn || log_warn "flash-attn installation failed"
     else
         log_warn "Skipping flash-attn (requires Linux)"
     fi
 
-    if $DEEPSPEED_SUPPORTED && [ "$ARCH" = "x86_64" ]; then
+    if [ "$DEEPSPEED_SUPPORTED" = true ] && [ "$ARCH" = "x86_64" ]; then
         log_info "Installing DeepSpeed..."
-        pip install deepspeed || log_warn "DeepSpeed installation failed"
+        pip install --upgrade deepspeed || log_warn "DeepSpeed installation failed"
     else
         log_warn "Skipping DeepSpeed (requires Linux x86_64)"
     fi

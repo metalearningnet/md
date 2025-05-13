@@ -4,32 +4,33 @@ import argparse
 import numpy as np
 import lightning as L
 from pathlib import Path
-from torch.optim.lr_scheduler import CosineAnnealingLR
 
 _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_train, md_validate, cfg, add_dist_config, default_dataset
+from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset
 
 def train(config: dict):
     """
     config:
-        - name: Dataset name (str)
-        - dataset_config: Dataset configuration name (str)
-        - split: Dataset split name (e.g., "train") (str)
-        - split_ratio: Proportion of the dataset to be allocated for training or testing (float)
-        - seed: Random seed (int)
-        - lr: Learning rate (float)
-        - epochs: Number of epochs (int)
-        - batch_size: Training batch size (int)
-        - val_split: Proportion of the training set to be used for validation (float)
-        - weight_decay: Weight decay (float)
-        - ckpt_dir: Checkpoint directory (str)
-        - save_interval: Checkpoint frequency (int)
-        - fabric_config: Configuration options for the Lightning Fabric setup (dict)
-        - batches: Number of batches (int)
+        - name (str): Dataset name.
+        - dataset_config (str): Dataset configuration name.
+        - split (str): Dataset split name (e.g., "train").
+        - split_ratio (float): Proportion of the dataset to be allocated for training or testing.
+        - seed (int): Random seed.
+        - lr (float): Learning rate.
+        - epochs (int): Number of epochs.
+        - batch_size (int): Training batch size.
+        - val_split (float): Proportion of the training set to be used for validation.
+        - weight_decay (float): Weight decay.
+        - ckpt_dir (str): Checkpoint directory.
+        - save_interval (int): Checkpoint frequency.
+        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
+        - batches (int): Number of batches.
+        - gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating model weights.
+        - dist (bool): Enable distributed training.
     """
 
     name = config['name']
@@ -46,6 +47,8 @@ def train(config: dict):
     save_interval = config.get('save_interval', 1)
     fabric_config = config['fabric_config']
     num_batches = config.get('batches', -1)
+    gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
+    dist = config.get('dist', False)
     
     fabric = L.Fabric(**fabric_config)
     fabric.launch()
@@ -56,14 +59,18 @@ def train(config: dict):
     for param_group in model.get_trainable_parameters().values():
         trainable_params += [p for p in param_group if p.requires_grad]
 
-    optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=lr,
-        weight_decay=weight_decay
-    )
-    
-    model, optimizer = fabric.setup(model, optimizer)
-    
+    if not dist:
+        optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+        model, optimizer = fabric.setup(model, optimizer)
+    else:
+        model = fabric.setup(model)
+        optimizer = None
+
+
     # Configure dataset loader
     loader_args = {
         'dataset_name': name,
@@ -86,13 +93,6 @@ def train(config: dict):
     train_loader = fabric.setup_dataloaders(train_loader, use_distributed_sampler=True)
     if val_loader:
         val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
-   
-    # Training utilities
-    if hasattr(optimizer, 'optimizer'):  # For DeepSpeed wrapped optimizers
-        scheduler_optimizer = optimizer.optimizer
-    else:
-        scheduler_optimizer = optimizer
-    scheduler = CosineAnnealingLR(scheduler_optimizer, T_max=num_epochs)
     
     # Training loop
     best_val_loss = np.inf
@@ -109,19 +109,18 @@ def train(config: dict):
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         train_metrics = md_train(
             model=model,
-            optimizer=optimizer,
             loader=train_loader,
-            scheduler=scheduler,
+            optimizer=optimizer,
             fabric=fabric,
             num_epochs=num_epochs,
             num_batches=num_batches,
             log_path=log_path,
-            log_interval=log_interval
+            log_interval=log_interval,
+            gradient_accumulation_steps=gradient_accumulation_steps
         )
         
         log_info = [
-            f"Train Loss: {train_metrics['total_loss']:.4f}",
-            f"LR: {optimizer.param_groups[0]['lr']:.2e}"
+            f"Train Loss: {train_metrics['total_loss']:.4f}"
         ]
         
         val_metrics = md_validate(model, val_loader, fabric, num_batches=num_batches)
@@ -133,22 +132,12 @@ def train(config: dict):
         # Save best checkpoint
         if val_metrics.get('total_loss', np.inf) < best_val_loss:
             best_val_loss = val_metrics['total_loss']
-            torch.save({
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict(),
-                'epoch': epoch,
-                'metrics': val_metrics,
-                'config': config
-            }, ckpt_dir / cfg.md_file)
+            torch.save(model.state_dict(), ckpt_dir / cfg.md_file)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
         
         # Periodic checkpointing
         if (epoch + 1) % save_interval == 0:
-            torch.save(
-                model.state_dict(),
-                ckpt_dir / f"epoch_{epoch+1}.pt"
-            )
+            torch.save(model.state_dict(), ckpt_dir / f"epoch_{epoch+1}.pt")
             print(f"Saved epoch {epoch+1} checkpoint")
 
 def main():
@@ -215,6 +204,7 @@ def main():
         'batch_size': args.batch_size,
 
         # System parameters
+        'dist': args.dist,
         'ckpt_dir': args.ckpt_dir,
         'save_interval': args.save_interval,
         'fabric_config': {
@@ -228,15 +218,17 @@ def main():
 
     if args.dist:
         add_dist_config(
-            config['fabric_config'],
+            config,
             main_addr=args.addr,
             main_port=args.port,
             num_nodes=args.nodes,
-            lr=args.lr,
-            weight_decay=args.weight_decay
+            weight_decay=args.weight_decay,
+            lr=args.lr
         )
     
     train(config)
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 if __name__ == '__main__':
     main()

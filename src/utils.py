@@ -9,12 +9,12 @@ import uvicorn
 import requests
 import subprocess
 from tqdm import tqdm
-from typing import Dict
 from pathlib import Path
 from fastapi import FastAPI
 from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
+from typing import Dict, Optional, List
 from transformers import modeling_utils
 from torch.utils.tensorboard import SummaryWriter
 
@@ -33,9 +33,11 @@ VERBOSE = getattr(settings, 'VERBOSE', False)
 
 FREEZE_PRETRAINED = True
 REMOVE_UNUSED_COLUMNS = False
+GRADIENT_ACCUMULATION_STEPS = 1
 ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
 
-MD_FILE = 'md.pt'
+MD_TAG = 'md'
+MD_FILE = f'{MD_TAG}.pt'
 
 ROOT_DIR = Path(__file__).parent.parent
 MODEL_DIR = ROOT_DIR  / 'model'
@@ -81,7 +83,8 @@ class Cfg:
     log_interval: int
     freeze_pretrained: bool
     remove_unused_columns: bool
-        
+    gradient_accumulation_steps: int
+    
     @property
     def lm_name(self):
         return self.model['lm']['name']
@@ -158,7 +161,8 @@ cfg = Cfg(
     suffix_start=SUFFIX_START,
     log_interval=LOG_INTERVAL,
     freeze_pretrained=FREEZE_PRETRAINED,
-    remove_unused_columns=REMOVE_UNUSED_COLUMNS
+    remove_unused_columns=REMOVE_UNUSED_COLUMNS,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
 )
 
 if cfg.po == 'NCA':
@@ -225,14 +229,23 @@ def load_dist_config():
         return yaml.safe_load(f)
 
 def add_dist_config(
-        fabric_config: dict, 
-        main_addr: str = None, 
-        main_port: int = None, 
-        num_nodes: int = None, 
-        lr: float = None, 
-        weight_decay: float = None
+        config: dict,
+        main_addr: Optional[str] = None,
+        main_port: Optional[int] = None,
+        num_nodes: Optional[int] = None,
+        betas: Optional[List[float]] = None,
+        weight_decay: float = 0.01,
+        eps: float = 1e-8,
+        lr: float = 1e-4
     ):
+ 
+    if betas is None:
+        betas = (0.9, 0.95)
+    else:
+        betas = tuple(float(b) for b in betas)
+
     dist_config = load_dist_config()
+
     if num_nodes != None:
         dist_config['num_nodes'] = num_nodes
     if main_port != None:
@@ -249,18 +262,25 @@ def add_dist_config(
             dist_config['main_port'],
             dist_config['num_nodes']
         )
-        os.environ["NODE_RANK"] = str(node_rank)
-        os.environ["MASTER_ADDR"] = dist_config['main_addr']
-        os.environ["MASTER_PORT"] = str(dist_config['main_port'])
-        fabric_config.update({'num_nodes': dist_config['num_nodes']})
-    fabric_config['strategy'] = dist_config['strategy']
+        os.environ['NODE_RANK'] = str(node_rank)
+        os.environ['MASTER_ADDR'] = dist_config['main_addr']
+        os.environ['MASTER_PORT'] = str(dist_config['main_port'])
+        config['fabric_config'].update({'num_nodes': dist_config['num_nodes']})
+    config['fabric_config']['strategy'] = dist_config['strategy']
     if dist_config['strategy'] == 'deepspeed':
         from lightning.fabric.strategies import DeepSpeedStrategy
-        if lr:
-            dist_config['deepspeed']['optimizer']['params']['lr'] = lr
-        if weight_decay:
-            dist_config['deepspeed']['optimizer']['params']['weight_decay'] = weight_decay
-        fabric_config['strategy'] = DeepSpeedStrategy(config=dist_config['deepspeed'])
+        if 'optimizer' in dist_config['deepspeed']:
+            lr = dist_config['deepspeed']['optimizer']['params'].get('lr', lr)
+            eps = dist_config['deepspeed']['optimizer']['params'].get('eps', eps)
+            betas = dist_config['deepspeed']['optimizer']['params'].get('betas', betas)
+            weight_decay = dist_config['deepspeed']['optimizer']['params'].get('weight_decay', weight_decay)
+            dist_config['deepspeed']['optimizer']['params']['lr'] = float(lr)
+            dist_config['deepspeed']['optimizer']['params']['eps'] = float(eps)
+            dist_config['deepspeed']['optimizer']['params']['betas'] = betas
+            dist_config['deepspeed']['optimizer']['params']['weight_decay'] = float(weight_decay)
+        cfg.gradient_accumulation_steps = int(dist_config.get('gradient_accumulation_steps', GRADIENT_ACCUMULATION_STEPS))
+        config['fabric_config']['strategy'] = DeepSpeedStrategy(config=dist_config['deepspeed'])
+        config['gradient_accumulation_steps'] = cfg.gradient_accumulation_steps
 
 def calculate_lm_loss(outputs, batch, loss_fn):
     # Get dimensions
@@ -307,6 +327,7 @@ def get_po(model):
         parser = H4ArgumentParser((config,))
         training_args = parser.parse(cfg.po_conf_file)
         training_args.max_length = cfg.max_length
+        training_args.gradient_checkpointing = False
         training_args.max_prompt_length = cfg.max_prompt_length
         training_args.remove_unused_columns = cfg.remove_unused_columns
         return trainer(
@@ -315,7 +336,17 @@ def get_po(model):
             tokenizer=model.tokenizer
         )
 
-def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batches=-1, log_path=None, log_interval=1):
+def md_train(
+    model,
+    loader,
+    optimizer,
+    fabric,
+    num_epochs=1,
+    num_batches=-1,
+    log_path=None,
+    log_interval=1,
+    gradient_accumulation_steps=1
+):
     model.train()
     po = get_po(model)
     
@@ -335,8 +366,7 @@ def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batc
         dynamic_ncols=True
     )
 
-    for batch in pbar:
-        optimizer.zero_grad()
+    for step, batch in enumerate(pbar):
         if po:
             loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
             po.store_metrics(metrics=train_metrics, train_eval='train')
@@ -356,13 +386,15 @@ def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batc
             has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
             if has_nan or has_inf:
                 warn("NaN/Inf gradients detected, skipping update")
-                optimizer.zero_grad()
                 continue
             
         fabric.backward(loss)
-        fabric.clip_gradients(model, optimizer, max_norm=1.0, error_if_nonfinite=False)
-        optimizer.step()
-        scheduler.step()
+        if optimizer:
+            optimizer.step()
+            optimizer.zero_grad()
+        else:
+            if (step + 1) % gradient_accumulation_steps == 0:
+                model._forward_module.step()
         
         metrics['total_loss'] += loss.item()
         metrics['num_batches'] += 1
@@ -392,7 +424,14 @@ def md_train(model, optimizer, loader, scheduler, fabric, num_epochs=1, num_batc
     
     return metrics
 
-def md_validate(model, loader, fabric, num_batches=-1, log_path=None, log_interval=1) -> dict:
+def md_validate(
+    model, 
+    loader,
+    fabric,
+    num_batches=-1,
+    log_path=None,
+    log_interval=1
+) -> dict:
     if loader == None:
         return {}
     

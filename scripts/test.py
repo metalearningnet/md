@@ -14,13 +14,13 @@ from utils import md_validate, cfg, add_dist_config, default_dataset
 def test(config: dict):
     """
     config:
-        - name: Dataset name (str)
-        - dataset_config: Dataset configuration name (str)
-        - split: Dataset split name (e.g., "test") (str)
-        - model_path: Model path (str)
-        - batch_size: Testing batch size (int)
-        - fabric_config: Configuration options for the Lightning Fabric setup (dict)
-        - batches: Number of batches (int)
+        - name (str): Dataset name.
+        - dataset_config (str): Dataset configuration name.
+        - split (str): Dataset split name (e.g., "test").
+        - model_path (str): Model path.
+        - batch_size (int): Testing batch size.
+        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
+        - batches (int): Number of batches.
     """
     
     dataset_name = config['name']
@@ -126,6 +126,8 @@ def main():
     }
 
     test(config)
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 if __name__ == '__main__':
     main()

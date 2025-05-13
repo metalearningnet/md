@@ -1,7 +1,3 @@
-# ------------------------------
-# Hardware Setup
-# ------------------------------
-
 # Distributed training strategy.
 # Options:
 #   - "ddp" for Distributed Data Parallel
@@ -20,34 +16,44 @@ main_address: ""
 # Communication port for distributed training.
 main_port: 1112
 
-# ------------------------------
-# DeepSpeed Configuration
-# Only applicable if strategy == "deepspeed"
-# ------------------------------
 deepspeed:
   # Micro-batch size per GPU
-  train_micro_batch_size_per_gpu: 32
+  train_micro_batch_size_per_gpu: 16
 
   # Number of steps to accumulate gradients before updating weights
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 4
 
   # Optimizer settings
   optimizer:
-    type: AdamW
+    type: "AdamW"
     params:
-      lr: 3e-5
+      lr: 1e-4
+      betas: [ 0.9, 0.95 ]
+      eps: 1e-8
       weight_decay: 0.01
 
   zero_optimization:
-    stage: 3 # ZeRO Stage 3: optimizer, gradient, and parameter partitioning
+    stage: 2
 
     offload_optimizer:
-      device: "none" # Options: "cpu" or "none"
-      # pin_memory: true  # Optional: use pinned memory if offloading to CPU
+      device: "cpu"
+      # nvme_path: "/nvme"
+      pin_memory: true
 
     offload_param:
-      device: "none" # Options: "cpu" or "none"
-      # pin_memory: true  # Optional
+      device: "cpu"
+      # nvme_path: "/nvme"
+      pin_memory: true
 
-    overlap_comm: true # Allow overlapping communication and computation
-    contiguous_gradients: true # Allocate gradients contiguously for speed
+    overlap_comm: true
+    contiguous_gradients: true
+
+  activation_checkpointing:
+    enable: true
+    use_reentrant: false
+
+  bf16:
+    enabled: false
+
+  fp16:
+    enabled: false
