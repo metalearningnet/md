@@ -8,7 +8,6 @@ from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 class MD(nn.Module):
     def __init__(self, config=cfg, attn:str=None):
         super().__init__()
-
         self.lm_dir = config.model_dir
         self.lm_coef = config.lm_coef
         self.skill_coef = config.skill_coef
@@ -21,21 +20,12 @@ class MD(nn.Module):
         self.config.use_cache = config.use_cache
         self.skill_config = config.skill_config
         self.suffix_start = config.suffix_start
-        self.attn = config.attn if attn is None else attn
-        
-        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
-     
-        # Initialize SkillMemory with compatible dimensions
+        self.attn = config.attn if attn is None else attn 
         self.skill_memory = self._init_skill_memory()
-
-        # Load pretrained model weights
         self.lm = self._init_lm()
-        
-        # Configure model components
         self._init_action_projection()
-
-        if config.freeze_pretrained:
-            self._freeze_pretrained()
+        self._init_params(freeze_pretrained=config.freeze_pretrained)
+        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
 
     def _init_lm(self):
         lm = AutoModelForCausalLM.from_pretrained(
@@ -62,10 +52,11 @@ class MD(nn.Module):
         """Adapter between SkillMemory and LM"""
         self.action_proj = nn.Linear(self.skill_memory.action_dim, self.config.hidden_size)
 
-    def _freeze_pretrained(self):
+    def _init_params(self, freeze_pretrained):
         """Freeze LM parameters while keeping adapters trainable"""
+        lm_requires_grad = not freeze_pretrained
         for param in self.lm.parameters():
-            param.requires_grad = False
+            param.requires_grad = lm_requires_grad
         for param in self.action_proj.parameters():
             param.requires_grad = True
         for param in self.skill_memory.parameters():
@@ -155,7 +146,7 @@ class MD(nn.Module):
                 break
             
             model_inputs = {
-                "input_ids": generated_ids,
+                'input_ids': generated_ids,
             }
 
             if attention_mask is not None:
@@ -164,7 +155,7 @@ class MD(nn.Module):
                     attention_mask,
                     torch.ones((batch_size, current_length - attention_mask.shape[1]), device=device)
                 ], dim=1)
-                model_inputs["attention_mask"] = extended_attention_mask
+                model_inputs['attention_mask'] = extended_attention_mask
 
             with torch.no_grad():
                 outputs = self.forward(**model_inputs)

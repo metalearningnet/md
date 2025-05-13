@@ -37,7 +37,7 @@ def test(config: dict):
     with torch.serialization.safe_globals([PosixPath]):
         checkpoint = torch.load(model_path, weights_only=True)
     
-    model_state_dict = checkpoint['model']
+    model_state_dict = checkpoint
     model = MD.from_pretrained()
     model.load_state_dict(model_state_dict)
     model = fabric.setup(model)

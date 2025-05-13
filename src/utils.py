@@ -31,7 +31,6 @@ LOG = getattr(settings, 'LOG', True)
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
-FREEZE_PRETRAINED = True
 REMOVE_UNUSED_COLUMNS = False
 GRADIENT_ACCUMULATION_STEPS = 1
 ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
@@ -81,7 +80,6 @@ class Cfg:
     accelerator: str
     suffix_start: int
     log_interval: int
-    freeze_pretrained: bool
     remove_unused_columns: bool
     gradient_accumulation_steps: int
     
@@ -143,6 +141,10 @@ class Cfg:
             return CONF_DIR / 'nca.yaml'
         else:
             return ''
+    
+    @property
+    def freeze_pretrained(self):
+        return self.model.get('skill_coef') != 0.0
 
 cfg = Cfg(
     log=LOG,
@@ -160,7 +162,6 @@ cfg = Cfg(
     accelerator=ACCELERATOR,
     suffix_start=SUFFIX_START,
     log_interval=LOG_INTERVAL,
-    freeze_pretrained=FREEZE_PRETRAINED,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
 )

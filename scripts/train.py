@@ -10,7 +10,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset
+from utils import md_train, md_validate, cfg, add_dist_config, default_dataset
 
 def train(config: dict):
     """
