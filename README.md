@@ -1,40 +1,49 @@
-# Memory Disentangling
 
-## Overview  
-MD (Memory Disentangling) is a neural network architecture designed to enhance cognitive behaviors by integrating meta-learning capabilities into a dedicated memory system. The model focuses on organizing and utilizing skill knowledge , which is established through meta-learning. It supports efficient adaptation to dynamic and complex information encountered at test time, enabled by its test-time scaling capabilities.
+# Memory Disentangling (MD)
 
-## Installation
-To install dependencies, run:
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+## Overview
+
+Memory Disentangling (MD) is a modular framework that structurally separates long-term knowledge preservation from context-specific skill adaptation in large language models. The architecture enables:
+
+- 🧠 **Compartmentalized Memory Systems**  
+  *Persistent memory* retains fundamental world knowledge (facts, relationships) while *dynamic memory* encodes temporary task-specific operational patterns, eliminating cross-memory interference
+
+- 🔄 **Meta-Learning**  
+  Enables continuous skill refinement through localized updates to dynamic memory parameters, preserving core knowledge integrity
+
+- 📈 **Test-Time Scaling**  
+  Adapts to variable-length sequences through optimized memory utilization
+
+## Quick Start
+
+### Installation
+
+To install dependencies:
+
 ```bash
 ./install.sh
 ```
-## Training
-To train the MD model:
+
+### Usage
+
+Run the following commands using the `run.sh` script:
+
 ```bash
+# Train the model
 ./run.sh --train
-```
 
-## Evaluation
-To evaluate the model using the test suite:
-```bash
+# Test the model
 ./run.sh --test
-```
 
-## Data Preparation 
-To prepare the training data:
-```bash
+# Prepare data
 ./run.sh --prepare
+
+# Generate evaluation results
+./run.sh --generate
 ```
-
-## Key Features  
-- 🧠 **Disentangled Memory Architecture**  
-  Separate modules for *persistent memory* (retains general task knowledge) and *dynamic memory* (tracks evolving skill trajectories)  
-
-- ⚡ **Efficient Memory Updates**  
-  Uses gradient descent with momentum for fast and stable updates to the neural skill memory  
-
-- 📈 **Test-Time Scaling**  
-  Adapts to longer and more complex input sequences through effective memory utilization
 
 ## License
-This project is licensed under the **MIT License** - see [LICENSE](LICENSE) for details.
+
+MIT Licensed - See [LICENSE](LICENSE) for details.

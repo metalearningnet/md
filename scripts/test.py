@@ -2,49 +2,48 @@ import sys
 import torch
 import argparse
 import lightning as L
-from pathlib import Path, PosixPath
+from pathlib import Path
 
 _src_dir = Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, add_dist_config, default_dataset
+from utils import md_validate, cfg, add_dist_config, default_dataset_path
 
 def test(config: dict):
     """
     config:
+        - path (str): Dataset path.
         - name (str): Dataset name.
-        - dataset_config (str): Dataset configuration name.
         - split (str): Dataset split name (e.g., "test").
-        - model_path (str): Model path.
-        - batch_size (int): Testing batch size.
-        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
         - batches (int): Number of batches.
+        - batch_size (int): Testing batch size.
+        - ckpt (str): Checkpoint path.
+        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
     """
     
-    dataset_name = config['name']
-    dataset_config = config.get('dataset_config')
+    dataset_path = config['path']
+    dataset_name = config.get('name')
     split = config.get('split', 'test')
-    model_path = config.get('model_path', cfg.ckpt_dir / cfg.md_file)
-    batch_size = config.get('batch_size', 1)
-    fabric_config = config['fabric_config']
     num_batches = config.get('batches', -1)
+    batch_size = config.get('batch_size', 1)
+    ckpt_path = config.get('ckpt')
+    fabric_config = config['fabric_config']
     
     fabric = L.Fabric(**fabric_config)
     fabric.launch()
 
-    with torch.serialization.safe_globals([PosixPath]):
-        checkpoint = torch.load(model_path, weights_only=True)
+    if ckpt_path:
+        model = MD.from_pretrained(checkpoint_path=ckpt_path)
+    else:
+        model = MD.from_pretrained()
     
-    model_state_dict = checkpoint
-    model = MD.from_pretrained()
-    model.load_state_dict(model_state_dict)
     model = fabric.setup(model)
-    
+
     loader = MDLoader(
-        dataset_name=dataset_name,
-        dataset_config=dataset_config,
+        path=dataset_path,
+        name=dataset_name,
         split=split
     )
     
@@ -71,14 +70,14 @@ def main():
     parser = argparse.ArgumentParser(description="Test the MD Model")
 
     # Testing configuration
-    parser.add_argument("--name", type=str, 
+    parser.add_argument("--path", type=str, default=default_dataset_path,
+                        help="Dataset path")
+    parser.add_argument("--name", type=str, default=None,
                         help="Dataset name")
-    parser.add_argument("--config", type=str, default=None,
-                        help="Dataset configuration name")
     parser.add_argument("--split", type=str, default="test",
                         help="Dataset split name")
-    parser.add_argument("--ckpt_dir", type=str, default=cfg.ckpt_dir,
-                        help="Checkpoint directory")
+    parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
+                        help="Checkpoint path")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Testing batch size")
 
@@ -94,19 +93,13 @@ def main():
 
     args = parser.parse_args()
     
-    ckpt_dir = Path(args.ckpt_dir)
-    model_path = ckpt_dir / cfg.md_file
-    
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
+    if not Path(args.ckpt).exists():
+        raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt}")
     
     fabric_config = {
         'accelerator': cfg.accelerator,
         'precision': cfg.precision
     }
-    
-    if args.name is None:
-        args.name = default_dataset
     
     if args.dist:
         add_dist_config(
@@ -117,17 +110,19 @@ def main():
         )
     
     config = {
+        'path': args.path,
         'name': args.name,
-        'dataset_config': args.config,
         'split': args.split,
-        'model_path': model_path,
         'batch_size': args.batch_size,
+        'ckpt': args.ckpt,
         'fabric_config': fabric_config
     }
 
-    test(config)
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    try:
+        test(config)
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 if __name__ == '__main__':
     main()

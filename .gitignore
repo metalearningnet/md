@@ -1,10 +1,7 @@
 /model/
+/nca/
 /outputs/
 /datasets/
 /trainer_output/
-
-# Ignore Python-specific files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]

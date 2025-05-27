@@ -10,44 +10,44 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_train, md_validate, cfg, add_dist_config, default_dataset
+from utils import md_train, md_validate, cfg, add_dist_config, default_dataset_path
 
 def train(config: dict):
     """
     config:
+        - path (str): Dataset path.
         - name (str): Dataset name.
-        - dataset_config (str): Dataset configuration name.
         - split (str): Dataset split name (e.g., "train").
         - split_ratio (float): Proportion of the dataset to be allocated for training or testing.
+        - epochs (int): Number of epochs.
+        - batches (int): Number of batches.
+        - batch_size (int): Training batch size.
         - seed (int): Random seed.
         - lr (float): Learning rate.
-        - epochs (int): Number of epochs.
-        - batch_size (int): Training batch size.
         - val_split (float): Proportion of the training set to be used for validation.
         - weight_decay (float): Weight decay.
-        - ckpt_dir (str): Checkpoint directory.
+        - gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating model weights.
+        - ckpt (str): Checkpoint path.
         - save_interval (int): Checkpoint frequency.
         - fabric_config (dict): Configuration options for the Lightning Fabric setup.
-        - batches (int): Number of batches.
-        - gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating model weights.
         - dist (bool): Enable distributed training.
     """
 
-    name = config['name']
-    dataset_config = config.get('dataset_config')
+    path = config['path']
+    name = config.get('name')
     split = config.get('split', 'train')
     split_ratio = config.get('split_ratio', 0.0)
+    num_epochs = config.get('epochs', 1)
+    num_batches = config.get('batches', -1)
+    batch_size = config.get('batch_size', 1)
     seed = config.get('seed', 42)
     lr = config.get('lr', 1e-4)
-    num_epochs = config.get('epochs', 1)
-    batch_size = config.get('batch_size', 1)
     val_split=config.get('val_split', 0.1)
     weight_decay = config.get('weight_decay', 0.01)
-    ckpt_dir = Path(config.get('ckpt_dir', cfg.ckpt_dir))
+    gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
+    ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
     save_interval = config.get('save_interval', 1)
     fabric_config = config['fabric_config']
-    num_batches = config.get('batches', -1)
-    gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
     dist = config.get('dist', False)
     
     fabric = L.Fabric(**fabric_config)
@@ -73,14 +73,12 @@ def train(config: dict):
 
     # Configure dataset loader
     loader_args = {
-        'dataset_name': name,
+        'path': path,
+        'name': name,
         'split': split,
         'split_ratio': split_ratio,
         'seed': seed
     }
-
-    if dataset_config:
-        loader_args['dataset_config'] = dataset_config
     
     loader = MDLoader(**loader_args)
     
@@ -96,6 +94,7 @@ def train(config: dict):
     
     # Training loop
     best_val_loss = np.inf
+    ckpt_dir = ckpt_path.parent
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     if cfg.log:
         cfg.log_dir.mkdir(parents=True, exist_ok=True)
@@ -132,22 +131,22 @@ def train(config: dict):
         # Save best checkpoint
         if val_metrics.get('total_loss', np.inf) < best_val_loss:
             best_val_loss = val_metrics['total_loss']
-            torch.save(model.state_dict(), ckpt_dir / cfg.md_file)
+            torch.save(model.state_dict(), ckpt_path)
             print(f"Saved best model with val loss: {best_val_loss:.4f}")
         
         # Periodic checkpointing
         if (epoch + 1) % save_interval == 0:
-            torch.save(model.state_dict(), ckpt_dir / f"epoch_{epoch+1}.pt")
+            torch.save(model.state_dict(), ckpt_dir / f"train_epoch_{epoch+1}.pt")
             print(f"Saved epoch {epoch+1} checkpoint")
 
 def main():
     parser = argparse.ArgumentParser(description="Train the MD Model")
     
     # Dataset configuration
-    parser.add_argument("--name", type=str, 
+    parser.add_argument("--path", type=str, default=default_dataset_path,
+                        help="Dataset path")
+    parser.add_argument("--name", type=str, default=None,
                         help="Dataset name")
-    parser.add_argument("--config", type=str, default=None,
-                        help="Dataset configuration name")
     parser.add_argument("--split", type=str, default="train",
                         help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
@@ -168,8 +167,8 @@ def main():
                         help="Weight decay")
 
     # System configuration
-    parser.add_argument("--ckpt_dir", type=str, default=cfg.ckpt_dir,
-                        help="Checkpoint directory")
+    parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
+                        help="Checkpoint path")
     parser.add_argument("--save_interval", type=int, default=1,
                         help="Checkpoint saving frequency")
 
@@ -184,11 +183,9 @@ def main():
                         help="The number of nodes for distributed training")
 
     args = parser.parse_args()
-
-    if args.name is None:
-        args.name = default_dataset
     
     config = {
+        'path': args.path,
         'name': args.name,
 
         # Dataset parameters
@@ -205,16 +202,13 @@ def main():
 
         # System parameters
         'dist': args.dist,
-        'ckpt_dir': args.ckpt_dir,
+        'ckpt': args.ckpt,
         'save_interval': args.save_interval,
         'fabric_config': {
             'accelerator': cfg.accelerator,
             'precision': cfg.precision
         }
     }
-
-    if args.config:
-        config['dataset_config'] = args.config
 
     if args.dist:
         add_dist_config(
@@ -226,9 +220,11 @@ def main():
             lr=args.lr
         )
     
-    train(config)
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    try:
+        train(config)
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 if __name__ == '__main__':
     main()

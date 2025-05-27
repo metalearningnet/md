@@ -1,8 +1,9 @@
+import os
 import torch
 import torch.nn as nn
-from utils import info, cfg
 from skill import SkillMemory
 from typing import Dict, Optional
+from utils import CKPT_DIR, info, cfg, get_device
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 class MD(nn.Module):
@@ -186,9 +187,24 @@ class MD(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
+        checkpoint_path: str=cfg.ckpt_path,
+        config=cfg,
+        attn:str=None,
         **kwargs
     ) -> 'MD':
-        return cls(**kwargs)
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
+        model = cls(config=config, attn=attn, **kwargs)
+        try:
+            state_dict = torch.load(checkpoint_path, map_location='cpu')
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {str(e)}") from e
+        if 'model' in state_dict:
+            state_dict = state_dict['model']
+        with torch.device('cpu'):
+            model.load_state_dict(state_dict, strict=False)
+        info(f"Loaded pre-trained model from {checkpoint_path}")
+        return model.to(get_device())
 
     def get_trainable_parameters(self) -> Dict[str, nn.Parameter]:
         return {

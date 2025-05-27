@@ -50,11 +50,11 @@ FLASH_ATTN_SUPPORTED=false
 
 case "$OS" in
     Linux)
-        CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev libaio)
+        CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev libaio cmake sentencepiece)
         DEEPSPEED_SUPPORTED=true
         ;;
     Darwin)
-        CONDA_PACKAGES=()
+        CONDA_PACKAGES=(cmake sentencepiece)
         DEEPSPEED_SUPPORTED=false
         ;;
     *) log_error "Unsupported platform: $OS" ;;

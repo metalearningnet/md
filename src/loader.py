@@ -10,14 +10,14 @@ from torch.utils.data import DataLoader, Dataset, random_split
 
 class MDLoader(Dataset):
     def __init__(self,
-                 dataset_name: str,
-                 dataset_config: Optional[str] = None,
+                 path: str,
+                 name: Optional[str] = None,
                  tokenizer_name: str = cfg.model_dir,
                  max_length: int = cfg.max_length,
                  min_length: int = cfg.min_length,
                  max_prompt_length: int = cfg.max_prompt_length,
                  max_target_length: int = cfg.max_target_length,
-                 label_pad_token_id: int = -100,
+                 label_pad_token_id: int = cfg.label_pad_token_id,
                  split: Optional[str] = None,
                  split_ratio: float = 0.0,
                  truncation_mode: str = cfg.truncation_mode,
@@ -25,8 +25,8 @@ class MDLoader(Dataset):
                  dataset: Optional[Union[Dataset, DatasetDict]] = None):
         """       
         Args:
-            dataset_name: Name or path of the dataset to load.
-            dataset_config: Configuration name for the dataset, if applicable.
+            path: Path of the dataset to load.
+            name: Configuration name for the dataset, if applicable.
             tokenizer_name: Name or path of the pretrained tokenizer to use.
             max_length: Maximum total sequence length.
             min_length: Minimum sequence length to keep during filtering.
@@ -62,12 +62,12 @@ class MDLoader(Dataset):
             else:
                 self.tokenizer.add_special_tokens({'pad_token': '<pad>'})
         
-        self._init_dataset(dataset_name, dataset_config, split, split_ratio, seed, dataset)
+        self._init_dataset(path, name, split, split_ratio, seed, dataset)
     
     def _init_dataset(
         self,
-        dataset_name: str,
-        dataset_config: Optional[str],
+        path: str,
+        name: Optional[str],
         split: Optional[str],
         split_ratio: float,
         seed: int,
@@ -76,7 +76,7 @@ class MDLoader(Dataset):
         if dataset is not None:
             self.dataset = dataset
         else:
-            self._load_dataset(dataset_name, dataset_config, split, split_ratio, seed)
+            self._load_dataset(path, name, split, split_ratio, seed)
         fields = [
             field for field, feature in self.dataset.features.items()
             if isinstance(feature, Value) and feature.dtype == 'string'
@@ -105,26 +105,25 @@ class MDLoader(Dataset):
 
     def _load_dataset(
         self,
-        dataset_name: str,
-        dataset_config: Optional[str],
+        path: str,
+        name: Optional[str],
         split: Optional[str],
         split_ratio: float,
         seed: int
     ):
         try:
-            load_kwargs = {'name': dataset_config} if dataset_config else {}
-            
+            load_kwargs = {'name': name} if name else {}
             if split:
                 from datasets import get_dataset_split_names
-                split_names = get_dataset_split_names(dataset_name)
+                split_names = get_dataset_split_names(path)
                 if split not in split_names:
                     new_split = split + '_prefs'
                     if new_split not in split_names:
                         raise RuntimeError(f"Invalid split: {split}")
                     split = new_split
-                self.dataset = load_dataset(dataset_name, **load_kwargs, split=split)
+                self.dataset = load_dataset(path, **load_kwargs, split=split)
             else:
-                full_ds = load_dataset(dataset_name, **load_kwargs)
+                full_ds = load_dataset(path, **load_kwargs)
                 self.dataset = self._auto_select_split(full_ds)
 
             if split_ratio > 0:

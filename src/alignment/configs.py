@@ -91,7 +91,7 @@ class H4ArgumentParser(HfArgumentParser):
     def parse(self, yaml_file: str = '') -> DataClassType | Tuple[DataClassType]:
         if os.path.exists(yaml_file):
             output = self.parse_yaml_file(yaml_file)
-        if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
+        elif len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
             # If we pass only one argument to the script and it's the path to a YAML file,
             # let's parse it to get our arguments.
             output = self.parse_yaml_file(os.path.abspath(sys.argv[1]))

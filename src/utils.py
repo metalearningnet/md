@@ -44,16 +44,15 @@ CONF_DIR = ROOT_DIR / 'conf'
 OUT_DIR = ROOT_DIR / 'outputs'
 CKPT_DIR = OUT_DIR / 'checkpoints'
 LOG_DIR = OUT_DIR / 'logs'
+EVAL_DIR = OUT_DIR / 'eval'
 TRAIN_LOG = LOG_DIR / 'train'
 TEST_LOG = LOG_DIR / 'test'
 DIST_FILE = 'dist.yaml'
 
-# Starting position for action embeddings
-SUFFIX_START = 1 << 32
-
-LOG_INTERVAL = 1
-
 RETRY_MAX = 5
+LOG_INTERVAL = 1
+SUFFIX_START = 1 << 32 # Starting position for action embeddings
+LABEL_PAD_TOKEN_ID = -100
 
 def info(s):
     if VERBOSE:
@@ -74,12 +73,14 @@ class Cfg:
     test_log: str
     train_log: str
     precision: str
+    eval_dir: Path
     ckpt_dir: Path
     model_dir: Path
     optimizer: dict
     accelerator: str
     suffix_start: int
     log_interval: int
+    label_pad_token_id: int
     remove_unused_columns: bool
     gradient_accumulation_steps: int
     
@@ -90,6 +91,10 @@ class Cfg:
     @property
     def use_cache(self):
         return self.model['use_cache']
+
+    @property
+    def ckpt_path(self):
+        return self.ckpt_dir / MD_FILE
     
     @property
     def checkpoint_pretrained(self):
@@ -103,6 +108,10 @@ class Cfg:
     def lm_coef(self):
         return self.model.get('lm_coef', 0.7)
     
+    @property
+    def lm_name(self):
+        return self.model['lm']['name']
+
     @property
     def skill_coef(self):
         return self.model.get('skill_coef', 0.3)
@@ -155,6 +164,7 @@ cfg = Cfg(
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
+    eval_dir=EVAL_DIR,
     train_log=TRAIN_LOG,
     model_dir=MODEL_DIR,
     precision=PRECISION,
@@ -162,6 +172,7 @@ cfg = Cfg(
     accelerator=ACCELERATOR,
     suffix_start=SUFFIX_START,
     log_interval=LOG_INTERVAL,
+    label_pad_token_id=LABEL_PAD_TOKEN_ID,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS,
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
 )
@@ -169,13 +180,13 @@ cfg = Cfg(
 if cfg.po == 'NCA':
     from nca.nca_utils import DatasetMap
     from nca.nca_utils import nca_collate as collate
-    default_dataset = "ChenDRAG/ultrafeedback_reward"
+    default_dataset_path = "ChenDRAG/ultrafeedback_reward"
 elif cfg.po == 'SimPO':
     from simpo.simpo_utils import DatasetMap
     from simpo.simpo_utils import simpo_collate as collate
-    default_dataset = "princeton-nlp/gemma2-ultrafeedback-armorm"
+    default_dataset_path = "princeton-nlp/gemma2-ultrafeedback-armorm"
 else:
-    default_dataset = "ag_news"
+    default_dataset_path = "ag_news"
 
 class RegisterRequest(BaseModel):
     hostname: str
