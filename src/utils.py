@@ -111,6 +111,10 @@ class Cfg:
     @property
     def lm_name(self):
         return self.model['lm']['name']
+    
+    @property
+    def adapter(self):
+        return self.model['adapter']
 
     @property
     def skill_coef(self):

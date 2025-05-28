@@ -3,14 +3,17 @@ import torch
 import torch.nn as nn
 from skill import SkillMemory
 from typing import Dict, Optional
-from utils import CKPT_DIR, info, cfg, get_device
+from utils import info, cfg, get_device
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 
 class MD(nn.Module):
-    def __init__(self, config=cfg, attn:str=None):
+    def __init__(self, 
+                 config = cfg, 
+                 attn: str = None):
         super().__init__()
         self.lm_dir = config.model_dir
         self.lm_coef = config.lm_coef
+        self.adapter = config.adapter
         self.skill_coef = config.skill_coef
         self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
         self.config = AutoConfig.from_pretrained(self.lm_dir)
@@ -45,13 +48,43 @@ class MD(nn.Module):
         self.skill_config.update({
             'num_tokens': self.lm_num_tokens,
             'hidden_dim': self.lm_hidden_size,
-            'action_dim': self.lm_hidden_size
+            'action_dim': self.skill_config.get('action_dim', self.lm_hidden_size)
         })
         return SkillMemory(**self.skill_config)
-
+    
     def _init_action_projection(self):
         """Adapter between SkillMemory and LM"""
-        self.action_proj = nn.Linear(self.skill_memory.action_dim, self.config.hidden_size)
+        proj_scale = self.adapter.get('proj_scale', 4)
+        min_dim = self.adapter.get('min_proj_dim', self.config.hidden_size)
+        proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim)
+
+        norm_pos = self.adapter.get('norm_position', 'post')
+        assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
+        
+        layers = [
+            nn.Linear(self.skill_memory.action_dim, proj_dim)
+        ]
+        
+        if norm_pos == 'pre':
+            layers += [nn.LayerNorm(proj_dim), nn.GELU()]
+        else:
+            layers += [nn.GELU(), nn.LayerNorm(proj_dim)]
+        
+        layers += [
+            nn.Linear(proj_dim, self.config.hidden_size),
+            nn.Dropout(self.adapter.get('proj_dropout', 0.1))
+        ]
+        
+        self.action_proj = nn.Sequential(*layers)
+        
+        gelu_gain = 1.5957696
+        nn.init.xavier_normal_(self.action_proj[0].weight, gain=gelu_gain)
+        nn.init.zeros_(self.action_proj[0].bias)
+
+        nn.init.xavier_normal_(self.action_proj[-2].weight, gain=1.0)
+        nn.init.zeros_(self.action_proj[-2].bias)
+        
+        assert self.action_proj[-2].out_features == self.config.hidden_size
 
     def _init_params(self, freeze_pretrained):
         """Freeze LM parameters while keeping adapters trainable"""
@@ -63,11 +96,9 @@ class MD(nn.Module):
         for param in self.skill_memory.parameters():
             param.requires_grad = True
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self,
+                input_ids: torch.Tensor,
+                attention_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         if self.skill_coef:
             state_embeds = self.lm.get_input_embeddings()(input_ids)
             
@@ -187,9 +218,9 @@ class MD(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        checkpoint_path: str=cfg.ckpt_path,
-        config=cfg,
-        attn:str=None,
+        checkpoint_path: str = cfg.ckpt_path,
+        config = cfg,
+        attn: str = None,
         **kwargs
     ) -> 'MD':
         if not os.path.exists(checkpoint_path):

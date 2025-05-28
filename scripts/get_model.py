@@ -13,7 +13,7 @@ if not _model_dir.exists():
     os.mkdir(_model_dir)
 
 print(f'Saving LM {MODEL['lm']['name']}...')
-tokenizer = AutoTokenizer.from_pretrained(MODEL['lm']['site'])
-model = AutoModelForCausalLM.from_pretrained(MODEL['lm']['site'])
+tokenizer = AutoTokenizer.from_pretrained(MODEL['lm']['path'])
+model = AutoModelForCausalLM.from_pretrained(MODEL['lm']['path'])
 model.save_pretrained(_model_dir)
 tokenizer.save_pretrained(_model_dir)

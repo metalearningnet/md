@@ -8,9 +8,9 @@ from torch.distributions import Normal, kl_divergence, Categorical
 
 class SkillMemory(nn.Module):
     def __init__(self,
-                 num_tokens: int = 16384,
+                 num_tokens: int = 151936,
                  action_dim: int = 256,
-                 hidden_dim: int = 256,
+                 hidden_dim: int = 896,
                  mac_persistent_mem_tokens: int = 64,
                  mac_longterm_mem_tokens: int = 64,
                  mac_depth: int = 4,
@@ -35,7 +35,7 @@ class SkillMemory(nn.Module):
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         
-        # ========== Memory-Augmented Context Transformer ==========
+        # == Memory-Augmented Context Transformer ==
         self.mac = MemoryAsContextTransformer(
             num_tokens=num_tokens,
             dim=hidden_dim,
@@ -50,7 +50,7 @@ class SkillMemory(nn.Module):
         self.mac_output_proj = nn.Linear(num_tokens, hidden_dim)
         self.memory_var = nn.Parameter(torch.zeros(1, hidden_dim))
 
-        # ========== Policy Network ==========
+        # == Policy Network ==
         self.policy = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.LayerNorm(hidden_dim),
@@ -58,12 +58,12 @@ class SkillMemory(nn.Module):
             nn.Linear(hidden_dim, action_dim)
         )
 
-        # ========== Skill-Conditioned Prior ==========
+        # == Skill-Conditioned Prior ==
         self.prior_net = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
         self.prior_mean = nn.Linear(hidden_dim, hidden_dim)
         self.prior_std = nn.Linear(hidden_dim, hidden_dim)
 
-        # ========== MD Objective Components ==========
+        # == MD Objective Components ==
         self.disc_gru = nn.GRU(hidden_dim * 2, hidden_dim, batch_first=True)
         self.disc_linear = nn.Linear(hidden_dim, 1)
 
@@ -74,7 +74,7 @@ class SkillMemory(nn.Module):
             nn.Linear(hidden_dim, 1)
         )
 
-        # ========== Loss Coefficients ==========
+        # == Loss Coefficients ==
         self.mi_coeff = mi_coeff
         self.entropy_coeff = entropy_coeff
         self.adv_coeff = adv_coeff
@@ -92,8 +92,8 @@ class SkillMemory(nn.Module):
             
         return action_logits, m
 
-    def forward(self, states):        
-        # ===== Process Through MAC =====
+    def forward(self, states):
+        # == Process Through MAC ==
         if self.checkpoint_mac:
             def run_mac(states):
                 mac_output = self.mac(states)
@@ -103,7 +103,7 @@ class SkillMemory(nn.Module):
             mac_output = self.mac(states)
             m = self.mac_output_proj(mac_output)
 
-        # ===== Skill-Conditioned Prior =====
+        # == Skill-Conditioned Prior ==
         if self.checkpoint_prior:
             def run_prior(m):
                 prior_out, _ = self.prior_net(m)
@@ -116,7 +116,7 @@ class SkillMemory(nn.Module):
             prior_mean = self.prior_mean(prior_out)
             prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
 
-        # ===== Memory Distribution =====
+        # == Memory Distribution ==
         mem_std = F.softplus(self.memory_var) + 1e-4
         mem_dist = Normal(m, mem_std.expand_as(m))
         
@@ -137,7 +137,7 @@ class SkillMemory(nn.Module):
         states = outputs['states']
         m = outputs['m']
         
-        # ===== I(S;M) =====
+        # == I(S;M) ==
         pos_pairs = torch.cat([states, m], dim=-1)
         neg_m = m[torch.randperm(m.size(0))]
         neg_pairs = torch.cat([states, neg_m], dim=-1)
@@ -154,10 +154,10 @@ class SkillMemory(nn.Module):
         mi_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores)) + \
                   F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
 
-        # ===== Action Entropy =====
+        # == Action Entropy ==
         entropy = Categorical(logits=action_logits).entropy().mean()
         
-        # ===== Adversarial Loss =====
+        # == Adversarial Loss ==
         if self.checkpoint_discriminators:
             def run_mmi_discriminator(inputs):
                 return self.mmi_discriminator(inputs)
@@ -170,7 +170,7 @@ class SkillMemory(nn.Module):
         adv_loss = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits)) + \
                    F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
 
-        # ===== KL Regularization =====
+        # == KL Regularization ==
         kl_loss = kl_divergence(mem_dist, prior_dist).mean()
 
         total_loss = (
@@ -192,10 +192,10 @@ class SkillMemory(nn.Module):
 
     def generate(self, states):
         with torch.no_grad():
-            # ===== MAC Processing =====
+            # == MAC Processing ==
             mac_output = self.mac(states)
             m = self.mac_output_proj(mac_output)
         
-            # ===== Action Generation =====
+            # == Action Generation ==
             action_logits, _ = self.get_action_logits(states, m)
             return action_logits

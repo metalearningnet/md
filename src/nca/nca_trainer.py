@@ -309,6 +309,9 @@ class NCATrainer(Trainer):
 
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
+        if args:
+            args.output_dir = 'outputs'
+        
         super().__init__(
             model=model,
             args=args,
@@ -403,7 +406,7 @@ class NCATrainer(Trainer):
         # The definition of temperature_alpha here is different from that in the paper (temperature_alpha = 1 / paper_alpha)
         # rewards = torch.stack([batch["A0_score"],batch["A1_score"],batch["A2_score"],batch["A3_score"]],dim=-1) / self.temperature_alpha #<bz,4>
         # +0.01 here ensures A0 has the highest reward even if r(A1) = r(A0). This is included merely to stay consistent with preference settings. Could be removed.
-        rewards = torch.stack([batch["A0_score"]+0.01,batch["A1_score"],batch["A2_score"],batch["A3_score"]], dim=-1) / self.temperature_alpha #<bz,4>
+        rewards = torch.stack([batch["A0_score"] + 0.01, batch["A1_score"], batch["A2_score"], batch["A3_score"]], dim=-1) / self.temperature_alpha #<bz,4>
         softlabel = rewards.softmax(dim=-1) #<bz,4>
         model_rewards = torch.stack([A0_reward, A1_reward, A2_reward, A3_reward], dim=-1) #<bz,4>
 

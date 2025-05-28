@@ -2,58 +2,68 @@ MODEL = {
     # Language Model Configuration
     "lm": {
         "name": "Qwen2.5-0.5B",
-        "site": "Qwen/Qwen2.5-0.5B",
+        "path": "Qwen/Qwen2.5-0.5B",
         "checkpoint": True  # Gradient checkpointing to reduce memory usage
     },
 
     # Skill Memory Configuration
     "skill": {
-        # ===== Memory Configuration =====
+        # == Memory Architecture ==
         "mac_persistent_mem_tokens": 64,  # Number of tokens allocated for persistent memory in MAC (Memory as a Context) architecture.
         "mac_longterm_mem_tokens": 64,  # Number of tokens allocated for long-term memory in MAC architecture.
         "mac_depth": 4,  # Depth of the MAC architecture.
-        "mac_segment_len": 256,  # Length of segments processed by the MAC architecture.
+        "mac_segment_len": 128,  # Length of segments processed by the MAC architecture.
         "mac_neural_memory_qkv_receives_diff_views": False,  # Allow Q/K/V to come from different views/layers.
         "mac_neural_mem_weight_residual": False,  # Add residual connections between memory weight updates.
 
-        # ===== Loss Coefficients =====
-        "mi_coeff": 0.5,  # Weight for mutual information loss to encourage diverse memory usage.
-        "entropy_coeff": 0.1,  # Weight for entropy regularization to encourage exploration.
-        "adv_coeff": 0.2,  # Weight for adversarial learning.
-        "kl_coeff": 0.2,  # Weight for KL divergence penalty to stabilize policy updates.
+        # == Loss Balancing ==
+        "mi_coeff": 0.5,  # Mutual information weight
+        "entropy_coeff": 0.1,  # Exploration bonus
+        "adv_coeff": 0.2,  # Adversarial loss scale
+        "kl_coeff": 0.2,  # KL divergence penalty
+
+        # == Dimensionality ==
+        "action_dim": 256,  # Skill output dimension
         
-        # ===== Gradient Checkpointing =====
-        "checkpoint": {  # Memory-for-compute tradeoff settings
-            "mac": True,  # Checkpoint MAC layers
-            "policy": True,  # Checkpoint policy network
-            "prior": True,  # Checkpoint skill prior network
-            "discriminators": True  # Checkpoint mutual information discriminators
+        # == Memory Optimization ==
+        "checkpoint": {  # Gradient checkpointing
+            "mac": True,  # MAC layers
+            "policy": True,  # Policy network
+            "prior": True,  # Skill prior 
+            "discriminators": True  # MI discriminators
         }
     },
 
+    # Skill-LM Adapter
+    "adapter" : {
+        "min_proj_dim": 64,  # Min hidden dimension
+        "proj_scale": 4,  # Multiplier for initial expansion
+        "proj_dropout": 0.1,  # Dropout rate (regularization)
+        "norm_position": "post"  # LayerNorm order: ('post'|'pre')
+    },
+    
     # Training Objectives
-    "lm_coef": 0.7,  # Weight for language modeling objective
-    "skill_coef": 0.3,  # Weight for skill learning objective
-                        # - Set to 0.0 to disable skill memory entirely (pure LM training)
+    "lm_coef": 0.95,  # Controls LM loss contribution
+    "skill_coef": 0.05,  # Balances skill learning (0.0 = pure LM)
 
     # Inference Settings
     "use_cache": False  # Enables caching for faster generation
 }
 
-# Optimizer Configuration
+# Optimization Strategy
 OPTIMIZER = {
-    "preference": "SimPO"  # ["SimPO", "NCA"]
+    "preference": "SimPO"  # Options: SimPO (default) | NCA
 }
 
-# Data Loader Configuration
+# Data Processing
 LOADER = {
-    "max_length": 512,  # Maximum sequence length for input data.
-    "max_prompt_length": 256,  # Maximum length allowed for the prompt.
-    "truncation_mode": "keep_end"  # Truncation strategy: 'keep_end' retains the end, 'keep_start' keeps the beginning.
+    "max_length": 512,  # Max input token limit
+    "max_prompt_length": 128, # Prompt truncation threshold
+    "truncation_mode": "keep_end"  # Input trimming: keep_end/start
 }
 
-# Accelerator Configuration
-ACCELERATOR = "auto"  # ["auto", "cpu", "gpu", "mps"] 
+# Hardware Setup
+ACCELERATOR = "auto"  # Options: auto|cpu|gpu|mps 
 
-# Precision Configuration
-PRECISION = "bf16-mixed"  # ["32-true", "16-mixed", "bf16-mixed"]
+# Numerical Precision
+PRECISION = "bf16-mixed"  # Options: 32-true|16-mixed|bf16-mixed
