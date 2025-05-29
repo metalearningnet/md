@@ -1,6 +1,7 @@
 import sys
 import torch
 import unittest
+import torch.nn as nn
 from pathlib import Path
 
 _root_dir = Path(__file__).parent.parent
@@ -13,12 +14,14 @@ class TestSkill(unittest.TestCase):
     def setUp(self):
         self.batch_size = 4
         self.seq_len = 10
+        self.state_dim = 64
         self.action_dim = 4
         self.hidden_dim = 64
         
         # Test data
         self.states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)    
         self.skill_memory = SkillMemory(
+            state_dim=self.state_dim,
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim,
             mac_depth=1,
@@ -33,7 +36,27 @@ class TestSkill(unittest.TestCase):
         self.assertTrue(hasattr(self.skill_memory, 'policy'))
         
         # Check output dimensions
-        self.assertEqual(self.skill_memory.policy[-1].out_features, self.action_dim)
+        output_layer = self.skill_memory.policy.output_layer
+        if isinstance(output_layer, nn.Sequential):
+            final_layer = output_layer[-1]
+            self.assertIsInstance(
+                final_layer, nn.Linear,
+                f"Final layer should be Linear, got {type(final_layer)}"
+            )
+            self.assertEqual(
+                final_layer.out_features, self.action_dim,
+                f"Output dimension mismatch. Expected {self.action_dim}, got {final_layer.out_features}"
+            )
+        elif isinstance(output_layer, nn.Linear):
+            self.assertEqual(
+                output_layer.out_features, self.action_dim,
+                f"Output dimension mismatch. Expected {self.action_dim}, got {output_layer.out_features}"
+            )
+        else:
+            self.fail(
+                f"Unexpected output_layer type: {type(output_layer)}. "
+                "Should be nn.Linear or nn.Sequential ending with Linear layer"
+            )
 
     def test_action_logits(self):
         float_state = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)

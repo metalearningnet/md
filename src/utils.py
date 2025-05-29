@@ -51,7 +51,6 @@ DIST_FILE = 'dist.yaml'
 
 RETRY_MAX = 5
 LOG_INTERVAL = 1
-SUFFIX_START = 1 << 32 # Starting position for action embeddings
 LABEL_PAD_TOKEN_ID = -100
 
 def info(s):
@@ -78,7 +77,6 @@ class Cfg:
     model_dir: Path
     optimizer: dict
     accelerator: str
-    suffix_start: int
     log_interval: int
     label_pad_token_id: int
     remove_unused_columns: bool
@@ -174,7 +172,6 @@ cfg = Cfg(
     precision=PRECISION,
     optimizer=OPTIMIZER,
     accelerator=ACCELERATOR,
-    suffix_start=SUFFIX_START,
     log_interval=LOG_INTERVAL,
     label_pad_token_id=LABEL_PAD_TOKEN_ID,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS,
@@ -347,7 +344,7 @@ def get_po(model):
         training_args.max_prompt_length = cfg.max_prompt_length
         training_args.remove_unused_columns = cfg.remove_unused_columns
         return trainer(
-            model=model, 
+            model=model,
             args=training_args,
             tokenizer=model.tokenizer
         )

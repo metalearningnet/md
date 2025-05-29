@@ -29,7 +29,7 @@ class TestMD(unittest.TestCase):
         
         # Verify output shapes
         self.assertEqual(outputs['logits'].shape, 
-                        (self.batch_size, self.seq_len * 2, self.model.config.vocab_size))
+                        (self.batch_size, self.seq_len, self.model.config.vocab_size))
         if outputs['action_logits'] is not None:
             self.assertEqual(outputs['action_logits'].shape,
                             (self.batch_size, self.seq_len, self.model.skill_memory.action_dim))
@@ -68,7 +68,7 @@ class TestMD(unittest.TestCase):
         # Verify LM output dimensions
         self.assertEqual(
             outputs['logits'].shape,
-            (self.batch_size, self.seq_len * 2, self.model.config.vocab_size)
+            (self.batch_size, self.seq_len, self.model.config.vocab_size)
         )
         
         # Check action projection dimensions

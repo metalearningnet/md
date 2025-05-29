@@ -32,112 +32,115 @@ def train(config: dict):
         - fabric_config (dict): Configuration options for the Lightning Fabric setup.
         - dist (bool): Enable distributed training.
     """
+    try:
+        path = config['path']
+        name = config.get('name')
+        split = config.get('split', 'train')
+        split_ratio = config.get('split_ratio', 0.0)
+        num_epochs = config.get('epochs', 1)
+        num_batches = config.get('batches', -1)
+        batch_size = config.get('batch_size', 1)
+        seed = config.get('seed', 42)
+        lr = config.get('lr', 1e-4)
+        val_split=config.get('val_split', 0.1)
+        weight_decay = config.get('weight_decay', 0.01)
+        gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
+        ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
+        save_interval = config.get('save_interval', 1)
+        fabric_config = config['fabric_config']
+        dist = config.get('dist', False)
+        
+        fabric = L.Fabric(**fabric_config)
+        fabric.launch()
+        model = MD()
 
-    path = config['path']
-    name = config.get('name')
-    split = config.get('split', 'train')
-    split_ratio = config.get('split_ratio', 0.0)
-    num_epochs = config.get('epochs', 1)
-    num_batches = config.get('batches', -1)
-    batch_size = config.get('batch_size', 1)
-    seed = config.get('seed', 42)
-    lr = config.get('lr', 1e-4)
-    val_split=config.get('val_split', 0.1)
-    weight_decay = config.get('weight_decay', 0.01)
-    gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
-    ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
-    save_interval = config.get('save_interval', 1)
-    fabric_config = config['fabric_config']
-    dist = config.get('dist', False)
-    
-    fabric = L.Fabric(**fabric_config)
-    fabric.launch()
-    model = MD()
+        # Configure optimizer
+        trainable_params = []
+        for param_group in model.get_trainable_parameters().values():
+            trainable_params += [p for p in param_group if p.requires_grad]
 
-    # Configure optimizer
-    trainable_params = []
-    for param_group in model.get_trainable_parameters().values():
-        trainable_params += [p for p in param_group if p.requires_grad]
+        if not dist:
+            optimizer = torch.optim.AdamW(
+                trainable_params,
+                lr=lr,
+                weight_decay=weight_decay,
+            )
+            model, optimizer = fabric.setup(model, optimizer)
+        else:
+            model = fabric.setup(model)
+            optimizer = None
 
-    if not dist:
-        optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=lr,
-            weight_decay=weight_decay,
+        # Configure dataset loader
+        loader_args = {
+            'path': path,
+            'name': name,
+            'split': split,
+            'split_ratio': split_ratio,
+            'seed': seed
+        }
+        
+        loader = MDLoader(**loader_args)
+        
+        # Create dataloaders
+        train_loader, val_loader = loader.get_dataloaders(
+            batch_size=batch_size,
+            val_split=val_split,
+            seed=seed
         )
-        model, optimizer = fabric.setup(model, optimizer)
-    else:
-        model = fabric.setup(model)
-        optimizer = None
-
-
-    # Configure dataset loader
-    loader_args = {
-        'path': path,
-        'name': name,
-        'split': split,
-        'split_ratio': split_ratio,
-        'seed': seed
-    }
+        train_loader = fabric.setup_dataloaders(train_loader, use_distributed_sampler=True)
+        if val_loader:
+            val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
+        
+        # Training loop
+        best_val_loss = np.inf
+        ckpt_dir = ckpt_path.parent
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        if cfg.log:
+            cfg.log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = cfg.train_log
+            log_interval = cfg.log_interval
+        else:
+            log_path = None
+            log_interval = 0
+        
+        for epoch in range(num_epochs):
+            print(f"\nEpoch {epoch+1}/{num_epochs}")
+            train_metrics = md_train(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                fabric=fabric,
+                num_epochs=num_epochs,
+                num_batches=num_batches,
+                log_path=log_path,
+                log_interval=log_interval,
+                gradient_accumulation_steps=gradient_accumulation_steps
+            )
+            
+            log_info = [
+                f"Train Loss: {train_metrics['total_loss']:.4f}"
+            ]
+            
+            val_metrics = md_validate(model, val_loader, fabric, num_batches=num_batches)
+            if fabric.is_global_zero:
+                log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
+            
+            print(" | ".join(log_info))
+            
+            # Save best checkpoint
+            if val_metrics.get('total_loss', np.inf) < best_val_loss:
+                best_val_loss = val_metrics['total_loss']
+                torch.save(model.state_dict(), ckpt_path)
+                print(f"Saved best model with val loss: {best_val_loss:.4f}")
+            
+            # Periodic checkpointing
+            if (epoch + 1) % save_interval == 0:
+                torch.save(model.state_dict(), ckpt_dir / f"train_epoch_{epoch+1}.pt")
+                print(f"Saved epoch {epoch+1} checkpoint")
     
-    loader = MDLoader(**loader_args)
-    
-    # Create dataloaders
-    train_loader, val_loader = loader.get_dataloaders(
-        batch_size=batch_size,
-        val_split=val_split,
-        seed=seed
-    )
-    train_loader = fabric.setup_dataloaders(train_loader, use_distributed_sampler=True)
-    if val_loader:
-        val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
-    
-    # Training loop
-    best_val_loss = np.inf
-    ckpt_dir = ckpt_path.parent
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.log:
-        cfg.log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = cfg.train_log
-        log_interval = cfg.log_interval
-    else:
-        log_path = None
-        log_interval = 0
-    
-    for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch+1}/{num_epochs}")
-        train_metrics = md_train(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            fabric=fabric,
-            num_epochs=num_epochs,
-            num_batches=num_batches,
-            log_path=log_path,
-            log_interval=log_interval,
-            gradient_accumulation_steps=gradient_accumulation_steps
-        )
-        
-        log_info = [
-            f"Train Loss: {train_metrics['total_loss']:.4f}"
-        ]
-        
-        val_metrics = md_validate(model, val_loader, fabric, num_batches=num_batches)
-        if fabric.is_global_zero:
-            log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
-        
-        print(" | ".join(log_info))
-        
-        # Save best checkpoint
-        if val_metrics.get('total_loss', np.inf) < best_val_loss:
-            best_val_loss = val_metrics['total_loss']
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"Saved best model with val loss: {best_val_loss:.4f}")
-        
-        # Periodic checkpointing
-        if (epoch + 1) % save_interval == 0:
-            torch.save(model.state_dict(), ckpt_dir / f"train_epoch_{epoch+1}.pt")
-            print(f"Saved epoch {epoch+1} checkpoint")
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
 
 def main():
     parser = argparse.ArgumentParser(description="Train the MD Model")
@@ -220,11 +223,7 @@ def main():
             lr=args.lr
         )
     
-    try:
-        train(config)
-    finally:
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
+    train(config)
 
 if __name__ == '__main__':
     main()

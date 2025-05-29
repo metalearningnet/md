@@ -23,9 +23,16 @@ class MD(nn.Module):
         self.max_length = self.config.max_length
         self.config.use_cache = config.use_cache
         self.skill_config = config.skill_config
-        self.suffix_start = config.suffix_start
-        self.attn = config.attn if attn is None else attn 
+        self.attn = config.attn if attn is None else attn
         self.skill_memory = self._init_skill_memory()
+
+        self.fusion_gate = nn.Sequential(
+            nn.Linear(2 * self.lm_hidden_size, self.lm_hidden_size),
+            nn.Sigmoid()
+        )
+        self.state_norm = nn.LayerNorm(self.lm_hidden_size)
+        self.action_norm = nn.LayerNorm(self.lm_hidden_size)
+
         self.lm = self._init_lm()
         self._init_action_projection()
         self._init_params(freeze_pretrained=config.freeze_pretrained)
@@ -47,14 +54,15 @@ class MD(nn.Module):
         """Initialize SkillMemory with LM-compatible dimensions"""
         self.skill_config.update({
             'num_tokens': self.lm_num_tokens,
-            'hidden_dim': self.lm_hidden_size,
-            'action_dim': self.skill_config.get('action_dim', self.lm_hidden_size)
+            'state_dim': self.lm_hidden_size,
+            'action_dim': self.skill_config.get('action_dim', self.lm_num_tokens),
+            'hidden_dim': self.skill_config.get('hidden_dim', self.lm_hidden_size)
         })
         return SkillMemory(**self.skill_config)
     
     def _init_action_projection(self):
         """Adapter between SkillMemory and LM"""
-        proj_scale = self.adapter.get('proj_scale', 4)
+        proj_scale = self.adapter.get('proj_scale', 2)
         min_dim = self.adapter.get('min_proj_dim', self.config.hidden_size)
         proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim)
 
@@ -95,27 +103,33 @@ class MD(nn.Module):
             param.requires_grad = True
         for param in self.skill_memory.parameters():
             param.requires_grad = True
+        for param in self.fusion_gate.parameters():
+            param.requires_grad = True
+        for param in [self.state_norm, self.action_norm]:
+            param.requires_grad = True
 
     def forward(self,
                 input_ids: torch.Tensor,
-                attention_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                attention_mask: Optional[torch.Tensor] = None,
+                position_ids: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        
+        device = input_ids.device
+        
+        if attention_mask is None:
+            attention_mask = (input_ids != self.tokenizer.pad_token_id).int().to(device)
+        
+        if position_ids is None:
+            position_ids = torch.arange(0, input_ids.size(1), dtype=torch.long, device=device)
+            position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
+        
         if self.skill_coef:
             state_embeds = self.lm.get_input_embeddings()(input_ids)
-            
-            # Process through SkillMemory
             action_logits = self.skill_memory.generate(state_embeds)
-            
-            # Adapt actions
             action_embeds = self.action_proj(action_logits)
+            fused_embeds = self._fuse_features(state_embeds, action_embeds)
             
-            # Combine with text inputs
-            inputs_embeds = self._combine_inputs(state_embeds, action_embeds)
-            position_ids = self._create_position_ids(input_ids, action_embeds)
-            attention_mask = self._create_attention_mask(input_ids, action_embeds, attention_mask)
-        
-            # Forward through LM
             lm_out = self.lm(
-                inputs_embeds=inputs_embeds,
+                inputs_embeds=fused_embeds,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 output_hidden_states=True
@@ -125,7 +139,8 @@ class MD(nn.Module):
             action_logits = None
             lm_out = self.lm(
                 input_ids=input_ids,
-                attention_mask=attention_mask
+                attention_mask=attention_mask,
+                position_ids=position_ids
             )
         
         return {
@@ -134,70 +149,82 @@ class MD(nn.Module):
             'logits': lm_out.logits
         }
 
-    def _create_position_ids(self, input_ids, action_embeds):
-        """Create position IDs accounting for action embeddings"""
-        original_len = input_ids.shape[1]
-        action_len = action_embeds.shape[1]
-        batch_size = input_ids.size(0)
-        position_ids = torch.cat([
-            torch.arange(original_len, device=input_ids.device),
-            torch.arange(self.suffix_start, self.suffix_start + action_len, device=input_ids.device)
-        ]).unsqueeze(0)
-        position_ids = position_ids.expand(batch_size, -1)
-        return position_ids
-    
-    def _create_attention_mask(self, input_ids, action_embeds, attention_mask=None):
-        attention_mask = (
-            (input_ids != self.tokenizer.pad_token_id).int()
-            if attention_mask is None
-            else attention_mask.to(input_ids.device)
-        )
-        batch_size = attention_mask.size(0)
-        ones_tensor = torch.ones(batch_size, action_embeds.shape[1], device=input_ids.device)
-        combined_mask = torch.cat([attention_mask, ones_tensor], dim=1)
-        return combined_mask
-    
-    def _combine_inputs(self,
-        state_embeds: torch.Tensor,
-        action_embeds: torch.Tensor
-    ) -> torch.Tensor:
-        return torch.cat([state_embeds, action_embeds], dim=1)
+    def _fuse_features(self, state_embeds, action_embeds):
+        """Enhanced feature fusion with learnable normalization"""
+        state_norm = self.state_norm(state_embeds)
+        action_norm = self.action_norm(action_embeds)
+        
+        combined = torch.cat([state_norm, action_norm], dim=-1)
+        gate = self.fusion_gate(combined)
+        return gate * state_norm + (1 - gate) * action_norm
 
     def _generate(
         self,
         input_ids: torch.Tensor,
-        attention_mask: torch.Tensor = None
-    ):
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         device = input_ids.device
         batch_size = input_ids.shape[0]
         generated_ids = input_ids.clone()
         eos_flags = torch.zeros(batch_size, dtype=torch.bool, device=device)
-
-        for _ in range(self.max_length - input_ids.shape[1]):
+        start_len = input_ids.shape[1]
+        total_steps = self.max_length - start_len
+        step = 0
+        
+        if attention_mask is None:
+            current_attention_mask = (input_ids != self.tokenizer.pad_token_id).int().to(device)
+        else:
+            current_attention_mask = attention_mask.to(device)
+        
+        position_ids = torch.arange(start_len, device=device).expand(batch_size, -1)
+        
+        while step < total_steps:
+            current_length = generated_ids.shape[1]
             if eos_flags.all():
                 break
             
-            model_inputs = {
-                'input_ids': generated_ids,
-            }
-
-            if attention_mask is not None:
-                current_length = generated_ids.shape[1]
-                extended_attention_mask = torch.cat([
-                    attention_mask,
-                    torch.ones((batch_size, current_length - attention_mask.shape[1]), device=device)
-                ], dim=1)
-                model_inputs['attention_mask'] = extended_attention_mask
-
-            with torch.no_grad():
-                outputs = self.forward(**model_inputs)
+            if current_attention_mask.shape[1] < current_length:
+                new_mask = torch.ones(
+                    batch_size, 
+                    current_length - current_attention_mask.shape[1],
+                    device=device,
+                    dtype=current_attention_mask.dtype
+                )
+                current_attention_mask = torch.cat([current_attention_mask, new_mask], dim=1)
             
-            next_token_logits = outputs['logits'][:, -1, :]
+            if position_ids.shape[1] < current_length:
+                new_positions = torch.arange(
+                    position_ids.shape[1], 
+                    current_length,
+                    device=device
+                ).expand(batch_size, -1)
+                position_ids = torch.cat([position_ids, new_positions], dim=1)
+            
+            current_state_embeds = self.lm.get_input_embeddings()(generated_ids)
+            
+            if self.skill_coef:
+                current_action_logits = self.skill_memory.generate(current_state_embeds)
+                current_action_embeds = self.action_proj(current_action_logits)
+                fused_embeds = self._fuse_features(current_state_embeds, current_action_embeds)
+            else:
+                fused_embeds = current_state_embeds
+            
+            with torch.no_grad():
+                lm_out = self.lm(
+                    inputs_embeds=fused_embeds,
+                    attention_mask=current_attention_mask,
+                    position_ids=position_ids
+                )
+            
+            next_token_logits = lm_out.logits[:, -1, :]
             next_tokens = torch.argmax(next_token_logits, dim=-1)
+            
             next_tokens = next_tokens.masked_fill(eos_flags, self.tokenizer.eos_token_id)
             eos_flags = eos_flags | (next_tokens == self.tokenizer.eos_token_id)
             generated_ids = torch.cat([generated_ids, next_tokens.unsqueeze(-1)], dim=-1)
-
+            
+            step += 1
+            
         return generated_ids
 
     def generate(
@@ -230,15 +257,22 @@ class MD(nn.Module):
             state_dict = torch.load(checkpoint_path, map_location='cpu')
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {str(e)}") from e
-        if 'model' in state_dict:
-            state_dict = state_dict['model']
-        with torch.device('cpu'):
-            model.load_state_dict(state_dict, strict=False)
+        
+        model_state = state_dict.get('model', state_dict)
+        model_state = model_state.get('state_dict', model_state)
+        
+        model_keys = set(dict(model.named_parameters()).keys())
+        filtered_state = {k: v for k, v in model_state.items() if k in model_keys}
+        
+        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
         info(f"Loaded pre-trained model from {checkpoint_path}")
+        info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
         return model.to(get_device())
 
     def get_trainable_parameters(self) -> Dict[str, nn.Parameter]:
         return {
             'skill_memory': list(self.skill_memory.parameters()),
-            'action_proj': list(self.action_proj.parameters())
+            'action_proj': list(self.action_proj.parameters()),
+            'fusion_gate': list(self.fusion_gate.parameters()),
+            'normalization': list(self.state_norm.parameters()) + list(self.action_norm.parameters())
         }

@@ -423,10 +423,7 @@ class SimPOTrainer(Trainer):
             **model_kwargs,
         )
         states = model_out['states']
-        if states is not None:
-            all_logits = model_out['logits'][:, :model_out['logits'].size(-2) // 2, :]
-        else:
-            all_logits = model_out['logits']
+        all_logits = model_out['logits']
         all_logps = self.get_batch_logps(
             all_logits,
             concatenated_batch["concatenated_labels"],
@@ -521,7 +518,7 @@ class SimPOTrainer(Trainer):
         
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
         skill_loss = model.skill_memory.compute_losses(states)['total_loss']
-        total_loss = model.lm_coef * loss + model.skill_coef * skill_loss
+        total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
         
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()

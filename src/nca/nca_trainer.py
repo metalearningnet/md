@@ -478,10 +478,7 @@ class NCATrainer(Trainer):
             **model_kwargs,
         )
         states = model_out['states']
-        if states is not None:
-            all_logits = model_out['logits'][:, :model_out['logits'].size(-2) // 2, :].to(torch.float32)
-        else:
-            all_logits = model_out['logits']
+        all_logits = model_out['logits']
         all_logps = self._get_batch_logps(
             all_logits.to(torch.float32),
             concatenated_batch["concatenated_labels"],
@@ -498,7 +495,7 @@ class NCATrainer(Trainer):
         A2_logits = all_logits[2*len_chosen:3*len_chosen]
         A3_logits = all_logits[3*len_chosen:4*len_chosen]
 
-        return (A0_logps, A1_logps, A2_logps, A3_logps, A0_logits, A1_logits, A2_logits, A3_logits)
+        return (A0_logps, A1_logps, A2_logps, A3_logps, A0_logits, A1_logits, A2_logits, A3_logits, states)
 
     def get_batch_loss_metrics(
         self,
@@ -511,9 +508,9 @@ class NCATrainer(Trainer):
         # TODO support arbitrary K option
         with torch.no_grad():
             m = model if self.ref_model is None else self.ref_model
-            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _ = self.concatenated_forward(m, batch)
+            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _, _ = self.concatenated_forward(m, batch)
         
-        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _ = self.concatenated_forward(model, batch)
+        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, states = self.concatenated_forward(model, batch)
 
         losses, A0_rewards, A1_rewards, A2_rewards, A3_rewards = self.nca_loss(
             batch,
@@ -540,7 +537,10 @@ class NCATrainer(Trainer):
         metrics[f"{prefix}logps/A2"] = policy_A2_logps.detach().cpu().mean()
         metrics[f"{prefix}logps/A3"] = policy_A3_logps.detach().cpu().mean()
 
-        return losses.mean(), metrics
+        lm_loss = losses.mean()
+        skill_loss = model.skill_memory.compute_losses(states)['total_loss']
+        total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+        return total_loss, metrics
 
     def compute_loss(
         self,
