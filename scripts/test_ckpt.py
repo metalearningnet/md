@@ -18,7 +18,7 @@ class TestCkpt(unittest.TestCase):
             'path': default_dataset_path,
             'split': 'train',
             'epochs': 1,
-            'batches': 1,
+            'samples': 1,
             'batch_size': 1,
             'dummy': True,
             'fabric_config': {
@@ -31,7 +31,7 @@ class TestCkpt(unittest.TestCase):
             'path': default_dataset_path,
             'split': 'test',
             'model_path': cfg.ckpt_dir / cfg.md_file,
-            'batches': 1,
+            'samples': 1,
             'batch_size': 1,
             'fabric_config': {
                 'accelerator': cfg.accelerator,

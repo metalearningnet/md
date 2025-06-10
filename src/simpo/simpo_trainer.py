@@ -330,6 +330,7 @@ class SimPOTrainer(Trainer):
                     pad_value = 0
                 concatenated_key = k.replace("chosen", "concatenated")
                 concatenated_batch[concatenated_key] = pad_to_length(batch[k], max_length, pad_value=pad_value)
+        
         for k in batch:
             if k.startswith("rejected") and isinstance(batch[k], torch.Tensor):
                 if "labels" in k or is_encoder_decoder:
@@ -392,55 +393,84 @@ class SimPOTrainer(Trainer):
 
         return losses, chosen_rewards, rejected_rewards
 
-    def concatenated_forward(
-        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
+    def get_logps(
+        self, 
+        model: nn.Module, 
+        batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+        required_keys = ['chosen_input_ids', 'rejected_input_ids', 'chosen_attention_mask', 'rejected_attention_mask', 'chosen_labels', 'rejected_labels']
+        if not all(k in batch for k in required_keys):
+            raise ValueError(f"Batch must contain all of {required_keys}")
+        if model.enable_annotation:
+            results = {}
+            for i in ['chosen', 'rejected']:
+                input_ids = batch[f'{i}_input_ids']
+                input_labels = batch[f'{i}_labels']
+                model_out = model.annotate(input_ids, input_labels=input_labels)
+                logits = model_out['logits']
+                labels = model_out['labels']
+                logps = self.get_batch_logps(
+                    logits,
+                    labels,
+                    average_log_prob=True,
+                    is_encoder_decoder=self.is_encoder_decoder,
+                    label_pad_token_id=self.label_pad_token_id
+                )
+                results[f'{i}_logps'] = logps
+                results[f'{i}_logits'] = logits
+                if i == 'chosen':
+                    results[f'{i}_labels'] = labels
+                    results[f'{i}_states'] = model_out['states']
+            return (
+                results['chosen_logps'], 
+                results['rejected_logps'], 
+                results['chosen_logits'], 
+                results['rejected_logits'], 
+                results['chosen_labels'], 
+                results['chosen_states']
+            )
+        else:
+            # Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+            # We do this to avoid doing two forward passes, because it's faster for FSDP.
+            concatenated_batch = self.concatenated_inputs(
+                batch,
+                is_encoder_decoder=self.is_encoder_decoder,
+                label_pad_token_id=self.label_pad_token_id,
+                padding_value=self.padding_value,
+                device=self.accelerator.device
+            )
 
-        We do this to avoid doing two forward passes, because it's faster for FSDP.
-        """
-        concatenated_batch = self.concatenated_inputs(
-            batch,
-            is_encoder_decoder=self.is_encoder_decoder,
-            label_pad_token_id=self.label_pad_token_id,
-            padding_value=self.padding_value,
-            device=self.accelerator.device,
-        )
-        len_chosen = batch["chosen_labels"].shape[0]
+            len_chosen = batch["chosen_labels"].shape[0]
 
-        model_kwargs = (
-            {
+            model_kwargs = {
                 "labels": concatenated_batch["concatenated_labels"],
-                "decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None),
-            }
-            if self.is_encoder_decoder
-            else {}
-        )
-        
-        model_out = model(
-            concatenated_batch["concatenated_input_ids"],
-            attention_mask=concatenated_batch["concatenated_attention_mask"],
-            **model_kwargs,
-        )
-        states = model_out['states']
-        all_logits = model_out['logits']
-        all_logps = self.get_batch_logps(
-            all_logits,
-            concatenated_batch["concatenated_labels"],
-            average_log_prob=True,
-            is_encoder_decoder=self.is_encoder_decoder,
-            label_pad_token_id=self.label_pad_token_id,
-        )
+                "decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None)
+            } if self.is_encoder_decoder else {}
+            
+            model_out = model(
+                concatenated_batch["concatenated_input_ids"],
+                attention_mask=concatenated_batch["concatenated_attention_mask"],
+                **model_kwargs
+            )
 
-        chosen_logps = all_logps[:len_chosen]
-        rejected_logps = all_logps[len_chosen:]
+            states = model_out['states']
+            all_logits = model_out['logits']
+            all_logps = self.get_batch_logps(
+                all_logits,
+                concatenated_batch["concatenated_labels"],
+                average_log_prob=True,
+                is_encoder_decoder=self.is_encoder_decoder,
+                label_pad_token_id=self.label_pad_token_id
+            )
 
-        chosen_logits = all_logits[:len_chosen]
-        rejected_logits = all_logits[len_chosen:]
+            chosen_logps = all_logps[:len_chosen]
+            rejected_logps = all_logps[len_chosen:]
+            chosen_logits = all_logits[:len_chosen]
+            rejected_logits = all_logits[len_chosen:]
+            chosen_labels = concatenated_batch["concatenated_labels"][:len_chosen]
+            chosen_states = states[:len_chosen]
 
-        chosen_labels = concatenated_batch["concatenated_labels"][:len_chosen]
-
-        return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_labels, states)
+            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_labels, chosen_states)
 
     @staticmethod
     def get_batch_logps(
@@ -496,17 +526,16 @@ class SimPOTrainer(Trainer):
             policy_chosen_logits,
             policy_rejected_logits,
             chosen_labels,
-            states
-        ) = self.concatenated_forward(model, batch)
+            chosen_states
+        ) = self.get_logps(model, batch)
 
         losses, chosen_rewards, rejected_rewards = self.simpo_loss(
             policy_chosen_logps,
-            policy_rejected_logps,
+            policy_rejected_logps
         )
 
-        lm_loss = losses.mean()
-        loss = lm_loss
-
+        loss = losses.mean()
+        
         if self.sft_weight > 0.0:
             if not self.is_encoder_decoder:
                 policy_chosen_logits = policy_chosen_logits[..., :-1, :].contiguous()
@@ -517,8 +546,8 @@ class SimPOTrainer(Trainer):
             metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
         
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
-        skill_loss = model.skill_memory.compute_losses(states)['total_loss']
-        total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+        skill_loss = model.skill_memory.compute_losses(chosen_states)['total_loss']
+        total_loss = model.lm_coef * loss + model.skill_coef * skill_loss
         
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
@@ -530,7 +559,7 @@ class SimPOTrainer(Trainer):
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
         metrics[f"{prefix}total_loss"] = total_loss
         metrics[f"{prefix}skill_loss"] = skill_loss
-        metrics[f"{prefix}lm_loss"] = lm_loss
+        metrics[f"{prefix}lm_loss"] = loss
         
         return total_loss, metrics
 

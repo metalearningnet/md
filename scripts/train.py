@@ -20,7 +20,7 @@ def train(config: dict):
         - split (str): Dataset split name (e.g., "train").
         - split_ratio (float): Proportion of the dataset to be allocated for training or testing.
         - epochs (int): Number of epochs.
-        - batches (int): Number of batches.
+        - samples (int): Number of samples.
         - batch_size (int): Training batch size.
         - seed (int): Random seed.
         - lr (float): Learning rate.
@@ -38,7 +38,7 @@ def train(config: dict):
         split = config.get('split', 'train')
         split_ratio = config.get('split_ratio', 0.0)
         num_epochs = config.get('epochs', 1)
-        num_batches = config.get('batches', -1)
+        num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
         seed = config.get('seed', 42)
         lr = config.get('lr', 1e-4)
@@ -55,9 +55,7 @@ def train(config: dict):
         model = MD()
 
         # Configure optimizer
-        trainable_params = []
-        for param_group in model.get_trainable_parameters().values():
-            trainable_params += [p for p in param_group if p.requires_grad]
+        trainable_params = [p for p in model.get_trainable_parameters() if p.requires_grad]
 
         if not dist:
             optimizer = torch.optim.AdamW(
@@ -111,7 +109,7 @@ def train(config: dict):
                 optimizer=optimizer,
                 fabric=fabric,
                 num_epochs=num_epochs,
-                num_batches=num_batches,
+                num_samples=num_samples,
                 log_path=log_path,
                 log_interval=log_interval,
                 gradient_accumulation_steps=gradient_accumulation_steps
@@ -121,7 +119,7 @@ def train(config: dict):
                 f"Train Loss: {train_metrics['total_loss']:.4f}"
             ]
             
-            val_metrics = md_validate(model, val_loader, fabric, num_batches=num_batches)
+            val_metrics = md_validate(model, val_loader, fabric, num_samples=num_samples)
             if fabric.is_global_zero:
                 log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
             
@@ -162,6 +160,8 @@ def main():
                         help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")
+    parser.add_argument("--samples", type=int, default=-1,
+                        help="Number of training samples")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Training batch size")
     parser.add_argument("--val_split", type=float, default=0.1,
@@ -201,6 +201,7 @@ def main():
         'val_split': args.val_split,
         'weight_decay': args.weight_decay,
         'epochs': args.epochs,
+        'samples': args.samples,
         'batch_size': args.batch_size,
 
         # System parameters

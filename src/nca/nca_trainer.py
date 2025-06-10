@@ -420,7 +420,7 @@ class NCATrainer(Trainer):
 
         return losses, A0_reward.detach(), A1_reward.detach(), A2_reward.detach(), A3_reward.detach()
 
-    def _get_batch_logps(
+    def get_batch_logps(
         self,
         logits: torch.FloatTensor,
         labels: torch.LongTensor,
@@ -454,48 +454,80 @@ class NCATrainer(Trainer):
         else:
             return (per_token_logps * loss_mask).sum(-1)
 
-    def concatenated_forward(
-        self, model: nn.Module, batch: Dict[str, Union[List, torch.LongTensor]]
+    def get_logps(
+        self,
+        model: nn.Module,
+        batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        """Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+        for i in range(4):
+            required_keys = [f'A{i}_input_ids', f'A{i}_attention_mask', f'A{i}_labels']
+            if not all(k in batch for k in required_keys):
+                raise ValueError(f"Batch must contain all of {required_keys}")
+        
+        if self.model.enable_annotation:
+            results = {}
+            all_states = []
+            for i in range(4):
+                input_ids = batch[f'A{i}_input_ids']
+                input_labels = batch[f'A{i}_labels']
+                model_out = model.annotate(input_ids, input_labels=input_labels)
+                logits = model_out['logits']
+                labels = model_out['labels']
+                logps = self.get_batch_logps(
+                    logits,
+                    labels,
+                    average_log_prob=True
+                )
+                results[f'A{i}_logps'] = logps
+                results[f'A{i}_logits'] = logits
+                all_states.append(model_out['states'])
+            return (
+                results['A0_logps'],
+                results['A1_logps'],
+                results['A2_logps'],
+                results['A3_logps'],
+                results['A0_logits'],
+                results['A1_logits'],
+                results['A2_logits'],
+                results['A3_logits'],
+                all_states
+            )
+        else:
+            # Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
+            # We do this to avoid doing two forward passes, because it's faster for FSDP.
+            concatenated_batch = self.concatenated_inputs(batch)
+            len_chosen = batch["A0_labels"].shape[0]
 
-        We do this to avoid doing two forward passes, because it's faster for FSDP.
-        """
-        concatenated_batch = self.concatenated_inputs(batch)
-        len_chosen = batch["A0_labels"].shape[0]
-
-        model_kwargs = (
-            {
+            model_kwargs = {
                 "labels": concatenated_batch["concatenated_labels"],
                 "decoder_input_ids": concatenated_batch.pop("concatenated_decoder_input_ids", None),
-            }
-            if self.is_encoder_decoder
-            else {}
-        )
-        model_out = model(
-            concatenated_batch["concatenated_input_ids"],
-            attention_mask=concatenated_batch["concatenated_attention_mask"],
-            **model_kwargs,
-        )
-        states = model_out['states']
-        all_logits = model_out['logits']
-        all_logps = self._get_batch_logps(
-            all_logits.to(torch.float32),
-            concatenated_batch["concatenated_labels"],
-            average_log_prob=False,
-        )
+            } if self.is_encoder_decoder else {}
+            
+            model_out = model(
+                concatenated_batch["concatenated_input_ids"],
+                attention_mask=concatenated_batch["concatenated_attention_mask"],
+                **model_kwargs,
+            )
+            
+            all_logits = model_out['logits']
+            all_states = [model_out['states']]
+            all_logps = self.get_batch_logps(
+                all_logits.to(torch.float32),
+                concatenated_batch["concatenated_labels"],
+                average_log_prob=False,
+            )
 
-        A0_logps = all_logps[0*len_chosen:1*len_chosen]
-        A1_logps = all_logps[1*len_chosen:2*len_chosen]
-        A2_logps = all_logps[2*len_chosen:3*len_chosen]
-        A3_logps = all_logps[3*len_chosen:4*len_chosen]
+            A0_logps = all_logps[0*len_chosen:1*len_chosen]
+            A1_logps = all_logps[1*len_chosen:2*len_chosen]
+            A2_logps = all_logps[2*len_chosen:3*len_chosen]
+            A3_logps = all_logps[3*len_chosen:4*len_chosen]
 
-        A0_logits = all_logits[0*len_chosen:1*len_chosen]
-        A1_logits = all_logits[1*len_chosen:2*len_chosen]
-        A2_logits = all_logits[2*len_chosen:3*len_chosen]
-        A3_logits = all_logits[3*len_chosen:4*len_chosen]
+            A0_logits = all_logits[0*len_chosen:1*len_chosen]
+            A1_logits = all_logits[1*len_chosen:2*len_chosen]
+            A2_logits = all_logits[2*len_chosen:3*len_chosen]
+            A3_logits = all_logits[3*len_chosen:4*len_chosen]
 
-        return (A0_logps, A1_logps, A2_logps, A3_logps, A0_logits, A1_logits, A2_logits, A3_logits, states)
+            return (A0_logps, A1_logps, A2_logps, A3_logps, A0_logits, A1_logits, A2_logits, A3_logits, all_states)
 
     def get_batch_loss_metrics(
         self,
@@ -508,9 +540,9 @@ class NCATrainer(Trainer):
         # TODO support arbitrary K option
         with torch.no_grad():
             m = model if self.ref_model is None else self.ref_model
-            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _, _ = self.concatenated_forward(m, batch)
+            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _, _ = self.get_logps(m, batch)
         
-        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, states = self.concatenated_forward(model, batch)
+        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, policy_states = self.get_logps(model, batch)
 
         losses, A0_rewards, A1_rewards, A2_rewards, A3_rewards = self.nca_loss(
             batch,
@@ -537,8 +569,10 @@ class NCATrainer(Trainer):
         metrics[f"{prefix}logps/A2"] = policy_A2_logps.detach().cpu().mean()
         metrics[f"{prefix}logps/A3"] = policy_A3_logps.detach().cpu().mean()
 
+        skill_loss = 0.0
         lm_loss = losses.mean()
-        skill_loss = model.skill_memory.compute_losses(states)['total_loss']
+        for s in policy_states:
+            skill_loss += model.skill_memory.compute_losses(s)['total_loss'].item()
         total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
         return total_loss, metrics
 

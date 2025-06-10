@@ -60,7 +60,7 @@ class TestSkill(unittest.TestCase):
 
     def test_action_logits(self):
         float_state = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
-        action_logits = self.skill_memory.generate(float_state)
+        action_logits = self.skill_memory.forward(float_state)['action_logits']
         self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
         self.assertTrue(
             action_logits.dtype in (torch.float32, torch.float64),
@@ -82,7 +82,7 @@ class TestSkill(unittest.TestCase):
             self.assertTrue(isinstance(v, float))
 
     def test_action_generation(self):
-        action_logits = self.skill_memory.generate(self.states)
+        action_logits = self.skill_memory.forward(self.states)['action_logits']
         self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
 
     def test_gradient_flow(self):

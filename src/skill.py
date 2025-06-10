@@ -7,6 +7,15 @@ from titans import MemoryAsContextTransformer
 from torch.utils.checkpoint import checkpoint
 from torch.distributions import Normal, kl_divergence, Categorical
 
+class GradientReversal(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return x
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        return -grad_output
+
 class PolicyNetwork(nn.Module):
     def __init__(self, state_dim, hidden_dim, action_dim):
         super().__init__()
@@ -17,6 +26,9 @@ class PolicyNetwork(nn.Module):
         self.output_layer = nn.Linear(hidden_dim * 4, action_dim)
         self.ln = nn.LayerNorm(hidden_dim * 4)
         self.act = nn.SiLU()
+
+        nn.init.orthogonal_(self.output_layer.weight, gain=0.01)
+        nn.init.zeros_(self.output_layer.bias)
 
     def forward(self, x):
         x = self.input_layer(x)
@@ -53,16 +65,16 @@ class SkillMemory(nn.Module):
                  mac_segment_len: int = 512,
                  mac_neural_memory_qkv_receives_diff_views: bool = False,
                  mac_neural_mem_weight_residual: bool = False,
-                 mi_coeff: float = 1.0,
-                 entropy_coeff: float = 0.5,
-                 adv_coeff: float = 0.5,
+                 mi_coef: float = 1.0,
+                 entropy_coef: float = 0.5,
+                 adv_coef: float = 0.5,
                  kl_coeff: float = 0.05,
-                 forward_coeff: float = 0.1,
+                 forward_coef: float = 0.1,
                  checkpoint: dict = None):
         
         super().__init__()
         info(f"Skill memory (state_dim: {state_dim} action_dim: {action_dim} hidden_dim: {hidden_dim})")
-
+        
         ckpt_config = checkpoint or {}
         self.checkpoint_mac = ckpt_config.get('mac', False)
         self.checkpoint_policy = ckpt_config.get('policy', False)
@@ -85,7 +97,6 @@ class SkillMemory(nn.Module):
             neural_mem_weight_residual=mac_neural_mem_weight_residual,
             token_emb=None
         )
-        self.kl_epsilon = 1e-8
         self.mac_output_proj = nn.Linear(num_tokens, hidden_dim)
         self.memory_var = nn.Parameter(torch.zeros(1, hidden_dim))
         nn.init.constant_(self.memory_var, math.log(0.5))
@@ -128,13 +139,16 @@ class SkillMemory(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 1)
         )
+        self.rev = GradientReversal.apply
 
         # Loss Coefficients
-        self.mi_coeff = mi_coeff
-        self.entropy_coeff = entropy_coeff
-        self.adv_coeff = adv_coeff
+        self.mi_coef = mi_coef
+        self.entropy_coef = entropy_coef
+        self.adv_coef = adv_coef
         self.kl_coeff = kl_coeff
-        self.forward_coeff = forward_coeff
+        self.forward_coef = forward_coef
+
+        self.kl_epsilon = 1e-8
     
     def get_action_logits(self, states, m):
         policy_input = torch.cat([states, m], dim=-1)
@@ -189,7 +203,6 @@ class SkillMemory(nn.Module):
     def compute_losses(self, states):
         outputs = self.forward(states)
         action_logits = outputs['action_logits']
-        prior_dist = outputs['prior_dist']
         mem_dist = outputs['mem_dist']
         states = outputs['states']
         m = outputs['m']
@@ -211,46 +224,85 @@ class SkillMemory(nn.Module):
             gru_out, _ = self.disc_gru(neg_pairs)
             neg_scores = self.disc_linear(gru_out[:, -1])
         
-        mi_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores)) + \
-                  F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
+        # Discriminator loss
+        mi_disc_loss = F.binary_cross_entropy_with_logits(
+            pos_scores, torch.ones_like(pos_scores)
+        ) + F.binary_cross_entropy_with_logits(
+            neg_scores, torch.zeros_like(neg_scores)
+        )
+        
+        # Policy MI loss (with gradient reversal)
+        policy_scores = GradientReversal.apply(pos_scores)
+        mi_policy_loss = F.binary_cross_entropy_with_logits(
+            policy_scores, torch.ones_like(policy_scores)
+        )
+
+        # Combined MI loss components
+        mi_loss = mi_disc_loss + mi_policy_loss
 
         # I(S;M) - Forward Model Loss
-        # Predict next state using current state and memory
         forward_input = torch.cat([states[:, :-1], m[:, :-1]], dim=-1)
         pred_states = self.forward_model(forward_input)
         forward_loss = F.mse_loss(pred_states, states[:, 1:])
 
-         # Combined MI loss
-        mi_total_loss = mi_loss + forward_loss
-
         # Action Entropy
-        entropy = Categorical(logits=action_logits).entropy().mean()
+        log_probs = F.log_softmax(action_logits, dim=-1)
+        probs = log_probs.exp()
+        entropy = -(log_probs * probs).sum(dim=-1).mean()
+
+        # Adversarial Loss I(A;M|S)
+        real_input = torch.cat([
+            states, 
+            action_logits.detach(),
+            m.detach()
+        ], dim=-1)
         
-        # Adversarial Loss (I(A;M|S))
-        real_input = torch.cat([states, action_logits, m.detach()], dim=-1)
-        fake_input = torch.cat([states, action_logits.detach(), m], dim=-1)
         if self.checkpoint_discriminators:
             def run_mmi_discriminator(inputs):
                 return self.mmi_discriminator(inputs)
             real_logits = checkpoint(run_mmi_discriminator, real_input)
-            fake_logits = checkpoint(run_mmi_discriminator, fake_input)
         else:
             real_logits = self.mmi_discriminator(real_input)
-            fake_logits = self.mmi_discriminator(fake_input)
         
-        adv_loss = F.binary_cross_entropy_with_logits(real_logits, torch.ones_like(real_logits)) + \
-                   F.binary_cross_entropy_with_logits(fake_logits, torch.zeros_like(fake_logits))
+        # Apply gradient reversal
+        real_logits_rev = GradientReversal.apply(real_logits)
+        adv_loss = F.binary_cross_entropy_with_logits(
+            real_logits_rev, 
+            torch.ones_like(real_logits_rev)
+        )
 
         # KL Regularization
-        kl_loss = kl_divergence(mem_dist, prior_dist)
+        # Compute prior from previous memory
+        if self.checkpoint_prior:
+            def run_prior(m_prev):
+                prior_out, _ = self.prior_net(m_prev)
+                prior_mean = self.prior_mean(prior_out)
+                prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
+                return Normal(prior_mean, prior_std)
+            prior_dist = checkpoint(run_prior, m[:, :-1])
+        else:
+            prior_out, _ = self.prior_net(m[:, :-1])
+            prior_mean = self.prior_mean(prior_out)
+            prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
+            prior_dist = Normal(prior_mean, prior_std)
+        
+        # Create new distribution for memory at time steps 1:
+        mem_dist_t = Normal(
+            loc=mem_dist.loc[:, 1:], 
+            scale=mem_dist.scale[:, 1:]
+        )
+        
+        # Compute KL between current memory and prior from previous step
+        kl_loss = kl_divergence(mem_dist_t, prior_dist)
         kl_loss = torch.clamp(kl_loss, min=-self.kl_epsilon, max=1e3)
         kl_loss = kl_loss.mean()
 
+        # Total loss with coefficients
         total_loss = (
-            self.mi_coeff * mi_total_loss +
-            self.forward_coeff * forward_loss +
-            self.entropy_coeff * -entropy +
-            self.adv_coeff * adv_loss +
+            self.mi_coef * mi_loss +
+            self.forward_coef * forward_loss +
+            self.entropy_coef * -entropy +
+            self.adv_coef * adv_loss +
             self.kl_coeff * kl_loss
         )
         
@@ -264,13 +316,3 @@ class SkillMemory(nn.Module):
                 'kl_loss': kl_loss.item()
             }
         }
-
-    def generate(self, states):
-        with torch.no_grad():
-            # MAC Processing
-            mac_output = self.mac(states)
-            m = self.mac_output_proj(mac_output)
-        
-            # Action Generation
-            action_logits, _ = self.get_action_logits(states, m)
-            return action_logits

@@ -46,7 +46,7 @@ ${BOLD}Examples:${RESET}
   $0 --unittest md
   $0 --generate
   $0 --generate --some-arg value
-  $0 --train --epochs 10 --batch-size 32
+  $0 --train --epochs 10 --batch_size 32
   $0 --prepare
 EOF
     exit 0

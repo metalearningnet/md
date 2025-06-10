@@ -3,6 +3,7 @@ import sys
 import yaml
 import time
 import torch
+import random
 import socket
 import signal
 import uvicorn
@@ -14,6 +15,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
+from itertools import product, islice
 from typing import Dict, Optional, List
 from transformers import modeling_utils
 from torch.utils.tensorboard import SummaryWriter
@@ -25,7 +27,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER
+from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER, CKPT
 
 LOG = getattr(settings, 'LOG', True)
 WARN = getattr(settings, 'WARN', True)
@@ -48,10 +50,17 @@ EVAL_DIR = OUT_DIR / 'eval'
 TRAIN_LOG = LOG_DIR / 'train'
 TEST_LOG = LOG_DIR / 'test'
 DIST_FILE = 'dist.yaml'
+PEFT_FILE = 'peft.yaml'
 
+SEED = 42
 RETRY_MAX = 5
 LOG_INTERVAL = 1
+
 LABEL_PAD_TOKEN_ID = -100
+SPECIAL_TOKEN_SEP = '<|SEP|>'
+RESERVED_TOKENS = [SPECIAL_TOKEN_SEP]
+
+SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
 
 def info(s):
     if VERBOSE:
@@ -65,6 +74,7 @@ def warn(s):
 class Cfg:
     log: bool
     attn: str
+    ckpt: dict
     model: dict
     loader: dict
     md_file: str
@@ -81,27 +91,7 @@ class Cfg:
     label_pad_token_id: int
     remove_unused_columns: bool
     gradient_accumulation_steps: int
-    
-    @property
-    def lm_name(self):
-        return self.model['lm']['name']
-    
-    @property
-    def use_cache(self):
-        return self.model['use_cache']
-
-    @property
-    def ckpt_path(self):
-        return self.ckpt_dir / MD_FILE
-    
-    @property
-    def checkpoint_pretrained(self):
-        return self.model['lm']['checkpoint']
-    
-    @property
-    def skill_config(self):
-        return self.model['skill'].copy()
-    
+        
     @property
     def lm_coef(self):
         return self.model.get('lm_coef', 0.7)
@@ -111,12 +101,52 @@ class Cfg:
         return self.model['lm']['name']
     
     @property
-    def adapter(self):
-        return self.model['adapter']
+    def lm_freeze(self):
+        return self.model['lm'].get('freeze', False)
+    
+    @property
+    def lm_checkpoint(self):
+        return self.ckpt['gradient'].get('lm', False)
+
+    @property
+    def skill_config(self):
+        return self.model['skill'].copy()
+    
+    @property
+    def skill_checkpoint(self):
+        return self.ckpt['gradient'].get('skill', {})
+    
+    @property
+    def skill_integration_strategy(self):
+        return self.model.get('skill_integration_strategy', 'annotation')
 
     @property
     def skill_coef(self):
         return self.model.get('skill_coef', 0.3)
+    
+    @property
+    def adapter(self):
+        return self.model['adapter']
+    
+    @property
+    def temperature(self):
+        return self.model.get('temperature', 0.7)
+
+    @property
+    def use_cache(self):
+        return self.model['use_cache']
+    
+    @property
+    def ckpt_path(self):
+        return self.ckpt_dir / MD_FILE
+
+    @property
+    def num_reasoning_tokens(self):
+        return self.model.get('num_reasoning_tokens', 5)
+    
+    @property
+    def max_reasoning_length(self):
+        return self.model.get('max_reasoning_length', 128)
     
     @property
     def min_length(self):
@@ -133,6 +163,10 @@ class Cfg:
     @property
     def max_target_length(self):
         return self.loader.get('max_target_length', 128)
+    
+    @property
+    def max_annotations(self):
+        return self.model.get('max_annotations', -1)
     
     @property
     def truncation_mode(self):
@@ -152,13 +186,10 @@ class Cfg:
             return CONF_DIR / 'nca.yaml'
         else:
             return ''
-    
-    @property
-    def freeze_pretrained(self):
-        return self.model.get('skill_coef') != 0.0
 
 cfg = Cfg(
     log=LOG,
+    ckpt=CKPT,
     model=MODEL,
     loader=LOADER,
     attn=ATTN_IMPL,
@@ -188,6 +219,30 @@ elif cfg.po == 'SimPO':
     default_dataset_path = "princeton-nlp/gemma2-ultrafeedback-armorm"
 else:
     default_dataset_path = "ag_news"
+
+def generate_special_token_dict(min_syl=1, max_syl=3):
+    def shuffled_word_list(words, seed=SEED):
+        rng = random.Random(seed)
+        word_list = words[:]
+        rng.shuffle(word_list)
+        return word_list
+    seen = set()
+    tokens = []
+    for length in range(min_syl, max_syl + 1):
+        for combo in product(SYLLABLES, repeat=length):
+            token = ''.join(combo)
+            if token not in seen:
+                seen.add(token)
+                tokens.append(token)
+    return shuffled_word_list(tokens)
+
+def get_special_token_by_index(index):
+    if 0 <= index < len(SPECIAL_TOKEN_DICT):
+        return f'<|{SPECIAL_TOKEN_DICT[index].capitalize()}|>'
+    else:
+        return None
+
+SPECIAL_TOKEN_DICT = generate_special_token_dict()
 
 class RegisterRequest(BaseModel):
     hostname: str
@@ -239,6 +294,10 @@ class NodeRankCoordinator:
 
 def load_dist_config():
     with open(CONF_DIR / DIST_FILE) as f:
+        return yaml.safe_load(f)
+    
+def load_peft_config():
+    with open(CONF_DIR / PEFT_FILE) as f:
         return yaml.safe_load(f)
 
 def add_dist_config(
@@ -296,22 +355,17 @@ def add_dist_config(
         config['gradient_accumulation_steps'] = cfg.gradient_accumulation_steps
 
 def calculate_lm_loss(outputs, batch, loss_fn):
-    # Get dimensions
     lm_logits = outputs['logits']
     input_ids = batch['input_ids']
     _, logits_seq_len = lm_logits.size(0), lm_logits.size(1)
     input_len = input_ids.size(1)
     
-    # Calculate memory context length
     M = logits_seq_len - input_len  # Memory tokens count
     
-    # Slice logits to match text sequence
-    logits = lm_logits[:, M:M+input_len-1, :]  # (batch, input_len-1, vocab)
+    logits = lm_logits[:, M:M+input_len-1, :]
     
-    # Get labels (shifted input_ids)
-    labels = input_ids[:, 1:]  # (batch, input_len-1)
+    labels = input_ids[:, 1:]
     
-    # Create valid mask
     mask = (batch['attention_mask'][:, 1:] != 0).flatten()
     
     assert logits.size(1) == input_len-1, \
@@ -355,7 +409,7 @@ def md_train(
     optimizer,
     fabric,
     num_epochs=1,
-    num_batches=-1,
+    num_samples=-1,
     log_path=None,
     log_interval=1,
     gradient_accumulation_steps=1
@@ -364,69 +418,84 @@ def md_train(
     po = get_po(model)
     
     metrics = {
-        'total_loss': 0.0,
-        'num_batches': 0
+        'num_batches': 0,
+        'total_loss': 0.0
     }
 
+    total_samples = 0
     writer = SummaryWriter(log_path) if log_path else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
-    
-    pbar = tqdm(
-        loader,
-        desc='Training',
-        leave=False,
-        disable=not fabric.is_global_zero,
-        dynamic_ncols=True
-    )
+    last_log_step = 0
 
-    for step, batch in enumerate(pbar):
-        if po:
-            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
-            po.store_metrics(metrics=train_metrics, train_eval='train')
+    for epoch in range(num_epochs):
+        epoch_samples = 0
+
+        if num_samples > 0:
+            max_batches = num_samples
+            loader_iter = iter(islice(loader, max_batches))
+            pbar_total = max_batches
         else:
-            outputs = model(
-                input_ids=batch['input_ids'],
-                attention_mask=batch['attention_mask']
-            )
+            loader_iter = iter(loader)
+            pbar_total = len(loader)
 
-            loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
+        pbar = tqdm(
+            loader_iter,
+            desc=f'Training Epoch {epoch + 1}/{num_epochs}',
+            disable=not fabric.is_global_zero,
+            dynamic_ncols=True,
+            total=pbar_total
+        )
+
+        for step, batch in enumerate(pbar):
+            if po:
+                loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
+                po.store_metrics(metrics=train_metrics, train_eval='train')
+            else:
+                input_ids = batch['input_ids']
+                attention_mask = batch['attention_mask']
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
+
+                if torch.isnan(loss).any() or torch.isinf(loss).any():
+                    warn("NaN/Inf loss detected, skipping batch")
+                    continue
+
+                has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
+                has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
+                if has_nan or has_inf:
+                    warn("NaN/Inf gradients detected, skipping update")
+                    continue
+
+            fabric.backward(loss)
+            if optimizer:
+                optimizer.step()
+                optimizer.zero_grad()
+            else:
+                if (step + 1) % gradient_accumulation_steps == 0:
+                    model._forward_module.step()
+
+            total_samples += 1
+            epoch_samples += 1
+
+            metrics['total_loss'] += loss.item()
+            metrics['num_batches'] += 1
+
+            if writer:
+                if num_samples > 0:
+                    sample_progress = int((total_samples / (num_samples * num_epochs)) * 100)
+                else:
+                    estimated_total = len(loader) * num_epochs
+                    sample_progress = int((total_samples / estimated_total) * 100)
+
+                if sample_progress >= log_interval and (sample_progress // log_interval) > (last_log_step // log_interval):
+                    writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
+                    last_log_step = sample_progress
         
-            if torch.isnan(loss).any() or torch.isinf(loss).any():
-                warn("NaN/Inf loss detected, skipping batch")
-                continue
+        pbar.close()
 
-            has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
-            has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
-            if has_nan or has_inf:
-                warn("NaN/Inf gradients detected, skipping update")
-                continue
-            
-        fabric.backward(loss)
-        if optimizer:
-            optimizer.step()
-            optimizer.zero_grad()
-        else:
-            if (step + 1) % gradient_accumulation_steps == 0:
-                model._forward_module.step()
-        
-        metrics['total_loss'] += loss.item()
-        metrics['num_batches'] += 1
-
-        if writer:
-            progress = int(metrics['num_batches'] / len(loader) * 100)
-            global_step = num_epochs * len(loader) + metrics['num_batches']
-            if progress % log_interval == 0 or metrics['num_batches'] == len(loader):
-                writer.add_scalar("Loss/batch", loss.item(), global_step)
-
-        if num_batches > 0:
-            num_batches -= 1
-            
-        if num_batches == 0:
-            break
-    
     if po is None:
-        for k in ['total_loss']:
-            metrics[k] /= metrics['num_batches']
+        if metrics['num_batches'] > 0:
+            metrics['total_loss'] /= metrics['num_batches']
     else:
         train_metrics = po.get_metrics()['train']
         for key, val in train_metrics.items():
@@ -434,14 +503,14 @@ def md_train(
 
     if writer:
         writer.close()
-    
+
     return metrics
 
 def md_validate(
     model, 
     loader,
     fabric,
-    num_batches=-1,
+    num_samples=-1,
     log_path=None,
     log_interval=1
 ) -> dict:
@@ -456,17 +525,27 @@ def md_validate(
         'total_loss': 0.0
     }
 
-    num_samples = 0
+    total_samples = 0
     writer = SummaryWriter(log_path) if log_path else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
     with torch.no_grad():
+        if num_samples > 0:
+            max_batches = num_samples
+            loader_iter = iter(islice(loader, max_batches))
+            pbar_total = max_batches
+        else:
+            loader_iter = iter(loader)
+            pbar_total = len(loader)
+        
         pbar = tqdm(
-            loader, 
-            desc='Validating', 
+            loader_iter,
+            desc='Validating',
             disable=not fabric.is_global_zero,
-            dynamic_ncols=True
+            dynamic_ncols=True,
+            total=pbar_total
         )
+
         for batch in pbar:
             if po:
                 loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval')
@@ -478,7 +557,7 @@ def md_validate(
                 
                 lm_logits = outputs['logits']
                 input_len = input_ids.size(1)
-                M = lm_logits.size(1) - input_len  # Memory context length
+                M = lm_logits.size(1) - input_len
                 
                 sliced_lm_logits = lm_logits[:, M:M+input_len-1, :]
                 lm_labels = input_ids[:, 1:]
@@ -490,32 +569,30 @@ def md_validate(
                     sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
                     lm_labels.flatten()[lm_mask]
                 ) if lm_mask.any() else 0.0
-
-                num_samples += input_ids.size(0)
             
+            total_samples += 1
             metrics['num_batches'] += 1
             metrics['total_loss'] += loss.item()
+
             if writer:
-                progress = int(metrics['num_batches'] / len(loader) * 100)
-                if progress % log_interval == 0 or metrics['num_batches'] == len(loader):
+                if num_samples > 0:
+                    sample_progress = int((total_samples / num_samples) * 100)
+                else:
+                    sample_progress = int((total_samples / len(loader)) * 100)
+
+                if sample_progress % log_interval == 0:
                     writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
-            
-            if num_batches > 0:
-                num_batches -= 1
-            
-            if num_batches == 0:
-                break
 
     if po is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-        gathered_samples = fabric.all_gather(torch.tensor(num_samples)).sum()
+        gathered_samples = fabric.all_gather(torch.tensor(total_samples)).sum()
         if fabric.is_global_zero and gathered_samples > 0:
             avg_loss = gathered_loss / gathered_samples
             metrics['avg_loss'] = avg_loss
             print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
 
-        if num_samples > 0:
-            metrics['total_loss'] /= num_samples
+        if metrics['num_batches'] > 0:
+            metrics['total_loss'] /= metrics['num_batches']
     else:
         eval_metrics = po.get_metrics()['eval']
         for key, val in eval_metrics.items():

@@ -12,8 +12,8 @@ learning_rate: 1e-6
 log_level: info
 logging_steps: 5
 lr_scheduler_type: cosine
-max_length: 2048
-max_prompt_length: 1800
+max_length: 1024
+max_prompt_length: 512
 num_train_epochs: 1
 optim: adamw_torch
 run_name: simpo
@@ -22,8 +22,6 @@ per_device_eval_batch_size: 4
 push_to_hub: false
 save_strategy: "steps"
 save_steps: 1000000
-report_to:
-- wandb
 save_total_limit: 20
 seed: 42
 warmup_ratio: 0.1

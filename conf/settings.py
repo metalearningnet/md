@@ -2,69 +2,88 @@ MODEL = {
     # Language Model Configuration
     "lm": {
         "name": "Qwen2.5-0.5B",
-        "path": "Qwen/Qwen2.5-0.5B",
-        "checkpoint": True  # Gradient checkpointing to reduce memory usage
+        "path": "Qwen/Qwen2.5-0.5B"
     },
 
     # Skill Memory Configuration
     "skill": {
-        # Memory Architecture
-        "mac_persistent_mem_tokens": 128,  # Number of tokens allocated for persistent memory in MAC (Memory as a Context) architecture.
-        "mac_longterm_mem_tokens": 128,  # Number of tokens allocated for long-term memory in MAC architecture.
-        "mac_depth": 4,  # Depth of the MAC architecture.
-        "mac_segment_len": 512,  # Length of segments processed by the MAC architecture.
-        "mac_neural_memory_qkv_receives_diff_views": False,  # Allow Q/K/V to come from different views/layers.
-        "mac_neural_mem_weight_residual": False,  # Add residual connections between memory weight updates.
+        # Memory Architecture Parameters (MAC - Memory as Context)
+        "mac_persistent_mem_tokens": 64,   # Tokens reserved for long-lasting contextual memory
+        "mac_longterm_mem_tokens": 64,     # Tokens allocated for extended memory retention
+        "mac_depth": 1,                    # Number of stacked MAC blocks
+        "mac_segment_len": 256,            # Segment length processed per MAC block
+        "mac_neural_memory_qkv_receives_diff_views": False,  # If True, Q/K/V projections come from different layers/views
+        "mac_neural_mem_weight_residual": False,  # Adds residual connections in neural memory weight updates
 
-        # Loss Balancing
-        "mi_coeff": 1.0,  # Mutual information weight
-        "entropy_coeff": 0.5,  # Exploration bonus
-        "adv_coeff": 0.5,  # Adversarial loss scale
-        "kl_coeff": 0.05,  # KL divergence penalty
-        "forward_coeff": 0.1,  # Forward loss coefficient
+        # Loss Balancing Coefficients
+        "mi_coef": 1.0,            # Weight for mutual information maximization
+        "entropy_coef": 0.5,       # Encourages exploration via policy entropy regularization
+        "adv_coef": 0.5,           # Scales adversarial loss component
+        "kl_coeff": 0.05,          # Controls KL divergence penalty for prior-policy alignment
+        "forward_coef": 0.1,       # Weight for forward prediction consistency loss
 
-        # Dimensionality
-        "action_dim": 8192,
-        
-        # Memory Optimization
-        "checkpoint": {  # Gradient checkpointing
-            "mac": True,  # MAC layers
-            "policy": True,  # Policy network
-            "prior": True,  # Skill prior 
-            "discriminators": True  # MI discriminators
-        }
+        # Action Space Configuration
+        "action_dim": 64,          # Dimensionality of action embeddings
     },
 
-    # Skill-LM Adapter
-    "adapter" : {
-        "min_proj_dim": 32,  # Min hidden dimension
-        "proj_scale": 2,  # Multiplier for initial expansion
-        "proj_dropout": 0.1,  # Dropout rate (regularization)
-        "norm_position": "post"  # LayerNorm order: ('post'|'pre')
+    # Skill-LM Adapter Configuration
+    "adapter": {
+        "min_proj_dim": 32,        # Minimum hidden dimension size in adapter layers
+        "proj_scale": 2,           # Expansion factor for intermediate adapter dimensions
+        "proj_dropout": 0.1,       # Dropout rate applied after adapter projections
+        "norm_position": "post"    # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
     },
     
-    # Training Objectives
-    "lm_coef": 0.95,  # Controls LM loss contribution
-    "skill_coef": 0.05,  # Balances skill learning (0.0 = pure LM)
+    # Training Objective Weights
+    "lm_coef": 0.8,                # Proportional weight for language modeling loss
+    "skill_coef": 0.2,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
-    # Inference Settings
-    "use_cache": False  # Enables caching for faster generation
+    # Integration Strategy for Skill Output into the Language Model
+    "skill_integration_strategy": "annotation",  # Options: ['fusion' | 'annotation']
+
+    # Number of distinct token types available for reasoning processes
+    "num_reasoning_tokens": 5,
+
+    # Maximum allowed length for a single reasoning sequence
+    "max_reasoning_length": 10,
+
+    # Maximum number of annotations allowed per sequence (-1 for no limit)
+    "max_annotations": 2,
+
+    # Sampling temperature for generation
+    "temperature": 0.7,
+
+    # Inference Behavior
+    "use_cache": False             # Use KV caching to accelerate autoregressive generation
+}
+
+CKPT = {
+    # Enables gradient checkpointing to reduce GPU memory usage
+    "gradient": {
+        "lm": True,                # LLM
+        "skill": {                 # Skill Memory
+            "mac": True,           #   MAC layers
+            "policy": True,        #   Policy network
+            "prior": True,         #   Skill prior model
+            "discriminators": True #   MI discriminators
+        }
+    }
 }
 
 # Optimization Strategy
 OPTIMIZER = {
-    "preference": "SimPO"  # Options: SimPO (default) | NCA
+    "preference": "SimPO"          # Preference optimization method; Options: SimPO (default) | NCA
 }
 
-# Data Processing
+# Data Processing Pipeline
 LOADER = {
-    "max_length": 512,  # Max input token limit
-    "max_prompt_length": 256,  # Prompt truncation threshold
-    "truncation_mode": "keep_end"  # Input trimming: keep_end/start
+    "max_length": 512,             # Maximum token length for input + output sequences
+    "max_prompt_length": 128,      # Max tokens allowed in prompt before truncation
+    "truncation_mode": "keep_end"  # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
 }
 
-# Hardware Setup
-ACCELERATOR = "auto"  # Options: auto|cpu|gpu|mps 
+# Hardware Acceleration Backend
+ACCELERATOR = "auto"               # Device selection mode; Options: auto|cpu|gpu|mps
 
-# Numerical Precision
-PRECISION = "bf16-mixed"  # Options: 32-true|16-mixed|bf16-mixed
+# Numerical Precision Setting
+PRECISION = "bf16-mixed"           # Floating-point precision; Options: 32-true | 16-mixed | bf16-mixed

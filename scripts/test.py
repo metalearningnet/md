@@ -17,8 +17,8 @@ def test(config: dict):
         - path (str): Dataset path.
         - name (str): Dataset name.
         - split (str): Dataset split name (e.g., "test").
-        - batches (int): Number of batches.
         - batch_size (int): Testing batch size.
+        - samples (int): Number of samples.
         - ckpt (str): Checkpoint path.
         - fabric_config (dict): Configuration options for the Lightning Fabric setup.
     """
@@ -26,8 +26,8 @@ def test(config: dict):
         dataset_path = config['path']
         dataset_name = config.get('name')
         split = config.get('split', 'test')
-        num_batches = config.get('batches', -1)
         batch_size = config.get('batch_size', 1)
+        num_samples = config.get('samples', -1)
         ckpt_path = config.get('ckpt')
         fabric_config = config['fabric_config']
         
@@ -58,7 +58,7 @@ def test(config: dict):
 
         test_loader = loader.get_dataloader(batch_size=batch_size, shuffle=False)
         test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
-        test_metrics = md_validate(model, test_loader, fabric, num_batches=num_batches, log_path=log_path, log_interval=log_interval)
+        test_metrics = md_validate(model, test_loader, fabric, num_samples=num_samples, log_path=log_path, log_interval=log_interval)
 
         print("\nTest Results:")
         for k, v in test_metrics.items():
@@ -84,6 +84,8 @@ def main():
                         help="Checkpoint path")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Testing batch size")
+    parser.add_argument("--samples", type=int, default=-1,
+                        help="Number of testing samples")
 
     # Distributed testing configuration
     parser.add_argument("--dist", action="store_true", default=False,
@@ -118,6 +120,7 @@ def main():
         'name': args.name,
         'split': args.split,
         'batch_size': args.batch_size,
+        'samples': args.samples,
         'ckpt': args.ckpt,
         'fabric_config': fabric_config
     }
