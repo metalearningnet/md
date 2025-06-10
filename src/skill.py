@@ -5,7 +5,7 @@ from utils import info
 import torch.nn.functional as F
 from titans import MemoryAsContextTransformer
 from torch.utils.checkpoint import checkpoint
-from torch.distributions import Normal, kl_divergence, Categorical
+from torch.distributions import Normal, kl_divergence
 
 class GradientReversal(torch.autograd.Function):
     @staticmethod
@@ -68,7 +68,7 @@ class SkillMemory(nn.Module):
                  mi_coef: float = 1.0,
                  entropy_coef: float = 0.5,
                  adv_coef: float = 0.5,
-                 kl_coeff: float = 0.05,
+                 kl_coef: float = 0.05,
                  forward_coef: float = 0.1,
                  checkpoint: dict = None):
         
@@ -145,7 +145,7 @@ class SkillMemory(nn.Module):
         self.mi_coef = mi_coef
         self.entropy_coef = entropy_coef
         self.adv_coef = adv_coef
-        self.kl_coeff = kl_coeff
+        self.kl_coef = kl_coef
         self.forward_coef = forward_coef
 
         self.kl_epsilon = 1e-8
@@ -303,7 +303,7 @@ class SkillMemory(nn.Module):
             self.forward_coef * forward_loss +
             self.entropy_coef * -entropy +
             self.adv_coef * adv_loss +
-            self.kl_coeff * kl_loss
+            self.kl_coef * kl_loss
         )
         
         return {

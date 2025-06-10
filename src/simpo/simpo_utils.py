@@ -3,9 +3,9 @@ import torch
 import numpy as np
 import torch.nn as nn
 from accelerate import PartialState
+from typing import Dict, Optional, Union
 from transformers import PreTrainedModel
 from torch.nn.utils.rnn import pad_sequence
-from typing import Dict, Optional, Union, Any
 from alignment.data import maybe_insert_system_message, is_openai_format
 
 def apply_chat_template(

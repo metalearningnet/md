@@ -16,27 +16,27 @@ MODEL = {
         "mac_neural_mem_weight_residual": False,  # Adds residual connections in neural memory weight updates
 
         # Loss Balancing Coefficients
-        "mi_coef": 1.0,            # Weight for mutual information maximization
-        "entropy_coef": 0.5,       # Encourages exploration via policy entropy regularization
-        "adv_coef": 0.5,           # Scales adversarial loss component
-        "kl_coeff": 0.05,          # Controls KL divergence penalty for prior-policy alignment
-        "forward_coef": 0.1,       # Weight for forward prediction consistency loss
+        "mi_coef": 1.0,             # Weight for mutual information maximization
+        "entropy_coef": 0.5,        # Encourages exploration via policy entropy regularization
+        "adv_coef": 0.5,            # Scales adversarial loss component
+        "kl_coef": 0.05,            # Controls KL divergence penalty for prior-policy alignment
+        "forward_coef": 0.1,        # Weight for forward prediction consistency loss
 
         # Action Space Configuration
-        "action_dim": 64,          # Dimensionality of action embeddings
+        "action_dim": 64,           # Dimensionality of action embeddings
     },
 
     # Skill-LM Adapter Configuration
     "adapter": {
-        "min_proj_dim": 32,        # Minimum hidden dimension size in adapter layers
-        "proj_scale": 2,           # Expansion factor for intermediate adapter dimensions
-        "proj_dropout": 0.1,       # Dropout rate applied after adapter projections
-        "norm_position": "post"    # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
+        "min_proj_dim": 32,         # Minimum hidden dimension size in adapter layers
+        "proj_scale": 2,            # Expansion factor for intermediate adapter dimensions
+        "proj_dropout": 0.1,        # Dropout rate applied after adapter projections
+        "norm_position": "post"     # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
     },
     
     # Training Objective Weights
-    "lm_coef": 0.8,                # Proportional weight for language modeling loss
-    "skill_coef": 0.2,             # Proportional weight for skill learning objectives (0.0 = pure LM)
+    "lm_coef": 0.8,                 # Proportional weight for language modeling loss
+    "skill_coef": 0.2,              # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
     "skill_integration_strategy": "annotation",  # Options: ['fusion' | 'annotation']
@@ -54,36 +54,36 @@ MODEL = {
     "temperature": 0.7,
 
     # Inference Behavior
-    "use_cache": False             # Use KV caching to accelerate autoregressive generation
+    "use_cache": False              # Use KV caching to accelerate autoregressive generation
 }
 
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
-        "lm": True,                # LLM
-        "skill": {                 # Skill Memory
-            "mac": True,           #   MAC layers
-            "policy": True,        #   Policy network
-            "prior": True,         #   Skill prior model
-            "discriminators": True #   MI discriminators
+        "lm": False,                # LLM
+        "skill": {                  # Skill Memory
+            "mac": False,           #   MAC layers
+            "policy": False,        #   Policy network
+            "prior": False,         #   Skill prior model
+            "discriminators": False #   MI discriminators
         }
     }
 }
 
 # Optimization Strategy
 OPTIMIZER = {
-    "preference": "SimPO"          # Preference optimization method; Options: SimPO (default) | NCA
+    "preference": "SimPO"           # Preference optimization method; Options: SimPO (default) | NCA
 }
 
 # Data Processing Pipeline
 LOADER = {
-    "max_length": 512,             # Maximum token length for input + output sequences
-    "max_prompt_length": 128,      # Max tokens allowed in prompt before truncation
-    "truncation_mode": "keep_end"  # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
+    "max_length": 512,              # Maximum token length for input + output sequences
+    "max_prompt_length": 128,       # Max tokens allowed in prompt before truncation
+    "truncation_mode": "keep_end"   # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
 }
 
 # Hardware Acceleration Backend
-ACCELERATOR = "auto"               # Device selection mode; Options: auto|cpu|gpu|mps
+ACCELERATOR = "auto"                # Device selection mode; Options: auto|cpu|gpu|mps
 
 # Numerical Precision Setting
-PRECISION = "bf16-mixed"           # Floating-point precision; Options: 32-true | 16-mixed | bf16-mixed
+PRECISION = "bf16-mixed"            # Floating-point precision; Options: 32-true | 16-mixed | bf16-mixed

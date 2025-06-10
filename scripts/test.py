@@ -41,6 +41,9 @@ def test(config: dict):
         
         model = fabric.setup(model)
 
+        if model.enable_annotation:
+            model.mark_forward_method('annotate')
+
         loader = MDLoader(
             path=dataset_path,
             name=dataset_name,

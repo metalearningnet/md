@@ -67,6 +67,9 @@ def train(config: dict):
         else:
             model = fabric.setup(model)
             optimizer = None
+        
+        if model.enable_annotation:
+            model.mark_forward_method('annotate')
 
         # Configure dataset loader
         loader_args = {
