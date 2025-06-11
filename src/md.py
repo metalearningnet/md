@@ -172,27 +172,18 @@ class MD(nn.Module):
 
     def _has_sep(self, context_embeds: torch.Tensor) -> torch.Tensor:
         """Determine if SkillMemory would generate SEP token at the end of context"""
-        # Run SkillMemory to get action logits
         skill_output = self.skill_memory(context_embeds)
         step_logits = skill_output['action_logits'][:, -1, :]
         
-        # Apply temperature scaling
         scaled_logits = step_logits / self.temperature
         
         if self.training:
-            # Numerically stable sampling
             probs = torch.softmax(scaled_logits, dim=-1)
-            
-            # Prevent NaN in multinomial
             probs = torch.clamp(probs, min=1e-8, max=1.0)
-            
-            # Sample next token
             sampled_indices = torch.multinomial(probs, 1)
         else:
-            # Greedy selection with temperature
             sampled_indices = torch.argmax(scaled_logits, dim=-1, keepdim=True)
         
-        # Check if sampled token is SEP (last token in action space)
         sep_index = self.action_dim - 1
         return sampled_indices.squeeze(-1) == sep_index
     
@@ -289,11 +280,17 @@ class MD(nn.Module):
     
     def _fuse_features(self, state_embeds, action_embeds):
         """Enhanced feature fusion with learnable normalization"""
-        state_norm = self.state_norm(state_embeds)
-        action_norm = self.action_norm(action_embeds)
-        combined = torch.cat([state_norm, action_norm], dim=-1)
-        gate = self.fusion_gate(combined)
-        return gate * state_norm + (1 - gate) * action_norm
+        state_embeds = state_embeds.to(self.dtype)
+        action_embeds = action_embeds.to(self.dtype)
+        
+        with torch.amp.autocast(get_device().type, enabled=False):
+            state_norm = self.state_norm(state_embeds.float()).to(self.dtype)
+            action_norm = self.action_norm(action_embeds.float()).to(self.dtype)
+
+        with torch.amp.autocast(get_device().type, dtype=self.dtype):
+            combined = torch.cat([state_norm, action_norm], dim=-1)
+            gate = self.fusion_gate(combined.to(self.fusion_gate[0].weight.dtype))
+            return gate * state_norm + (1 - gate) * action_norm
 
     def annotate(
         self, 
@@ -375,7 +372,6 @@ class MD(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        # Input validation and embedding lookup
         if torch.any(input_ids >= self.lm_num_tokens):
             input_ids = input_ids.clamp(0, self.lm_num_tokens - 1)
 
@@ -386,23 +382,18 @@ class MD(nn.Module):
         batch_size, seq_len, hidden_size = state_embeds.shape
         
         if self.enable_annotation:
-            # Check if SkillMemory would generate SEP at the end of the sequence
             sep_detected = self._has_sep(state_embeds)
             
-            # Create buffers for modified sequences
             new_embeds = []
             new_labels = []
             
             for i in range(batch_size):
-                # Always include original sequence
                 seq_embeds = state_embeds[i]
                 seq_input_ids = input_ids[i]
                 new_embeds_list = [seq_embeds]
                 new_labels_list = [seq_input_ids]
                 
-                # Append annotation if SEP was detected
                 if sep_detected[i].item():
-                    # Generate annotation using full context
                     seq_embeds = torch.cat([seq_embeds, self.sep_embed])
                     annotation_embeds, _ = self._get_annotation(seq_embeds)
                     
@@ -410,20 +401,18 @@ class MD(nn.Module):
                         annotation_embeds = torch.cat([self.sep_embed, annotation_embeds[0]])
                         new_embeds_list.append(annotation_embeds)
                         new_labels_list.append(torch.full((annotation_embeds.size(0),), self.label_pad_token_id, 
-                                                        device=input_ids.device))
+                                                          device=input_ids.device))
                 
-                # Concatenate original sequence and annotation
                 new_embeds.append(torch.cat(new_embeds_list))
                 new_labels.append(torch.cat(new_labels_list))
             
-            # Pad sequences to max length
             max_len = max(tensor.size(0) for tensor in new_embeds)
             full_embeds = torch.zeros(batch_size, max_len, hidden_size, 
-                                    device=state_embeds.device)
+                                      device=state_embeds.device)
             full_labels = torch.full((batch_size, max_len), self.label_pad_token_id, 
-                                    dtype=torch.long, device=input_ids.device)
+                                     dtype=torch.long, device=input_ids.device)
             full_mask = torch.zeros(batch_size, max_len, 
-                                dtype=attention_mask.dtype, device=attention_mask.device)
+                                    dtype=attention_mask.dtype, device=attention_mask.device)
             
             for i in range(batch_size):
                 seq_len_i = new_embeds[i].size(0)
@@ -431,17 +420,19 @@ class MD(nn.Module):
                 full_labels[i, :seq_len_i] = new_labels[i]
                 full_mask[i, :seq_len_i] = 1
 
-            # Run LM on modified embeddings
             lm_out = self.lm(inputs_embeds=full_embeds.to(self.dtype))
+        
         else:
-            # Fusion strategy or no skill coef
             if self.enable_fusion:
-                skill_output = self.skill_memory.forward(state_embeds)
+                with torch.amp.autocast(get_device().type, enabled=False):
+                    skill_output = self.skill_memory(state_embeds)
+                
                 action_logits = skill_output['action_logits']
                 action_embeds = self.action_proj(action_logits)
                 state_embeds = self._fuse_features(state_embeds, action_embeds)
             
             lm_out = self.lm(inputs_embeds=state_embeds.to(self.dtype))
+        
         return {
             'states': state_embeds,
             'logits': lm_out.logits
@@ -461,20 +452,16 @@ class MD(nn.Module):
         for step in range(self.max_length - input_ids.shape[1]):
             if not active_indices:
                 break
-                
-            # Process active sequences
-            for idx in list(active_indices):  # Use list copy for safe removal
+            
+            for idx in list(active_indices):
                 if eos_flags[idx]:
                     active_indices.remove(idx)
                     continue
-                    
-                # Get current context
+                
                 context = sequences[idx].unsqueeze(0)
                 context_embeds = self.lm.get_input_embeddings()(context)
                 
-                # Check if SkillMemory would generate SEP at the end
                 if self.enable_annotation and self._has_sep(context_embeds).item():
-                    # Generate full annotation
                     sep_embed = self.sep_embed.unsqueeze(0)
                     embeds = torch.cat([context_embeds, sep_embed], dim=1)
                     annotation_embeds, annotation_ids = self._get_annotation(embeds, ids=True)
@@ -483,11 +470,11 @@ class MD(nn.Module):
                         sequences[idx] = torch.cat([sequences[idx], self.sep_id_tensor])
                         sequences[idx] = torch.cat([sequences[idx], annotation_ids.squeeze(0)])
                         context_embeds = torch.cat([embeds, annotation_embeds], dim=1)
+                
                 else:
-                    # Standard LM generation
                     with torch.no_grad():
                         if self.enable_fusion:
-                            skill_output = self.skill_memory.forward(context_embeds)
+                            skill_output = self.skill_memory(context_embeds)
                             action_logits = skill_output['action_logits']
                             action_embeds = self.action_proj(action_logits)
                             context_embeds = self._fuse_features(context_embeds, action_embeds)
