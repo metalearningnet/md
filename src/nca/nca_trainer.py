@@ -571,8 +571,8 @@ class NCATrainer(Trainer):
 
         skill_loss = 0.0
         lm_loss = losses.mean()
-        for s in policy_states:
-            skill_loss += model.skill_memory.compute_losses(s)['total_loss'].item()
+        for st in policy_states:
+            skill_loss += model.skill_memory.compute_losses(st)['total_loss'].item()
         total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
         return total_loss, metrics
 

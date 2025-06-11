@@ -9,9 +9,9 @@ from collections import namedtuple
 import torch
 from torch import nn, stack, cat, is_tensor, tensor, Tensor
 import torch.nn.functional as F
-from torch.nn import Linear, Module, Parameter, ParameterList, ParameterDict
+from torch.nn import Linear, Module, Parameter, ParameterList
 from torch.func import functional_call, vmap, grad
-from torch.utils._pytree import tree_map, tree_flatten, tree_unflatten
+from torch.utils._pytree import tree_map
 
 from tensordict import TensorDict
 
@@ -24,7 +24,7 @@ from titans.memory_models import(
 
 import einx
 from einops import einsum, rearrange, repeat, reduce, pack, unpack
-from einops.layers.torch import Rearrange, Reduce
+from einops.layers.torch import Rearrange
 
 """
 ein notation:
@@ -122,7 +122,7 @@ def pack_one_with_inverse(t, pattern):
         return unpack(out, packed_shape, inv_pattern)[0]
 
     return packed, inverse
-
+            
 def Sequential(*modules):
     modules = [*filter(exists, modules)]
 
@@ -151,6 +151,39 @@ def softclamp_grad_norm(t, max_value):
 
     t = t * (clamped_norm / norm)
     return inverse(t)
+
+# spectral norming the surprise update w/ newton schulz matrix iter
+# Keller Jordan et al. from OSS w/ nanogpt, now being used for two works, Atlas and 'TTT done right'
+
+def newtonschulz5(
+    t,
+    steps = 5,
+    eps = 1e-7,
+    coefs = (3.4445, -4.7750, 2.0315)
+):
+    if t.ndim <= 3:
+        return t
+
+    shape = t.shape
+    should_transpose = shape[-2] > shape[-1]
+
+    if should_transpose:
+        t = t.transpose(-1, -2)
+
+    t, inv_pack = pack_one_with_inverse(t, '* i j')
+    t = t / t.norm(dim = (-1, -2), keepdim = True).clamp(min = eps)
+
+    a, b, c = coefs
+
+    for _ in range(steps):
+        A = t @ t.transpose(-1, -2)
+        B = b * A + c * A @ A
+        t = a * t + B @ t
+
+    if should_transpose:
+        t = t.transpose(-1, -2)
+
+    return inv_pack(t)
 
 # multi head rmsnorm
 
@@ -254,6 +287,7 @@ class NeuralMemory(Module):
         init_momentum_bias = None,
         init_decay_bias = None,
         accept_weight_residual = False,
+        spectral_norm_surprises = False,
         gated_transition = False,
         mem_model_norm_add_residual = True, # by default, layernorm output and add residual as proposed in TTT paper, but could be removed
         default_model_kwargs: dict = dict(
@@ -358,15 +392,13 @@ class NeuralMemory(Module):
         self.chunk_size = chunk_size
 
         # prepare function for per sample gradients from model above, using torch.func
-
+     
         def forward_and_loss(params, inputs, loss_weights, target):
             pred = functional_call(self.memory_model, params, inputs)
             loss = self.store_memory_loss_fn(pred, target) # simple mse loss in paper - eq (12) - |M(k) - v|²
             weighted_loss = loss * loss_weights
             return weighted_loss.sum(), loss
-
-        # two functions
-
+        
         grad_fn = grad(forward_and_loss, has_aux = True)
 
         self.per_sample_grad_fn = vmap(grad_fn, in_dims = (0, 0, 0, 0))
@@ -464,6 +496,10 @@ class NeuralMemory(Module):
         # allow for softclamp the gradient norms for storing memories
 
         self.max_grad_norm = max_grad_norm
+
+        # spectral norming the surprises before update, a la Muon from Jordan et al.
+
+        self.spectral_norm_surprises = spectral_norm_surprises
 
         # weight decay factor
 
@@ -653,7 +689,7 @@ class NeuralMemory(Module):
         # flatten batch and time if surprise depends on previous layer memory model
 
         weights_for_surprise = rearrange_dict_values(weights_for_surprise, 'b n ... -> (b n) ...')
-
+        
         # get grads and extra auxiliary loss (for backwarding through qkv projection in base neural memory module)
 
         grads, unweighted_mem_model_loss = self.per_sample_grad_fn(dict(weights_for_surprise), keys, adaptive_lr, values)
@@ -747,6 +783,11 @@ class NeuralMemory(Module):
                     update = momentums[-1]
                 else:
                     update = einsum(combine_momentums, momentums, 'o b n, o b n ... -> b n ...')
+
+            # maybe spectral norm surprises
+
+            if self.spectral_norm_surprises:
+                update = newtonschulz5(update)
 
             # use associative scan again for learned forgetting (weight decay) - eq (13)
 

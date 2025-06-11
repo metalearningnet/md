@@ -18,7 +18,7 @@ main_port: 1112
 
 deepspeed:
   # Micro-batch size per GPU
-  train_micro_batch_size_per_gpu: 16
+  train_micro_batch_size_per_gpu: 8
 
   # Number of steps to accumulate gradients before updating weights
   gradient_accumulation_steps: 4
@@ -37,21 +37,23 @@ deepspeed:
 
     offload_optimizer:
       device: "cpu"
-      pin_memory: true
+      pin_memory: false
 
     offload_param:
       device: "cpu"
-      pin_memory: true
+      pin_memory: false
 
     overlap_comm: true
     contiguous_gradients: true
 
   activation_checkpointing:
     enable: true
-    use_reentrant: false
+    use_reentrant: true
 
   bf16:
     enabled: false
 
   fp16:
     enabled: false
+
+  gradient_clipping: 1.0

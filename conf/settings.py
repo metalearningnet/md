@@ -86,4 +86,4 @@ LOADER = {
 ACCELERATOR = "auto"                # Device selection mode; Options: auto|cpu|gpu|mps
 
 # Numerical Precision Setting
-PRECISION = "bf16-mixed"            # Floating-point precision; Options: 32-true | 16-mixed | bf16-mixed
+PRECISION = "bf16-mixed"            # Floating-point precision; Options: 16-mixed | bf16-mixed

@@ -545,7 +545,7 @@ def md_validate(
             dynamic_ncols=True,
             total=pbar_total
         )
-
+        
         for batch in pbar:
             if po:
                 loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval')

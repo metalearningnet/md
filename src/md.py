@@ -17,6 +17,7 @@ class MD(nn.Module):
         self.temperature = config.temperature
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
+        self.dtype = torch.float16 if config == "16-mixed" else torch.bfloat16
 
         self.max_annotations = config.max_annotations
         self.num_reasoning_tokens = config.num_reasoning_tokens
@@ -43,18 +44,19 @@ class MD(nn.Module):
     def _init_lm(self):
         config = AutoConfig.from_pretrained(self.lm_dir)
         config.use_cache = self.use_cache
-
+        
         model = AutoModelForCausalLM.from_pretrained(
             self.lm_dir,
-            torch_dtype='auto',
             config=config,
             trust_remote_code=True,
+            torch_dtype=self.dtype,
             attn_implementation=self.attn
         )
 
         peft_config_dict = load_peft_config()
         peft_config = LoraConfig(**peft_config_dict)
         peft_model = get_peft_model(model, peft_config)
+        peft_model = peft_model.to(self.dtype)
         
         self.lm = peft_model
         self.config = config
@@ -352,15 +354,15 @@ class MD(nn.Module):
         
         max_len = max(e.size(0) for e in all_embeds)
         full_embeds = torch.zeros(batch_size, max_len, hidden_size, 
-                                device=input_ids.device)
+                                  device=input_ids.device)
         full_labels = torch.full((batch_size, max_len), self.label_pad_token_id,
-                            dtype=torch.long, device=input_ids.device)
+                                 dtype=torch.long, device=input_ids.device)
         
         for i, (embeds, labels) in enumerate(zip(all_embeds, all_labels)):
             full_embeds[i, :embeds.size(0)] = embeds
             full_labels[i, :labels.size(0)] = labels
         
-        lm_out = self.lm(inputs_embeds=full_embeds)
+        lm_out = self.lm(inputs_embeds=full_embeds.to(self.dtype))
         
         return {
             'labels': full_labels,
@@ -428,13 +430,9 @@ class MD(nn.Module):
                 full_embeds[i, :seq_len_i] = new_embeds[i]
                 full_labels[i, :seq_len_i] = new_labels[i]
                 full_mask[i, :seq_len_i] = 1
-            
+
             # Run LM on modified embeddings
-            lm_out = self.lm(
-                inputs_embeds=full_embeds,
-                attention_mask=full_mask,
-                labels=full_labels
-            )
+            lm_out = self.lm(inputs_embeds=full_embeds.to(self.dtype))
         else:
             # Fusion strategy or no skill coef
             if self.enable_fusion:
@@ -443,7 +441,7 @@ class MD(nn.Module):
                 action_embeds = self.action_proj(action_logits)
                 state_embeds = self._fuse_features(state_embeds, action_embeds)
             
-            lm_out = self.lm(inputs_embeds=state_embeds, attention_mask=attention_mask)
+            lm_out = self.lm(inputs_embeds=state_embeds.to(self.dtype))
         return {
             'states': state_embeds,
             'logits': lm_out.logits
@@ -494,7 +492,7 @@ class MD(nn.Module):
                             action_embeds = self.action_proj(action_logits)
                             context_embeds = self._fuse_features(context_embeds, action_embeds)
                         
-                lm_out = self.lm(inputs_embeds=context_embeds)
+                lm_out = self.lm(inputs_embeds=context_embeds.to(self.dtype))
                 next_token = self._sample_next_token(lm_out.logits[:, -1, :])[0].item()
                 sequences[idx] = torch.cat([sequences[idx], torch.tensor([next_token], device=device)])
                 
