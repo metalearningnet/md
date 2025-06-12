@@ -52,19 +52,19 @@ class MD(nn.Module):
             torch_dtype=self.dtype,
             attn_implementation=self.attn
         )
-
-        peft_config_dict = load_peft_config()
-        peft_config = LoraConfig(**peft_config_dict)
-        peft_model = get_peft_model(model, peft_config)
-        peft_model = peft_model.to(self.dtype)
         
-        self.lm = peft_model
+        self._init_tokenizer(model)
+        
+        if not self.lm_freeze:
+            peft_config_dict = load_peft_config()
+            peft_config = LoraConfig(**peft_config_dict)
+            peft_model = get_peft_model(model, peft_config)
+            model = peft_model.to(self.dtype)
+        
+        self.lm = model
         self.config = config
-        self.peft_config = peft_config
         self.max_length = self.config.max_length
         self.lm_hidden_size = self.config.hidden_size
-        
-        self._init_tokenizer()
         
         if self.lm_checkpoint:
             self.lm.gradient_checkpointing_enable()
@@ -140,21 +140,21 @@ class MD(nn.Module):
         for param in trainable_params:
             param.requires_grad = True
     
-    def _init_tokenizer(self):
+    def _init_tokenizer(self, model):
         """Add specialized tokens ensuring that all are newly added."""
+        reasoning_tokens = [get_special_token_by_index(i) for i in range(self.num_reasoning_tokens)]
+        
         self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
         self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
-        reasoning_tokens = [get_special_token_by_index(i) for i in range(self.num_reasoning_tokens)]
         self.tokenizer.add_special_tokens({'additional_special_tokens': reasoning_tokens})
-        self.lm.resize_token_embeddings(len(self.tokenizer))
         self.token_sep_id = self.tokenizer.convert_tokens_to_ids(SPECIAL_TOKEN_SEP)
         self.reasoning_token_ids = self.tokenizer.convert_tokens_to_ids(reasoning_tokens)
 
-        device = next(self.lm.parameters()).device
+        device = next(model.parameters()).device
         reasoning_ids_tensor = torch.tensor(self.reasoning_token_ids, device=device)
         sep_id_tensor = torch.tensor([self.token_sep_id], device=device)
 
-        embedding_layer = self.lm.get_input_embeddings()
+        embedding_layer = model.get_input_embeddings()
         reasoning_embeddings = embedding_layer(reasoning_ids_tensor)
         sep_embed = embedding_layer(sep_id_tensor)
 
@@ -162,14 +162,15 @@ class MD(nn.Module):
         self.register_buffer('reasoning_token_ids_tensor', reasoning_ids_tensor)
         self.register_buffer('sep_embed', sep_embed.detach().clone())
         self.register_buffer('sep_id_tensor', sep_id_tensor)
+
+        self.lm_num_tokens = len(self.tokenizer)
+        model.resize_token_embeddings(self.lm_num_tokens)
         
         assert self.token_sep_id not in self.reasoning_token_ids, \
             "SEP token cannot be a reasoning token"
         assert len(set(self.reasoning_token_ids)) == self.num_reasoning_tokens, \
             "Duplicate reasoning token IDs detected"
-        
-        self.lm_num_tokens = len(self.tokenizer)
-
+    
     def _has_sep(self, context_embeds: torch.Tensor) -> torch.Tensor:
         """Determine if SkillMemory would generate SEP token at the end of context"""
         skill_output = self.skill_memory(context_embeds)

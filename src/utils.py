@@ -408,7 +408,6 @@ def md_train(
     loader,
     optimizer,
     fabric,
-    num_epochs=1,
     num_samples=-1,
     log_path=None,
     log_interval=1,
@@ -423,75 +422,70 @@ def md_train(
     }
 
     total_samples = 0
+    last_log_step = 0
     writer = SummaryWriter(log_path) if log_path else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
-    last_log_step = 0
+    
+    if num_samples > 0:
+        max_batches = num_samples
+        loader_iter = iter(islice(loader, max_batches))
+        pbar_total = max_batches
+    else:
+        loader_iter = iter(loader)
+        pbar_total = len(loader)
 
-    for epoch in range(num_epochs):
-        epoch_samples = 0
+    pbar = tqdm(
+        loader_iter,
+        desc=f'Training',
+        disable=not fabric.is_global_zero,
+        dynamic_ncols=True,
+        total=pbar_total
+    )
 
-        if num_samples > 0:
-            max_batches = num_samples
-            loader_iter = iter(islice(loader, max_batches))
-            pbar_total = max_batches
+    for step, batch in enumerate(pbar):
+        if po:
+            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
+            po.store_metrics(metrics=train_metrics, train_eval='train')
         else:
-            loader_iter = iter(loader)
-            pbar_total = len(loader)
+            input_ids = batch['input_ids']
+            attention_mask = batch['attention_mask']
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
 
-        pbar = tqdm(
-            loader_iter,
-            desc=f'Training Epoch {epoch + 1}/{num_epochs}',
-            disable=not fabric.is_global_zero,
-            dynamic_ncols=True,
-            total=pbar_total
-        )
+            if torch.isnan(loss).any() or torch.isinf(loss).any():
+                warn("NaN/Inf loss detected, skipping batch")
+                continue
 
-        for step, batch in enumerate(pbar):
-            if po:
-                loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
-                po.store_metrics(metrics=train_metrics, train_eval='train')
-            else:
-                input_ids = batch['input_ids']
-                attention_mask = batch['attention_mask']
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
+            has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
+            has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
+            if has_nan or has_inf:
+                warn("NaN/Inf gradients detected, skipping update")
+                continue
 
-                if torch.isnan(loss).any() or torch.isinf(loss).any():
-                    warn("NaN/Inf loss detected, skipping batch")
-                    continue
+        fabric.backward(loss)
+        if optimizer:
+            optimizer.step()
+            optimizer.zero_grad()
+        else:
+            if (step + 1) % gradient_accumulation_steps == 0:
+                model._forward_module.step()
 
-                has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
-                has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
-                if has_nan or has_inf:
-                    warn("NaN/Inf gradients detected, skipping update")
-                    continue
-
-            fabric.backward(loss)
-            if optimizer:
-                optimizer.step()
-                optimizer.zero_grad()
-            else:
-                if (step + 1) % gradient_accumulation_steps == 0:
-                    model._forward_module.step()
-
-            total_samples += 1
-            epoch_samples += 1
-
-            metrics['total_loss'] += loss.item()
-            metrics['num_batches'] += 1
-
-            if writer:
-                if num_samples > 0:
-                    sample_progress = int((total_samples / (num_samples * num_epochs)) * 100)
-                else:
-                    estimated_total = len(loader) * num_epochs
-                    sample_progress = int((total_samples / estimated_total) * 100)
-
-                if sample_progress >= log_interval and (sample_progress // log_interval) > (last_log_step // log_interval):
-                    writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
-                    last_log_step = sample_progress
+        total_samples += 1
+        metrics['num_batches'] += 1
+        metrics['total_loss'] += loss.item()
         
-        pbar.close()
+        if writer:
+            if num_samples > 0:
+                sample_progress = int((total_samples / num_samples) * 100)
+            else:
+                estimated_total = len(loader)
+                sample_progress = int((total_samples / estimated_total) * 100)
+
+            if sample_progress >= log_interval and (sample_progress // log_interval) > (last_log_step // log_interval):
+                writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
+                last_log_step = sample_progress
+    
+    pbar.close()
 
     if po is None:
         if metrics['num_batches'] > 0:

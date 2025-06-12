@@ -10,7 +10,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_train, md_validate, cfg, add_dist_config, default_dataset_path
+from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path
 
 def train(config: dict):
     """
@@ -41,7 +41,7 @@ def train(config: dict):
         num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
         seed = config.get('seed', 42)
-        lr = config.get('lr', 1e-4)
+        lr = config.get('lr', 5e-5)
         val_split=config.get('val_split', 0.1)
         weight_decay = config.get('weight_decay', 0.01)
         gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
@@ -111,7 +111,6 @@ def train(config: dict):
                 loader=train_loader,
                 optimizer=optimizer,
                 fabric=fabric,
-                num_epochs=num_epochs,
                 num_samples=num_samples,
                 log_path=log_path,
                 log_interval=log_interval,
@@ -136,7 +135,7 @@ def train(config: dict):
             
             # Periodic checkpointing
             if (epoch + 1) % save_interval == 0:
-                torch.save(model.state_dict(), ckpt_dir / f"train_epoch_{epoch+1}.pt")
+                torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
                 print(f"Saved epoch {epoch+1} checkpoint")
     
     finally:
@@ -159,7 +158,7 @@ def main():
                         help="Random seed for reproducibility")
 
     # Training configuration
-    parser.add_argument("--lr", type=float, default=1e-4,
+    parser.add_argument("--lr", type=float, default=5e-5,
                         help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")

@@ -12,13 +12,16 @@ sys.path.append(str(_src_dir))
 
 from utils import cfg, default_dataset_path
 
+NR_EPOCHS = 3
+NR_SAMPLES = 16
+
 class TestCkpt(unittest.TestCase):
     def setUp(self):
         self.train_args = {
             'path': default_dataset_path,
             'split': 'train',
-            'epochs': 1,
-            'samples': 1,
+            'epochs': NR_EPOCHS,
+            'samples': NR_SAMPLES,
             'batch_size': 1,
             'dummy': True,
             'fabric_config': {
