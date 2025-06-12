@@ -25,7 +25,6 @@ class TestCkpt(unittest.TestCase):
             'batch_size': 1,
             'dummy': True,
             'fabric_config': {
-                'accelerator': cfg.accelerator,
                 'precision': cfg.precision
             }
         }
@@ -37,7 +36,6 @@ class TestCkpt(unittest.TestCase):
             'samples': 1,
             'batch_size': 1,
             'fabric_config': {
-                'accelerator': cfg.accelerator,
                 'precision': cfg.precision
             }
         }

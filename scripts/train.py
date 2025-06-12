@@ -211,7 +211,6 @@ def main():
         'ckpt': args.ckpt,
         'save_interval': args.save_interval,
         'fabric_config': {
-            'accelerator': cfg.accelerator,
             'precision': cfg.precision
         }
     }

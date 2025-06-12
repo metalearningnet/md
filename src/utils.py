@@ -27,7 +27,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, LOADER, PRECISION, ACCELERATOR, OPTIMIZER, CKPT
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT
 
 LOG = getattr(settings, 'LOG', True)
 WARN = getattr(settings, 'WARN', True)
@@ -86,7 +86,6 @@ class Cfg:
     ckpt_dir: Path
     model_dir: Path
     optimizer: dict
-    accelerator: str
     log_interval: int
     label_pad_token_id: int
     remove_unused_columns: bool
@@ -98,7 +97,7 @@ class Cfg:
     
     @property
     def lm_name(self):
-        return self.model['lm']['name']
+        return os.path.basename(self.model['lm']['path'])
     
     @property
     def lm_freeze(self):
@@ -202,7 +201,6 @@ cfg = Cfg(
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
-    accelerator=ACCELERATOR,
     log_interval=LOG_INTERVAL,
     label_pad_token_id=LABEL_PAD_TOKEN_ID,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS,

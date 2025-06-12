@@ -1,7 +1,6 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "name": "Qwen2.5-0.5B",
         "path": "Qwen/Qwen2.5-0.5B"
     },
 
@@ -81,9 +80,6 @@ LOADER = {
     "max_prompt_length": 128,       # Max tokens allowed in prompt before truncation
     "truncation_mode": "keep_end"   # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
 }
-
-# Hardware Acceleration Backend
-ACCELERATOR = "auto"                # Device selection mode; Options: auto|cpu|gpu|mps
 
 # Numerical Precision Setting
 PRECISION = "bf16-mixed"            # Floating-point precision; Options: 16-mixed | bf16-mixed

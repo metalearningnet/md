@@ -286,4 +286,11 @@ class TestMD(unittest.TestCase):
                         param.grad = None
 
 if __name__ == '__main__':
+    show = "--show" in sys.argv
+    fast = "--fast" in sys.argv
+    sys.argv = [arg for arg in sys.argv if arg not in ("--show", "--fast")]
+    if show:
+        SHOW_RESULTS = True
+    if fast:
+        FAST_TEST = True
     unittest.main()

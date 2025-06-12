@@ -106,7 +106,6 @@ def main():
         raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt}")
     
     fabric_config = {
-        'accelerator': cfg.accelerator,
         'precision': cfg.precision
     }
     
