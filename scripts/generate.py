@@ -13,7 +13,7 @@ _src_dir = Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
 from md import MD
-from utils import cfg
+from utils import cfg, get_device
 
 DEFAULT_DATASET = {
     'path': 'tatsu-lab/alpaca_eval',
@@ -39,11 +39,11 @@ def get_eval_set(path, name):
 
 def generate_response(model, prompt):
     try:
-        device = next(model.parameters()).device
+        device = get_device()
         inputs = model.tokenizer(prompt, return_tensors='pt')
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = model.generate(**inputs)
+            outputs = model.generate(inputs['input_ids'])
         return model.tokenizer.decode(outputs[0], skip_special_tokens=True)
     except RuntimeError as e:
         if "MPS device" in str(e):
@@ -61,6 +61,7 @@ def generate(config: dict):
         - path: Dataset path.
         - name: Dataset name.
         - ckpt: Checkpoint path.
+        - samples: Number of samples.
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - generator: LLM name.
         - output_file: Output file path.
@@ -69,6 +70,7 @@ def generate(config: dict):
         dataset_path = config['path']
         dataset_name = config.get('name')
         ckpt_path = config.get('ckpt')
+        samples = config.get('samples', -1)
         fabric_config = config['fabric_config']
         generator = config['generator']
         output_file = config['output_file']
@@ -88,9 +90,13 @@ def generate(config: dict):
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)
 
+        total_samples = len(eval_set)
+        if samples != -1:
+            total_samples = min(samples, total_samples)
+
         progress_bar = tqdm(
-            eval_set.iterrows(),
-            total=len(eval_set),
+            eval_set.head(total_samples).iterrows(),
+            total=total_samples,
             desc="Generating responses",
             unit="example"
         )
@@ -126,6 +132,8 @@ def main():
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
                         help="Dataset name")
+    parser.add_argument("--samples", type=int, default=-1,
+                        help="Number of samples to generate responses for")
     parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--out", type=str,
@@ -155,6 +163,7 @@ def main():
         'path': args.path,
         'name': args.name,
         'ckpt': args.ckpt,
+        'samples': args.samples,
         'output_file': args.out, 
         'generator': args.generator,
         'fabric_config': fabric_config
