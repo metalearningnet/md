@@ -44,13 +44,13 @@ def generate_response(model, prompt):
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(inputs['input_ids'])
-        return model.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        return model.tokenizer.decode(outputs[0], skip_special_tokens=False)
     except RuntimeError as e:
         if "MPS device" in str(e):
             inputs = model.tokenizer(prompt, return_tensors='pt').to('cpu')
             with torch.no_grad():
                 outputs = model.generate(**inputs)
-            return model.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            return model.tokenizer.decode(outputs[0], skip_special_tokens=False)
         raise RuntimeError(f"Failed to generate response: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Failed to generate response: {str(e)}")
@@ -77,7 +77,7 @@ def generate(config: dict):
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
-        
+
         if ckpt_path:
             model = MD.from_pretrained(checkpoint_path=ckpt_path)
         else:
@@ -85,7 +85,6 @@ def generate(config: dict):
 
         fabric_model = fabric.setup(model)
         fabric_model.eval()
-        fabric_model.mark_forward_method('generate')
 
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)

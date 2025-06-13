@@ -48,13 +48,14 @@ class TestMD(unittest.TestCase):
 
         if self.model.enable_annotation:
             input_ids = self._create_inputs()
-            original_sample = self.model._sample_next_token
+            original_sample = self.model._get_next_token
             
-            def patched_sample(logits, temperature=None):
-                logits[:, self.model.token_sep_id] = float('inf')
-                return original_sample(logits, temperature)
+            def patched_sample(logits, temperature=1.0):
+                new_logits = torch.zeros_like(logits).fill_(-float('inf'))
+                new_logits[:, self.model.token_sep_id] = 1e9
+                return original_sample(new_logits, temperature)
             
-            with patch.object(self.model, '_sample_next_token', new=patched_sample):
+            with patch.object(self.model, '_get_next_token', new=patched_sample):
                 generated_ids = self.model.generate(input_ids)
             
             begin_found = any(self.model.token_sep_id in seq.tolist() for seq in generated_ids)
@@ -65,7 +66,7 @@ class TestMD(unittest.TestCase):
         if self.model.enable_annotation:
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
-            reasoning_tokens = set(self.model.reasoning_token_ids)
+            reasoning_tokens = set(self.model.anno_token_ids)
             
             for seq in generated_ids:
                 seq = seq.tolist()
@@ -78,7 +79,6 @@ class TestMD(unittest.TestCase):
                                     f"Token {token} not in reasoning tokens")
                 
                 show_results(self.model.tokenizer.decode(seq))
-                    
     
     def test_skillmemory_diversity(self):
         """Ensure SkillMemory produces diverse outputs"""
@@ -124,7 +124,7 @@ class TestMD(unittest.TestCase):
                     annotation_length = end_idx - begin_idx - 1
                     show_results(f'Annotation: begin_idx={begin_idx} end_idx={end_idx}\nContext:\n{self.model.tokenizer.decode(seq)}')
                     self.assertGreaterEqual(annotation_length, 1, "Annotation too short")
-                    self.assertLessEqual(annotation_length, self.model.max_reasoning_length + 2,
+                    self.assertLessEqual(annotation_length, self.model.anno_max_length + 2,
                                         "Annotation exceeds max length")
                 except ValueError:
                     if self.model.token_sep_id in seq:
@@ -139,7 +139,7 @@ class TestMD(unittest.TestCase):
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
             
-            allowed_tokens = set(self.model.reasoning_token_ids) | {
+            allowed_tokens = set(self.model.anno_token_ids) | {
                 self.model.token_sep_id
             }
             
@@ -152,7 +152,7 @@ class TestMD(unittest.TestCase):
                     for token in seq[begin_idx:end_idx + 1]:
                         self.assertIn(token, allowed_tokens, 
                                     f"Invalid token {token} in annotation")
-        
+    
     def test_annotation_encapsulation(self):
         """Verify all annotations are properly encapsulated"""
         if FAST_TEST:
@@ -186,7 +186,7 @@ class TestMD(unittest.TestCase):
             batch_size, output_seq_len, vocab_size = outputs['logits'].shape
 
             min_expected = self.seq_len
-            max_expected = self.seq_len + self.model.max_reasoning_length + 2
+            max_expected = self.seq_len + self.model.anno_max_length + 2
             
             self.assertEqual(batch_size, self.batch_size)
             self.assertEqual(vocab_size, self.model.lm_num_tokens)
@@ -208,7 +208,7 @@ class TestMD(unittest.TestCase):
             batch_size, output_seq_len, vocab_size = outputs['logits'].shape
 
             min_expected = self.seq_len
-            max_expected = self.seq_len + self.model.max_reasoning_length + 2
+            max_expected = self.seq_len + self.model.anno_max_length + 2
             
             self.assertEqual(batch_size, self.batch_size)
             self.assertEqual(vocab_size, self.model.lm_num_tokens)

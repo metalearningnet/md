@@ -141,13 +141,11 @@ class SkillMemory(nn.Module):
         )
         self.rev = GradientReversal.apply
 
-        # Loss Coefficients
         self.mi_coef = mi_coef
         self.entropy_coef = entropy_coef
         self.adv_coef = adv_coef
         self.kl_coef = kl_coef
         self.forward_coef = forward_coef
-
         self.kl_epsilon = 1e-8
     
     def get_action_logits(self, states, m):
@@ -200,9 +198,9 @@ class SkillMemory(nn.Module):
             'prior_dist': Normal(prior_mean, prior_std)
         }
 
-    def compute_losses(self, states):
-        outputs = self.forward(states)
+    def compute_losses(self, outputs):
         action_logits = outputs['action_logits']
+        prior_dist = outputs['prior_dist']
         mem_dist = outputs['mem_dist']
         states = outputs['states']
         m = outputs['m']
@@ -272,28 +270,7 @@ class SkillMemory(nn.Module):
         )
 
         # KL Regularization
-        # Compute prior from previous memory
-        if self.checkpoint_prior:
-            def run_prior(m_prev):
-                prior_out, _ = self.prior_net(m_prev)
-                prior_mean = self.prior_mean(prior_out)
-                prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
-                return Normal(prior_mean, prior_std)
-            prior_dist = checkpoint(run_prior, m[:, :-1])
-        else:
-            prior_out, _ = self.prior_net(m[:, :-1])
-            prior_mean = self.prior_mean(prior_out)
-            prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
-            prior_dist = Normal(prior_mean, prior_std)
-        
-        # Create new distribution for memory at time steps 1:
-        mem_dist_t = Normal(
-            loc=mem_dist.loc[:, 1:], 
-            scale=mem_dist.scale[:, 1:]
-        )
-        
-        # Compute KL between current memory and prior from previous step
-        kl_loss = kl_divergence(mem_dist_t, prior_dist)
+        kl_loss = kl_divergence(mem_dist, prior_dist)
         kl_loss = torch.clamp(kl_loss, min=-self.kl_epsilon, max=1e3)
         kl_loss = kl_loss.mean()
 

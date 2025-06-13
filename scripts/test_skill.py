@@ -68,7 +68,8 @@ class TestSkill(unittest.TestCase):
         )
     
     def test_loss_computation(self):
-        losses = self.skill_memory.compute_losses(self.states)
+        outputs = self.skill_memory(self.states)
+        losses = self.skill_memory.compute_losses(outputs)
         
         # Check all loss components exist
         required_losses = ['mi_loss', 'entropy', 'adv_loss', 'kl_loss']
@@ -86,8 +87,9 @@ class TestSkill(unittest.TestCase):
         self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
 
     def test_gradient_flow(self):
-        self.skill_memory.train()        
-        losses = self.skill_memory.compute_losses(self.states)
+        self.skill_memory.train()
+        outputs = self.skill_memory(self.states)
+        losses = self.skill_memory.compute_losses(outputs)
         losses['total_loss'].backward()
         
         # Components that MUST have gradients

@@ -10,7 +10,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path
+from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path, get_strategy
 
 def train(config: dict):
     """
@@ -29,8 +29,8 @@ def train(config: dict):
         - gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating model weights.
         - ckpt (str): Checkpoint path.
         - save_interval (int): Checkpoint frequency.
-        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
         - dist (bool): Enable distributed training.
+        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
     """
     try:
         path = config['path']
@@ -47,8 +47,13 @@ def train(config: dict):
         gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
         ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
         save_interval = config.get('save_interval', 1)
-        fabric_config = config['fabric_config']
         dist = config.get('dist', False)
+        fabric_config = config['fabric_config']
+        
+        if not dist:
+            strategy = get_strategy()
+            if strategy:
+                fabric_config.update({'strategy': strategy})
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -81,8 +86,6 @@ def train(config: dict):
         }
         
         loader = MDLoader(**loader_args)
-        
-        # Create dataloaders
         train_loader, val_loader = loader.get_dataloaders(
             batch_size=batch_size,
             val_split=val_split,
@@ -92,7 +95,6 @@ def train(config: dict):
         if val_loader:
             val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
         
-        # Training loop
         best_val_loss = np.inf
         ckpt_dir = ckpt_path.parent
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -127,13 +129,11 @@ def train(config: dict):
             
             print(" | ".join(log_info))
             
-            # Save best checkpoint
             if val_metrics.get('total_loss', np.inf) < best_val_loss:
                 best_val_loss = val_metrics['total_loss']
                 torch.save(model.state_dict(), ckpt_path)
                 print(f"Saved best model with val loss: {best_val_loss:.4f}")
             
-            # Periodic checkpointing
             if (epoch + 1) % save_interval == 0:
                 torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
                 print(f"Saved epoch {epoch+1} checkpoint")
@@ -193,12 +193,10 @@ def main():
         'path': args.path,
         'name': args.name,
 
-        # Dataset parameters
         'seed': args.seed,
         'split': args.split,
         'split_ratio': args.split_ratio,
         
-        # Training parameters
         'lr': args.lr,
         'val_split': args.val_split,
         'weight_decay': args.weight_decay,
@@ -206,11 +204,12 @@ def main():
         'samples': args.samples,
         'batch_size': args.batch_size,
 
-        # System parameters
-        'dist': args.dist,
         'ckpt': args.ckpt,
         'save_interval': args.save_interval,
+
+        'dist': args.dist,
         'fabric_config': {
+            'accelerator': 'auto',
             'precision': cfg.precision
         }
     }

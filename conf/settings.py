@@ -1,7 +1,8 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "path": "Qwen/Qwen2.5-0.5B"
+        "path": "Qwen/Qwen2.5-0.5B",       # Pretrained language model identifier
+        "temperature": 0.7                 # Sampling temperature for generation
     },
 
     # Skill Memory Configuration
@@ -34,28 +35,26 @@ MODEL = {
     },
     
     # Training Objective Weights
-    "lm_coef": 0.8,                 # Proportional weight for language modeling loss
-    "skill_coef": 0.2,              # Proportional weight for skill learning objectives (0.0 = pure LM)
+    "lm_coef": 1,                   # Proportional weight for language modeling loss
+    "skill_coef": 0.05,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
     "skill_integration_strategy": "annotation",  # Options: ['fusion' | 'annotation']
-
-    # Number of distinct token types available for reasoning processes
-    "num_reasoning_tokens": 5,
-
-    # Maximum allowed length for a single reasoning sequence
-    "max_reasoning_length": 10,
-
-    # Maximum number of annotations allowed per sequence (-1 for no limit)
-    "max_annotations": 2,
-
-    # Sampling temperature for generation
-    "temperature": 0.7,
 
     # Inference Behavior
     "use_cache": False              # Use KV caching to accelerate autoregressive generation
 }
 
+# Annotation Generation Settings (used when skill_integration_strategy == 'annotation')
+ANNOTATION = {
+    "words": 5,                     # Number of distinct word types allowed per annotation
+    "max_length": 3,                # Max token length per annotation
+    "temperature": 0.7,             # Sampling temperature for annotations
+    "max_annotations": 2,           # Max number of annotations per response (-1 for unlimited)
+    "trigger_sharpness": 0.5        # Controls the sharpness of the sampling distribution when deciding whether to trigger an annotation (lower = more deterministic, higher = more exploratory)
+}
+
+# Checkpointing Configuration
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
@@ -83,3 +82,6 @@ LOADER = {
 
 # Numerical Precision Setting
 PRECISION = "bf16-mixed"            # Floating-point precision; Options: 16-mixed | bf16-mixed
+
+# Logging Configuration (enables detailed training logs)
+LOG = False

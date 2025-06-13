@@ -282,7 +282,6 @@ class NCATrainer(Trainer):
 
             if args.remove_unused_columns:
                 args.remove_unused_columns = False
-                # warn users
                 warnings.warn(
                     "When using NCADataCollatorWithPadding, you should set `remove_unused_columns=False` in your TrainingArguments"
                     " we have set it for you, but you should do it yourself in the future.",
@@ -459,39 +458,35 @@ class NCATrainer(Trainer):
         model: nn.Module,
         batch: Dict[str, Union[List, torch.LongTensor]]
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
-        for i in range(4):
+        total = 4
+        results = {}
+        for i in range(total):
             required_keys = [f'A{i}_input_ids', f'A{i}_attention_mask', f'A{i}_labels']
             if not all(k in batch for k in required_keys):
                 raise ValueError(f"Batch must contain all of {required_keys}")
         
         if self.model.enable_annotation:
-            results = {}
-            all_states = []
-            for i in range(4):
+            loss_list = []
+            for i in range(total):
                 input_ids = batch[f'A{i}_input_ids']
                 input_labels = batch[f'A{i}_labels']
                 model_out = model.annotate(input_ids, input_labels=input_labels)
                 logits = model_out['logits']
                 labels = model_out['labels']
+                losses = model_out['losses']
                 logps = self.get_batch_logps(
                     logits,
                     labels,
                     average_log_prob=True
                 )
+
                 results[f'A{i}_logps'] = logps
                 results[f'A{i}_logits'] = logits
-                all_states.append(model_out['states'])
-            return (
-                results['A0_logps'],
-                results['A1_logps'],
-                results['A2_logps'],
-                results['A3_logps'],
-                results['A0_logits'],
-                results['A1_logits'],
-                results['A2_logits'],
-                results['A3_logits'],
-                all_states
-            )
+                
+                if losses is not None:
+                    loss_list.append(losses)
+            
+            losses = torch.stack(loss_list).mean() if loss_list else None
         else:
             # Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
             # We do this to avoid doing two forward passes, because it's faster for FSDP.
@@ -508,26 +503,23 @@ class NCATrainer(Trainer):
                 attention_mask=concatenated_batch["concatenated_attention_mask"],
                 **model_kwargs,
             )
-            
+
+            losses = model.skill_memory.compute_losses(model_out)['total_loss']
             all_logits = model_out['logits']
-            all_states = [model_out['states']]
             all_logps = self.get_batch_logps(
                 all_logits.to(torch.float32),
                 concatenated_batch["concatenated_labels"],
                 average_log_prob=False,
             )
 
-            A0_logps = all_logps[0*len_chosen:1*len_chosen]
-            A1_logps = all_logps[1*len_chosen:2*len_chosen]
-            A2_logps = all_logps[2*len_chosen:3*len_chosen]
-            A3_logps = all_logps[3*len_chosen:4*len_chosen]
+            for i in range(total):
+                results[f'A{i}_logps'] = all_logps[i * len_chosen:(i + 1) * len_chosen]
+                results[f'A{i}_logits'] = all_logits[i * len_chosen:(i + 1) * len_chosen]
+            
+        logps = [results[f'A{i}_logps'] for i in range(total)]
+        logits = [results[f'A{i}_logits'] for i in range(total)]
 
-            A0_logits = all_logits[0*len_chosen:1*len_chosen]
-            A1_logits = all_logits[1*len_chosen:2*len_chosen]
-            A2_logits = all_logits[2*len_chosen:3*len_chosen]
-            A3_logits = all_logits[3*len_chosen:4*len_chosen]
-
-            return (A0_logps, A1_logps, A2_logps, A3_logps, A0_logits, A1_logits, A2_logits, A3_logits, all_states)
+        return (*logps, *logits, losses)
 
     def get_batch_loss_metrics(
         self,
@@ -542,7 +534,9 @@ class NCATrainer(Trainer):
             m = model if self.ref_model is None else self.ref_model
             reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _, _ = self.get_logps(m, batch)
         
-        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, policy_states = self.get_logps(model, batch)
+        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, losses = self.get_logps(model, batch)
+
+        skill_loss = losses if losses is not None else 0.0
 
         losses, A0_rewards, A1_rewards, A2_rewards, A3_rewards = self.nca_loss(
             batch,
@@ -569,11 +563,9 @@ class NCATrainer(Trainer):
         metrics[f"{prefix}logps/A2"] = policy_A2_logps.detach().cpu().mean()
         metrics[f"{prefix}logps/A3"] = policy_A3_logps.detach().cpu().mean()
 
-        skill_loss = 0.0
         lm_loss = losses.mean()
-        for st in policy_states:
-            skill_loss += model.skill_memory.compute_losses(st)['total_loss'].item()
         total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+
         return total_loss, metrics
 
     def compute_loss(
@@ -589,12 +581,12 @@ class NCATrainer(Trainer):
             )
         loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
 
-        # force log the metrics
         if self.accelerator.is_main_process:
             self.store_metrics(metrics, train_eval="train")
 
         if return_outputs:
             return (loss, metrics)
+        
         return loss
 
     def get_batch_samples(self, model, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
@@ -655,14 +647,12 @@ class NCATrainer(Trainer):
         with torch.no_grad():
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
 
-        # force log the metrics
         if self.accelerator.is_main_process:
             self.store_metrics(metrics, train_eval="eval")
 
         if prediction_loss_only:
             return (loss.detach(), None, None)
 
-        # logits for the chosen and rejected samples from model
         logits_dict = {
             "eval_logits/chosen": metrics["eval_logits/chosen"],
             "eval_logits/rejected": metrics["eval_logits/rejected"],

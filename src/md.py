@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 from skill import SkillMemory
+import torch.nn.functional as F
 from typing import Dict, Optional
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
@@ -12,21 +13,24 @@ class MD(nn.Module):
                  config = cfg, 
                  attn: str = None):
         super().__init__()
+        self.device = get_device()
         self.use_cache = config.use_cache
         self.adapter_config = config.adapter
-        self.temperature = config.temperature
+        self.max_annotations = config.max_annotations
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
         self.dtype = torch.float16 if config == "16-mixed" else torch.bfloat16
 
-        self.max_annotations = config.max_annotations
-        self.num_reasoning_tokens = config.num_reasoning_tokens
-        self.max_reasoning_length = config.max_reasoning_length
+        self.anno_words = config.anno_words
+        self.anno_max_length = config.anno_max_length
+        self.anno_temperature = config.anno_temperature
+        self.anno_trigger_sharpness = config.anno_trigger_sharpness
         
         self.lm_coef = config.lm_coef
         self.lm_dir = config.model_dir
         self.lm_freeze = config.lm_freeze
         self.lm_checkpoint = config.lm_checkpoint
+        self.lm_temperature = config.lm_temperature
 
         self.skill_coef = config.skill_coef
         self.skill_config = config.skill_config
@@ -49,7 +53,6 @@ class MD(nn.Module):
             self.lm_dir,
             config=config,
             trust_remote_code=True,
-            torch_dtype=self.dtype,
             attn_implementation=self.attn
         )
         
@@ -72,7 +75,7 @@ class MD(nn.Module):
     def _init_skill(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""
         if self.skill_integration_strategy == 'annotation':
-            self.action_dim = self.num_reasoning_tokens + 1
+            self.action_dim = self.anno_words + 1
         else:
             self.action_dim = self.skill_config.get('action_dim', self.lm_num_tokens)
             
@@ -142,80 +145,73 @@ class MD(nn.Module):
     
     def _init_tokenizer(self, model):
         """Add specialized tokens ensuring that all are newly added."""
-        reasoning_tokens = [get_special_token_by_index(i) for i in range(self.num_reasoning_tokens)]
+        anno_tokens = [get_special_token_by_index(i) for i in range(self.anno_words)]
         
         self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
         self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
-        self.tokenizer.add_special_tokens({'additional_special_tokens': reasoning_tokens})
+        self.tokenizer.add_special_tokens({'additional_special_tokens': anno_tokens})
         self.token_sep_id = self.tokenizer.convert_tokens_to_ids(SPECIAL_TOKEN_SEP)
-        self.reasoning_token_ids = self.tokenizer.convert_tokens_to_ids(reasoning_tokens)
+        self.anno_token_ids = self.tokenizer.convert_tokens_to_ids(anno_tokens)
 
         device = next(model.parameters()).device
-        reasoning_ids_tensor = torch.tensor(self.reasoning_token_ids, device=device)
+        anno_ids_tensor = torch.tensor(self.anno_token_ids, device=device)
         sep_id_tensor = torch.tensor([self.token_sep_id], device=device)
 
         embedding_layer = model.get_input_embeddings()
-        reasoning_embeddings = embedding_layer(reasoning_ids_tensor)
+        anno_embeddings = embedding_layer(anno_ids_tensor)
         sep_embed = embedding_layer(sep_id_tensor)
 
-        self.register_buffer('reasoning_embeddings', reasoning_embeddings.detach().clone())
-        self.register_buffer('reasoning_token_ids_tensor', reasoning_ids_tensor)
+        self.register_buffer('anno_embeddings', anno_embeddings.detach().clone())
+        self.register_buffer('anno_token_ids_tensor', anno_ids_tensor)
         self.register_buffer('sep_embed', sep_embed.detach().clone())
         self.register_buffer('sep_id_tensor', sep_id_tensor)
 
         self.lm_num_tokens = len(self.tokenizer)
         model.resize_token_embeddings(self.lm_num_tokens)
         
-        assert self.token_sep_id not in self.reasoning_token_ids, \
-            "SEP token cannot be a reasoning token"
-        assert len(set(self.reasoning_token_ids)) == self.num_reasoning_tokens, \
-            "Duplicate reasoning token IDs detected"
+        assert self.token_sep_id not in self.anno_token_ids, \
+            "SEP token cannot be an annotation token"
+        assert len(set(self.anno_token_ids)) == self.anno_words, \
+            "Duplicate annotation token IDs detected"
     
     def _has_sep(self, context_embeds: torch.Tensor) -> torch.Tensor:
         """Determine if SkillMemory would generate SEP token at the end of context"""
         skill_output = self.skill_memory(context_embeds)
         step_logits = skill_output['action_logits'][:, -1, :]
-        
-        scaled_logits = step_logits / self.temperature
-        
-        if self.training:
-            probs = torch.softmax(scaled_logits, dim=-1)
-            probs = torch.clamp(probs, min=1e-8, max=1.0)
-            sampled_indices = torch.multinomial(probs, 1)
-        else:
-            sampled_indices = torch.argmax(scaled_logits, dim=-1, keepdim=True)
-        
+        sampled_indices = self._sample_next_token(step_logits, self.anno_trigger_sharpness)
         sep_index = self.action_dim - 1
-        return sampled_indices.squeeze(-1) == sep_index
+        return sampled_indices == sep_index
     
-    def _get_annotation(self, context_embeds: torch.Tensor, ids: bool = True):
+    def _get_annotation(self, 
+                        context_embeds: torch.Tensor, 
+                        return_ids: bool = True, 
+                        return_loss: bool = False):
         """Auto-regressively generate annotation embeddings"""
         if context_embeds.dim() == 2:
             context_embeds = context_embeds.unsqueeze(0)
         batch_size, ctx_len, hidden_size = context_embeds.shape
         device = context_embeds.device
         
+        loss_list = []
         annotation_embeds = []
-        annotation_ids = [] if ids else None
+        annotation_ids = [] if return_ids else None
         
         current_embeds = context_embeds
         sep_count = torch.zeros(batch_size, dtype=torch.int, device=device)
         
         sep_embed = self.sep_embed.squeeze(0)
-        reasoning_embeddings = self.reasoning_embeddings
-        reasoning_token_ids = self.reasoning_token_ids_tensor
+        anno_embeddings = self.anno_embeddings
+        anno_token_ids = self.anno_token_ids_tensor
         
-        for step_idx in range(self.max_reasoning_length):
+        for step_idx in range(self.anno_max_length + 1):
             skill_output = self.skill_memory(current_embeds)
+            if return_loss:
+                skill_loss = self.skill_memory.compute_losses(skill_output)['total_loss']
+                loss_list.append(skill_loss)
             step_logits = skill_output['action_logits'][:, -1, :]
+            sampled_indices = self._sample_next_token(step_logits, self.anno_temperature)
             
-            if self.training:
-                probs = torch.softmax(step_logits / self.temperature, dim=-1)
-                sampled_indices = torch.multinomial(probs, 1).squeeze(-1)
-            else:
-                sampled_indices = torch.argmax(step_logits, dim=-1)
-            
-            if step_idx == self.max_reasoning_length - 1:
+            if step_idx == self.anno_max_length:
                 force_sep_mask = (sep_count == 0)
                 sampled_indices = torch.where(
                     force_sep_mask,
@@ -227,7 +223,7 @@ class MD(nn.Module):
             sep_count += is_sep.int()
             
             safe_indices = sampled_indices.masked_fill(is_sep, 0)
-            non_sep_embeds = reasoning_embeddings[safe_indices]
+            non_sep_embeds = anno_embeddings[safe_indices]
             
             next_embeds = torch.where(
                 is_sep.unsqueeze(-1),
@@ -235,8 +231,8 @@ class MD(nn.Module):
                 non_sep_embeds
             )
             
-            if ids:
-                non_sep_ids = reasoning_token_ids[safe_indices]
+            if return_ids:
+                non_sep_ids = anno_token_ids[safe_indices]
                 next_ids = torch.where(
                     is_sep,
                     torch.tensor(self.token_sep_id, device=device),
@@ -254,49 +250,46 @@ class MD(nn.Module):
         annotation_embeds = torch.cat(annotation_embeds, dim=1) if annotation_embeds else \
             torch.empty(batch_size, 0, hidden_size, device=device)
         
-        if ids:
+        if return_ids:
             annotation_ids = torch.cat(annotation_ids, dim=1) if annotation_ids else \
                 torch.empty(batch_size, 0, dtype=torch.long, device=device)
         
-        return annotation_embeds, annotation_ids if ids else None
+        losses = torch.stack(loss_list).mean() if loss_list else None
+        return annotation_embeds, annotation_ids, losses
     
-    def _sample_next_token(self, logits, temperature = None):
-        if temperature is None:
-            temperature = self.temperature
-        temperature = max(temperature, 1e-5)
-        original_logits = logits.clone()
-        
+    def _sample_next_token(self, logits, temperature):
+        if temperature == 0.0:
+            return torch.argmax(logits, dim=-1)
         top_k = 3
-        top_logits, _ = torch.topk(logits, top_k, dim=-1)
-        min_val = top_logits[:, -1].unsqueeze(-1)
-        logits = torch.where(logits < min_val, torch.tensor(-1e8).to(logits.device), logits)
-        
-        all_masked = torch.all(logits < -1e7)
-        if all_masked:
-            logits = original_logits
-        
-        logits = torch.clamp(logits, min=-1e4, max=1e4)
-        probs = torch.softmax(logits / temperature, dim=-1)
-        return torch.multinomial(probs, num_samples=1).squeeze(1)
+        scaled_logits = logits / temperature
+        values, indices = torch.topk(scaled_logits, top_k, dim=-1)
+        probs = torch.softmax(values, dim=-1)
+        return indices.gather(-1, torch.multinomial(probs, 1)).squeeze(-1)
     
+    def _get_next_token(self, logits, temperature):
+        if temperature == 0.0:
+            return torch.argmax(logits, dim=-1)
+        logits = logits / temperature
+        probs = F.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
     def _fuse_features(self, state_embeds, action_embeds):
         """Enhanced feature fusion with learnable normalization"""
         state_embeds = state_embeds.to(self.dtype)
         action_embeds = action_embeds.to(self.dtype)
         
-        with torch.amp.autocast(get_device().type, enabled=False):
-            state_norm = self.state_norm(state_embeds.float()).to(self.dtype)
-            action_norm = self.action_norm(action_embeds.float()).to(self.dtype)
+        state_norm = self.state_norm(state_embeds.float()).to(self.dtype)
+        action_norm = self.action_norm(action_embeds.float()).to(self.dtype)
 
-        with torch.amp.autocast(get_device().type, dtype=self.dtype):
-            combined = torch.cat([state_norm, action_norm], dim=-1)
-            gate = self.fusion_gate(combined.to(self.fusion_gate[0].weight.dtype))
-            return gate * state_norm + (1 - gate) * action_norm
+        combined = torch.cat([state_norm, action_norm], dim=-1)
+        gate = self.fusion_gate(combined.to(self.fusion_gate[0].weight.dtype))
+        return gate * state_norm + (1 - gate) * action_norm
 
     def annotate(
         self, 
         input_ids: torch.Tensor,
-        input_labels: torch.Tensor
+        input_labels: torch.Tensor,
+        return_loss: bool = False
     ) -> Dict[str, torch.Tensor]:
         assert self.enable_annotation, "Annotation must be enabled"
         
@@ -306,6 +299,7 @@ class MD(nn.Module):
         
         sep_detected = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=input_ids.device)
         total_seps = 0
+        loss_list = []
         
         for pos in range(1, seq_len):
             context_embeds = state_embeds[:, :pos]
@@ -335,8 +329,11 @@ class MD(nn.Module):
                 
                 if context_key not in annotation_cache:
                     context = torch.cat([state_embeds[i, :pos+1], sep_embed.squeeze(0)], dim=0)
-                    annotation, _ = self._get_annotation(context.unsqueeze(0))
+                    annotation, _, skill_loss = self._get_annotation(context.unsqueeze(0), return_loss=return_loss)
                     
+                    if skill_loss is not None:
+                        loss_list.append(skill_loss)
+
                     if annotation.size(1) > 0:
                         full_annotation = torch.cat([sep_embed.squeeze(0), annotation.squeeze(0)])
                         annotation_cache[context_key] = full_annotation
@@ -362,10 +359,13 @@ class MD(nn.Module):
         
         lm_out = self.lm(inputs_embeds=full_embeds.to(self.dtype))
         
+        losses = torch.stack(loss_list).mean() if loss_list else None
+
         return {
             'labels': full_labels,
             'states': full_embeds,
-            'logits': lm_out.logits
+            'logits': lm_out.logits,
+            'losses': losses
         }
 
     def forward(
@@ -396,7 +396,7 @@ class MD(nn.Module):
                 
                 if sep_detected[i].item():
                     seq_embeds = torch.cat([seq_embeds, self.sep_embed])
-                    annotation_embeds, _ = self._get_annotation(seq_embeds)
+                    annotation_embeds, _, _ = self._get_annotation(seq_embeds)
                     
                     if annotation_embeds.size(1) > 1:
                         annotation_embeds = torch.cat([self.sep_embed, annotation_embeds[0]])
@@ -420,24 +420,27 @@ class MD(nn.Module):
                 full_embeds[i, :seq_len_i] = new_embeds[i]
                 full_labels[i, :seq_len_i] = new_labels[i]
                 full_mask[i, :seq_len_i] = 1
-
+            
             lm_out = self.lm(inputs_embeds=full_embeds.to(self.dtype))
         
+            return {
+                'logits': lm_out.logits,
+                'states': state_embeds
+            }
         else:
             if self.enable_fusion:
-                with torch.amp.autocast(get_device().type, enabled=False):
+                with torch.amp.autocast(self.device.type, enabled=False):
                     skill_output = self.skill_memory(state_embeds)
-                
                 action_logits = skill_output['action_logits']
                 action_embeds = self.action_proj(action_logits)
                 state_embeds = self._fuse_features(state_embeds, action_embeds)
             
             lm_out = self.lm(inputs_embeds=state_embeds.to(self.dtype))
-        
-        return {
-            'states': state_embeds,
-            'logits': lm_out.logits
-        }
+
+            return {
+                'logits': lm_out.logits,
+                **skill_output
+            }
 
     def _generate(
         self,
@@ -465,7 +468,7 @@ class MD(nn.Module):
                 if self.enable_annotation and self._has_sep(context_embeds).item():
                     sep_embed = self.sep_embed.unsqueeze(0)
                     embeds = torch.cat([context_embeds, sep_embed], dim=1)
-                    annotation_embeds, annotation_ids = self._get_annotation(embeds, ids=True)
+                    annotation_embeds, annotation_ids, _ = self._get_annotation(embeds, return_ids=True)
 
                     if annotation_embeds.size(1) > 1:
                         sequences[idx] = torch.cat([sequences[idx], self.sep_id_tensor])
@@ -479,9 +482,9 @@ class MD(nn.Module):
                             action_logits = skill_output['action_logits']
                             action_embeds = self.action_proj(action_logits)
                             context_embeds = self._fuse_features(context_embeds, action_embeds)
-                        
+                
                 lm_out = self.lm(inputs_embeds=context_embeds.to(self.dtype))
-                next_token = self._sample_next_token(lm_out.logits[:, -1, :])[0].item()
+                next_token = self._get_next_token(lm_out.logits[:, -1, :], self.lm_temperature)
                 sequences[idx] = torch.cat([sequences[idx], torch.tensor([next_token], device=device)])
                 
                 if next_token == self.tokenizer.eos_token_id:

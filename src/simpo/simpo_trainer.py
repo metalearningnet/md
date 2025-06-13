@@ -1,8 +1,8 @@
 import inspect
 import random
 import warnings
-from collections import defaultdict
 from contextlib import nullcontext
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -401,14 +401,17 @@ class SimPOTrainer(Trainer):
         required_keys = ['chosen_input_ids', 'rejected_input_ids', 'chosen_attention_mask', 'rejected_attention_mask', 'chosen_labels', 'rejected_labels']
         if not all(k in batch for k in required_keys):
             raise ValueError(f"Batch must contain all of {required_keys}")
+        
         if model.enable_annotation:
             results = {}
+            loss_list = []
             for i in ['chosen', 'rejected']:
                 input_ids = batch[f'{i}_input_ids']
                 input_labels = batch[f'{i}_labels']
-                model_out = model.annotate(input_ids, input_labels=input_labels)
+                model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
                 logits = model_out['logits']
                 labels = model_out['labels']
+                losses = model_out['losses']
                 logps = self.get_batch_logps(
                     logits,
                     labels,
@@ -416,18 +419,24 @@ class SimPOTrainer(Trainer):
                     is_encoder_decoder=self.is_encoder_decoder,
                     label_pad_token_id=self.label_pad_token_id
                 )
+
                 results[f'{i}_logps'] = logps
                 results[f'{i}_logits'] = logits
                 if i == 'chosen':
                     results[f'{i}_labels'] = labels
-                    results[f'{i}_states'] = model_out['states']
+                
+                if losses is not None:
+                    loss_list.append(losses)
+
+            losses = torch.stack(loss_list).mean() if loss_list else None
+
             return (
                 results['chosen_logps'], 
                 results['rejected_logps'], 
                 results['chosen_logits'], 
                 results['rejected_logits'], 
                 results['chosen_labels'], 
-                results['chosen_states']
+                losses
             )
         else:
             # Run the given model on the given batch of inputs, concatenating the chosen and rejected inputs together.
@@ -453,7 +462,6 @@ class SimPOTrainer(Trainer):
                 **model_kwargs
             )
 
-            states = model_out['states']
             all_logits = model_out['logits']
             all_logps = self.get_batch_logps(
                 all_logits,
@@ -468,9 +476,9 @@ class SimPOTrainer(Trainer):
             chosen_logits = all_logits[:len_chosen]
             rejected_logits = all_logits[len_chosen:]
             chosen_labels = concatenated_batch["concatenated_labels"][:len_chosen]
-            chosen_states = states[:len_chosen]
+            losses = self.model.skill_memory.compute_losses(model_out)['total_loss']
 
-            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_labels, chosen_states)
+            return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_labels, losses)
 
     @staticmethod
     def get_batch_logps(
@@ -526,8 +534,10 @@ class SimPOTrainer(Trainer):
             policy_chosen_logits,
             policy_rejected_logits,
             chosen_labels,
-            chosen_states
+            losses,
         ) = self.get_logps(model, batch)
+
+        skill_loss = losses if losses is not None else 0.0
 
         losses, chosen_rewards, rejected_rewards = self.simpo_loss(
             policy_chosen_logps,
@@ -546,7 +556,6 @@ class SimPOTrainer(Trainer):
             metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
         
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
-        skill_loss = model.skill_memory.compute_losses(chosen_states)['total_loss']
         total_loss = model.lm_coef * loss + model.skill_coef * skill_loss
         
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
@@ -574,27 +583,23 @@ class SimPOTrainer(Trainer):
                 "compute_loss is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
                 "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
             )
-
-        compute_loss_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
-
-        with compute_loss_context_manager():
+        
+        with torch.autocast(model.device.type, dtype=model.dtype):
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="train")
 
-        # force log the metrics
         self.store_metrics(metrics, train_eval="train")
 
         if return_outputs:
             return (loss, metrics)
+        
         return loss
 
     def get_batch_samples(self, model, batch: Dict[str, torch.LongTensor]) -> Tuple[str, str]:
         """Generate samples from the model and reference model for the given batch of inputs."""
-
         # If one uses `generate_during_eval` with peft + bf16, we need to explicitly call generate with
         # the torch cuda amp context manager as some hidden states are silently casted to full precision.
-        generate_context_manager = nullcontext if not self._peft_has_been_casted_to_bf16 else torch.cuda.amp.autocast
-
-        with generate_context_manager():
+        
+        with torch.autocast(model.device.type, dtype=model.dtype):
             policy_output = model.generate(
                 input_ids=batch["prompt_input_ids"],
                 attention_mask=batch["prompt_attention_mask"],
@@ -620,24 +625,21 @@ class SimPOTrainer(Trainer):
                 "prediction_step is only implemented for DPODataCollatorWithPadding, and you passed a datacollator that is different than "
                 "DPODataCollatorWithPadding - you might see unexpected behavior. Alternatively, you can implement your own prediction_step method if you are using a custom data collator"
             )
+        
         if ignore_keys is None:
             if hasattr(model, "config"):
                 ignore_keys = getattr(model.config, "keys_to_ignore_at_inference", [])
             else:
                 ignore_keys = []
 
-        prediction_context_manager = torch.cuda.amp.autocast if self._peft_has_been_casted_to_bf16 else nullcontext
-
-        with torch.no_grad(), prediction_context_manager():
+        with torch.no_grad(), torch.autocast(model.device.type, dtype=model.dtype):
             loss, metrics = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
-
-        # force log the metrics
+        
         self.store_metrics(metrics, train_eval="eval")
 
         if prediction_loss_only:
             return (loss.detach(), None, None)
 
-        # logits for the chosen and rejected samples from model
         logits_dict = {
             "eval_logits/chosen": metrics["eval_logits/chosen"],
             "eval_logits/rejected": metrics["eval_logits/rejected"],

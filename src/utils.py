@@ -19,6 +19,8 @@ from itertools import product, islice
 from typing import Dict, Optional, List
 from transformers import modeling_utils
 from torch.utils.tensorboard import SummaryWriter
+from lightning.fabric.strategies import DDPStrategy
+from lightning.fabric.accelerators import CUDAAccelerator
 
 NODE_RANK_COORDINATOR_PORT = 10001
 
@@ -27,9 +29,9 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, ANNOTATION
 
-LOG = getattr(settings, 'LOG', True)
+LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', False)
 
@@ -86,6 +88,7 @@ class Cfg:
     ckpt_dir: Path
     model_dir: Path
     optimizer: dict
+    annotation: dict
     log_interval: int
     label_pad_token_id: int
     remove_unused_columns: bool
@@ -93,7 +96,7 @@ class Cfg:
         
     @property
     def lm_coef(self):
-        return self.model.get('lm_coef', 0.7)
+        return self.model.get('lm_coef', 1.0)
     
     @property
     def lm_name(self):
@@ -106,6 +109,10 @@ class Cfg:
     @property
     def lm_checkpoint(self):
         return self.ckpt['gradient'].get('lm', False)
+    
+    @property
+    def lm_temperature(self):
+        return self.model['lm'].get('temperature', 0.7)
 
     @property
     def skill_config(self):
@@ -121,15 +128,11 @@ class Cfg:
 
     @property
     def skill_coef(self):
-        return self.model.get('skill_coef', 0.3)
+        return self.model.get('skill_coef', 0.05)
     
     @property
     def adapter(self):
         return self.model['adapter']
-    
-    @property
-    def temperature(self):
-        return self.model.get('temperature', 0.7)
 
     @property
     def use_cache(self):
@@ -140,12 +143,24 @@ class Cfg:
         return self.ckpt_dir / MD_FILE
 
     @property
-    def num_reasoning_tokens(self):
-        return self.model.get('num_reasoning_tokens', 5)
+    def anno_words(self):
+        return self.annotation.get('words', 5)
     
     @property
-    def max_reasoning_length(self):
-        return self.model.get('max_reasoning_length', 128)
+    def anno_max_length(self):
+        return self.annotation.get('max_length', 3)
+    
+    @property
+    def anno_temperature(self):
+        return self.annotation.get('temperature', 0.7)
+    
+    @property
+    def anno_trigger_sharpness(self):
+        return self.annotation.get('trigger_sharpness', 0.7)
+    
+    @property
+    def max_annotations(self):
+        return self.annotation.get('max_annotations', -1)
     
     @property
     def min_length(self):
@@ -162,10 +177,6 @@ class Cfg:
     @property
     def max_target_length(self):
         return self.loader.get('max_target_length', 128)
-    
-    @property
-    def max_annotations(self):
-        return self.model.get('max_annotations', -1)
     
     @property
     def truncation_mode(self):
@@ -201,6 +212,7 @@ cfg = Cfg(
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
+    annotation=ANNOTATION,
     log_interval=LOG_INTERVAL,
     label_pad_token_id=LABEL_PAD_TOKEN_ID,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS,
@@ -459,8 +471,9 @@ def md_train(
             if has_nan or has_inf:
                 warn("NaN/Inf gradients detected, skipping update")
                 continue
-
+        
         fabric.backward(loss)
+
         if optimizer:
             optimizer.step()
             optimizer.zero_grad()
@@ -651,3 +664,12 @@ def get_device():
     else:
         device = torch.device('cpu')
     return device
+
+def get_num_devices():
+    if CUDAAccelerator.is_available():
+        return CUDAAccelerator.auto_device_count()
+    else:
+        return 1
+
+def get_strategy():
+    return DDPStrategy(find_unused_parameters=True) if get_num_devices() > 1 else None

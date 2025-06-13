@@ -9,7 +9,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, add_dist_config, default_dataset_path
+from utils import md_validate, cfg, add_dist_config, default_dataset_path, get_strategy
 
 def test(config: dict):
     """
@@ -20,6 +20,7 @@ def test(config: dict):
         - batch_size (int): Testing batch size.
         - samples (int): Number of samples.
         - ckpt (str): Checkpoint path.
+        - dist (bool): Enable distributed testing.
         - fabric_config (dict): Configuration options for the Lightning Fabric setup.
     """
     try:
@@ -29,7 +30,13 @@ def test(config: dict):
         batch_size = config.get('batch_size', 1)
         num_samples = config.get('samples', -1)
         ckpt_path = config.get('ckpt')
+        dist = config.get('dist', False)
         fabric_config = config['fabric_config']
+
+        if not dist:
+            strategy = get_strategy()
+            if strategy:
+                fabric_config.update({'strategy': strategy})
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -40,10 +47,7 @@ def test(config: dict):
             model = MD.from_pretrained()
         
         model = fabric.setup(model)
-
-        if model.enable_annotation:
-            model.mark_forward_method('annotate')
-
+        
         loader = MDLoader(
             path=dataset_path,
             name=dataset_name,
@@ -106,6 +110,7 @@ def main():
         raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt}")
     
     fabric_config = {
+        'accelerator': 'auto',
         'precision': cfg.precision
     }
     
@@ -124,6 +129,7 @@ def main():
         'batch_size': args.batch_size,
         'samples': args.samples,
         'ckpt': args.ckpt,
+        'dist': args.dist,
         'fabric_config': fabric_config
     }
 
