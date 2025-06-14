@@ -83,8 +83,11 @@ def generate(config: dict):
         else:
             model = MD.from_pretrained()
 
-        fabric_model = fabric.setup(model)
-        fabric_model.eval()
+        model = fabric.setup(model)
+        model.eval()
+
+        if model.enable_annotation:
+            model.mark_forward_method('annotate')
 
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)
@@ -102,7 +105,7 @@ def generate(config: dict):
 
         for _, example in progress_bar:
             try:
-                response = generate_response(fabric_model, example['instruction'])
+                response = generate_response(model, example['instruction'])
                 results.append({
                     **example.to_dict(),
                     'output': response,

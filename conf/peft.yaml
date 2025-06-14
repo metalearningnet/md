@@ -2,21 +2,19 @@ peft_type: "LORA"
 task_type: "CAUSAL_LM"
 
 r: 8
-fan_in_fan_out: false
-
-lora_alpha: 32
-lora_dropout: 0.05
-
-bias: "none"
+lora_alpha: 16
+lora_dropout: 0.25
 
 target_modules:
-- "q_proj"
-- "k_proj"
 - "v_proj"
-- "o_proj"
+- "gate_proj"
+- "down_proj"
 
 modules_to_save:
 - "embed_tokens"
 - "lm_head"
 
-inference_mode: false
+bias: "none"
+fan_in_fan_out: false
+use_rslora: true
+use_dora: false

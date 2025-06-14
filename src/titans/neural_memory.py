@@ -400,7 +400,7 @@ class NeuralMemory(Module):
             return weighted_loss.sum(), loss
         
         grad_fn = grad(forward_and_loss, has_aux = True)
-
+        
         self.per_sample_grad_fn = vmap(grad_fn, in_dims = (0, 0, 0, 0))
 
         # queries for retrieving from the model
@@ -535,7 +535,7 @@ class NeuralMemory(Module):
         self.use_accelerated_scan = use_accelerated_scan
 
         self.register_buffer('zero', torch.tensor(0.), persistent = False)
-
+    
     @property
     def memory_model_parameter_dict(self):
         return TensorDict(dict(zip(self.memory_model_parameter_names, self.memory_model_parameters)))

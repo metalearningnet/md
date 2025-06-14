@@ -59,7 +59,6 @@ def train(config: dict):
         fabric.launch()
         model = MD()
 
-        # Configure optimizer
         trainable_params = [p for p in model.get_trainable_parameters() if p.requires_grad]
 
         if not dist:
@@ -75,8 +74,7 @@ def train(config: dict):
         
         if model.enable_annotation:
             model.mark_forward_method('annotate')
-
-        # Configure dataset loader
+        
         loader_args = {
             'path': path,
             'name': name,

@@ -47,10 +47,10 @@ MODEL = {
 
 # Annotation Generation Settings (used when skill_integration_strategy == 'annotation')
 ANNOTATION = {
-    "words": 5,                     # Number of distinct word types allowed per annotation
-    "max_length": 3,                # Max token length per annotation
+    "words": 4,                     # Number of distinct word types allowed per annotation
+    "max_length": 2,                # Max token length per annotation
     "temperature": 0.7,             # Sampling temperature for annotations
-    "max_annotations": 2,           # Max number of annotations per response (-1 for unlimited)
+    "max_annotations": 4,           # Max number of annotations per response (-1 for unlimited)
     "trigger_sharpness": 0.5        # Controls the sharpness of the sampling distribution when deciding whether to trigger an annotation (lower = more deterministic, higher = more exploratory)
 }
 
@@ -58,12 +58,11 @@ ANNOTATION = {
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
-        "lm": False,                # LLM
         "skill": {                  # Skill Memory
-            "mac": False,           #   MAC layers
-            "policy": False,        #   Policy network
-            "prior": False,         #   Skill prior model
-            "discriminators": False #   MI discriminators
+            "mac": True,            #   MAC layers
+            "policy": True,         #   Policy network
+            "prior": True,          #   Skill prior model
+            "discriminators": True  #   MI discriminators
         }
     }
 }
@@ -76,7 +75,7 @@ OPTIMIZER = {
 # Data Processing Pipeline
 LOADER = {
     "max_length": 512,              # Maximum token length for input + output sequences
-    "max_prompt_length": 128,       # Max tokens allowed in prompt before truncation
+    "max_prompt_length": 256,       # Max tokens allowed in prompt before truncation
     "truncation_mode": "keep_end"   # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
 }
 
