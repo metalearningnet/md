@@ -1,8 +1,9 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "path": "Qwen/Qwen2.5-0.5B",       # Pretrained language model identifier
-        "temperature": 0.7                 # Sampling temperature for generation
+        "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
+        "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
+        "freeze": True                     # Whether to freeze the pretrained LM weights during training
     },
 
     # Skill Memory Configuration
@@ -12,8 +13,8 @@ MODEL = {
         "mac_longterm_mem_tokens": 64,     # Tokens allocated for extended memory retention
         "mac_depth": 1,                    # Number of stacked MAC blocks
         "mac_segment_len": 256,            # Segment length processed per MAC block
-        "mac_neural_memory_qkv_receives_diff_views": False,  # If True, Q/K/V projections come from different layers/views
-        "mac_neural_mem_weight_residual": False,  # Adds residual connections in neural memory weight updates
+        "mac_neural_memory_qkv_receives_diff_views": True,  # If True, Q/K/V projections come from different layers/views
+        "mac_neural_mem_weight_residual": True,  # Adds residual connections in neural memory weight updates
 
         # Loss Balancing Coefficients
         "mi_coef": 1.0,             # Weight for mutual information maximization

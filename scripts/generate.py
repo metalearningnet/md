@@ -87,7 +87,7 @@ def generate(config: dict):
         model.eval()
 
         if model.enable_annotation:
-            model.mark_forward_method('annotate')
+            model.mark_forward_method('generate')
 
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)

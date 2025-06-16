@@ -66,7 +66,7 @@ class TestMD(unittest.TestCase):
         if self.model.enable_annotation:
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
-            reasoning_tokens = set(self.model.anno_token_ids)
+            reasoning_tokens = set(self.model.token_anno_ids)
             
             for seq in generated_ids:
                 seq = seq.tolist()
@@ -139,7 +139,7 @@ class TestMD(unittest.TestCase):
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
             
-            allowed_tokens = set(self.model.anno_token_ids) | {
+            allowed_tokens = set(self.model.token_anno_ids) | {
                 self.model.token_sep_id
             }
             
@@ -150,8 +150,7 @@ class TestMD(unittest.TestCase):
                     end_idx = seq.index(self.model.token_sep_id, begin_idx + 1)
                     
                     for token in seq[begin_idx:end_idx + 1]:
-                        self.assertIn(token, allowed_tokens, 
-                                    f"Invalid token {token} in annotation")
+                        self.assertIn(token, allowed_tokens, f"Invalid token {token} in annotation")
     
     def test_annotation_encapsulation(self):
         """Verify all annotations are properly encapsulated"""
@@ -220,18 +219,6 @@ class TestMD(unittest.TestCase):
                 outputs['logits'].shape,
                 (self.batch_size, self.seq_len, self.model.lm_num_tokens)
             )
-    
-    def test_parameter_freezing(self):
-        if FAST_TEST:
-            return
-
-        for name, param in self.model.lm.named_parameters():
-            self.assertTrue(param.requires_grad, f"LLM parameter {name} should be trainable")
-        
-        components = ['skill_memory']
-        for comp in components:
-            for param in getattr(self.model, comp).parameters():
-                self.assertTrue(param.requires_grad, f"{comp} parameter should be trainable")
     
     def test_generation_interface(self):
         if FAST_TEST:

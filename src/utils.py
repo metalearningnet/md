@@ -58,9 +58,10 @@ SEED = 42
 RETRY_MAX = 5
 LOG_INTERVAL = 1
 
+
+SEP_TOKEN = '<|SEP|>'
+RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
-SPECIAL_TOKEN_SEP = '<|SEP|>'
-RESERVED_TOKENS = [SPECIAL_TOKEN_SEP]
 
 SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
 
@@ -471,6 +472,9 @@ def md_train(
             if has_nan or has_inf:
                 warn("NaN/Inf gradients detected, skipping update")
                 continue
+        
+        if not loss.requires_grad:
+            raise RuntimeError("Loss tensor doesn't require gradients")
         
         fabric.backward(loss)
 

@@ -8,10 +8,33 @@ from transformers import PreTrainedModel
 from torch.nn.utils.rnn import pad_sequence
 from alignment.data import maybe_insert_system_message, is_openai_format
 
+def validate_and_fix_roles(messages):
+    """Ensure messages strictly alternate between user and assistant roles"""
+    if not messages:
+        return messages
+        
+    fixed_messages = []
+    for i, msg in enumerate(messages):
+        # First message must be from user (unless it's system)
+        if i == 0 and msg["role"] not in ["user", "system"]:
+            fixed_msg = msg.copy()
+            fixed_msg["role"] = "user"
+            fixed_messages.append(fixed_msg)
+        # Subsequent messages must alternate
+        elif i > 0 and msg["role"] == fixed_messages[-1]["role"]:
+            # Skip or flip the role
+            fixed_msg = msg.copy()
+            fixed_msg["role"] = "assistant" if fixed_messages[-1]["role"] == "user" else "user"
+            fixed_messages.append(fixed_msg)
+        else:
+            fixed_messages.append(msg)
+    return fixed_messages
+
 def apply_chat_template(
     example,
     tokenizer,
-    auto_insert_empty_system_msg: bool = True
+    auto_insert_empty_system_msg: bool = True,
+    strict_role_validation: bool = True
 ):
     required_keys = {'chosen', 'rejected'}
     if not required_keys.issubset(example.keys()):
@@ -39,10 +62,16 @@ def apply_chat_template(
         maybe_insert_system_message(prompt_messages, tokenizer)
 
     def apply_and_trim(messages):
-        text = tokenizer.apply_chat_template(messages, tokenize=False)
-        if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
-            return text[len(tokenizer.bos_token):]
-        return text
+        if strict_role_validation:
+            messages = validate_and_fix_roles(messages)
+        try:
+            text = tokenizer.apply_chat_template(messages, tokenize=False)
+            if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
+                return text[len(tokenizer.bos_token):]
+            return text
+        except Exception as e:
+            print(f"Failed to format messages: {messages}")
+            raise e
     
     example['text_prompt'] = apply_and_trim(prompt_messages)
     example['text_chosen'] = apply_and_trim(chosen_messages)

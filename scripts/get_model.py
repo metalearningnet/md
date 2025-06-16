@@ -12,8 +12,11 @@ from settings import MODEL
 if not _model_dir.exists():
     os.mkdir(_model_dir)
 
-print(f'Saving LM {MODEL['lm']['name']}...')
-tokenizer = AutoTokenizer.from_pretrained(MODEL['lm']['path'])
-model = AutoModelForCausalLM.from_pretrained(MODEL['lm']['path'])
+model_path = MODEL['lm']['path']
+model_name = os.path.basename(model_path)
+
+print(f'Saving LM {model_name}...')
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoModelForCausalLM.from_pretrained(model_path)
 model.save_pretrained(_model_dir)
 tokenizer.save_pretrained(_model_dir)

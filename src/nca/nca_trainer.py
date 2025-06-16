@@ -470,10 +470,11 @@ class NCATrainer(Trainer):
             for i in range(total):
                 input_ids = batch[f'A{i}_input_ids']
                 input_labels = batch[f'A{i}_labels']
-                model_out = model.annotate(input_ids, input_labels=input_labels)
+                model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
                 logits = model_out['logits']
                 labels = model_out['labels']
                 losses = model_out['losses']
+                
                 logps = self.get_batch_logps(
                     logits,
                     labels,
@@ -532,11 +533,13 @@ class NCATrainer(Trainer):
         # TODO support arbitrary K option
         with torch.no_grad():
             m = model if self.ref_model is None else self.ref_model
-            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps, _, _, _, _, _ = self.get_logps(m, batch)
+            ref_outputs = self.get_logps(m, batch)
+            reference_A0_logps, reference_A1_logps, reference_A2_logps, reference_A3_logps = ref_outputs[:4]
         
-        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps, _, _, _, _, losses = self.get_logps(model, batch)
+        policy_outputs = self.get_logps(model, batch)
+        policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps = policy_outputs[:4]
 
-        skill_loss = losses if losses is not None else 0.0
+        skill_loss = policy_outputs[-1] if policy_outputs[-1] is not None else torch.tensor(0.0, device=model.device, requires_grad=True)
 
         losses, A0_rewards, A1_rewards, A2_rewards, A3_rewards = self.nca_loss(
             batch,
@@ -549,7 +552,10 @@ class NCATrainer(Trainer):
             reference_A2_logps,
             reference_A3_logps,
         )
-        reward_accuracies = ((A0_rewards > A1_rewards).float() + (A0_rewards > A2_rewards).float() + (A0_rewards > A3_rewards).float()) / 3.0
+
+        reward_accuracies = ((A0_rewards > A1_rewards).float() + 
+                        (A0_rewards > A2_rewards).float() + 
+                        (A0_rewards > A3_rewards).float()) / 3.0
 
         prefix = "eval_" if train_eval == "eval" else ""
         metrics[f"{prefix}rewards/A0"] = A0_rewards.cpu().mean()
@@ -566,6 +572,9 @@ class NCATrainer(Trainer):
         lm_loss = losses.mean()
         total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
 
+        if torch.is_grad_enabled():
+            assert total_loss.requires_grad, "Total loss doesn't require gradients!"
+        
         return total_loss, metrics
 
     def compute_loss(
