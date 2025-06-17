@@ -4,6 +4,7 @@ import torch.nn as nn
 from skill import SkillMemory
 import torch.nn.functional as F
 from typing import Dict, Optional
+from huggingface_hub import model_info
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import RESERVED_TOKENS, SEP_TOKEN, info, cfg, get_device, get_special_token_by_index, load_peft_config
@@ -15,6 +16,7 @@ class MD(nn.Module):
         super().__init__()
         self.device = get_device()
         self.use_cache = config.use_cache
+        self.model_dir = config.model_dir
         self.adapter_config = config.adapter
         self.max_annotations = config.max_annotations
         self.attn = config.attn if attn is None else attn
@@ -26,8 +28,8 @@ class MD(nn.Module):
         self.anno_temperature = config.anno_temperature
         self.anno_trigger_sharpness = config.anno_trigger_sharpness
         
+        self.lm_path = config.lm_path
         self.lm_coef = config.lm_coef
-        self.lm_dir = config.model_dir
         self.lm_freeze = config.lm_freeze
         self.lm_checkpoint = config.lm_checkpoint
         self.lm_temperature = config.lm_temperature
@@ -47,16 +49,21 @@ class MD(nn.Module):
         info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
 
     def _init_lm(self):
-        config = AutoConfig.from_pretrained(self.lm_dir)
+        config = AutoConfig.from_pretrained(self.model_dir)
         config.use_cache = self.use_cache
+
+        info = model_info(self.lm_path)
+        model_type = info.config['model_type']
+        if config.model_type != model_type:
+            raise ValueError(f"Expected model type {model_type}, got {config.model_type}")
         
         model = AutoModelForCausalLM.from_pretrained(
-            self.lm_dir,
+            self.model_dir,
             config=config,
             trust_remote_code=True,
             attn_implementation=self.attn
         )
-        
+
         self._init_tokenizer(model)
         
         if not self.lm_freeze:
@@ -158,7 +165,7 @@ class MD(nn.Module):
         """Add specialized tokens ensuring that all are newly added."""
         anno_tokens = [get_special_token_by_index(i) for i in range(self.anno_words)]
         
-        self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
         self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
         self.tokenizer.add_special_tokens({'additional_special_tokens': anno_tokens})
         self.token_sep_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)

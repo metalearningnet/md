@@ -58,7 +58,6 @@ SEED = 42
 RETRY_MAX = 5
 LOG_INTERVAL = 1
 
-
 SEP_TOKEN = '<|SEP|>'
 RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
@@ -94,7 +93,11 @@ class Cfg:
     label_pad_token_id: int
     remove_unused_columns: bool
     gradient_accumulation_steps: int
-        
+    
+    @property
+    def lm_path(self):
+        return self.model['lm']['path']
+    
     @property
     def lm_coef(self):
         return self.model.get('lm_coef', 1.0)
@@ -120,16 +123,16 @@ class Cfg:
         return self.model['skill'].copy()
     
     @property
+    def skill_coef(self):
+        return self.model.get('skill_coef', 0.05)
+    
+    @property
     def skill_checkpoint(self):
         return self.ckpt['gradient'].get('skill', {})
     
     @property
     def skill_integration_strategy(self):
         return self.model.get('skill_integration_strategy', 'annotation')
-
-    @property
-    def skill_coef(self):
-        return self.model.get('skill_coef', 0.05)
     
     @property
     def adapter(self):
@@ -282,7 +285,6 @@ class NodeRankCoordinator:
                 self.ranks[hostname] = assigned_rank
                 info(f"Assigned rank {assigned_rank} to {hostname}")
 
-                # Check if all ranks are assigned
                 if len(self.ranks) == self.num_nodes - 1:
                     info("All ranks assigned. Shutting down node rank coordinator...")
                     Thread(target=self.graceful_shutdown, daemon=True).start()
