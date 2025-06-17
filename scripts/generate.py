@@ -37,20 +37,20 @@ def get_eval_set(path, name):
         except Exception as e:
             raise ValueError(f"Failed to load dataset {name}: {str(e)}")
 
-def generate_response(model, prompt):
+def generate_response(model, prompt, quiet=False):
     try:
         device = get_device()
         inputs = model.tokenizer(prompt, return_tensors='pt')
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(inputs['input_ids'])
-        return model.tokenizer.decode(outputs[0], skip_special_tokens=False)
+        return model.tokenizer.decode(outputs[0], skip_special_tokens=quiet)
     except RuntimeError as e:
         if "MPS device" in str(e):
             inputs = model.tokenizer(prompt, return_tensors='pt').to('cpu')
             with torch.no_grad():
                 outputs = model.generate(**inputs)
-            return model.tokenizer.decode(outputs[0], skip_special_tokens=False)
+            return model.tokenizer.decode(outputs[0], skip_special_tokens=quiet)
         raise RuntimeError(f"Failed to generate response: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Failed to generate response: {str(e)}")
@@ -65,6 +65,7 @@ def generate(config: dict):
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - generator: LLM name.
         - output_file: Output file path.
+        - quiet: Hides special tokens in the output.
     """
     try:
         dataset_path = config['path']
@@ -74,6 +75,7 @@ def generate(config: dict):
         fabric_config = config['fabric_config']
         generator = config['generator']
         output_file = config['output_file']
+        quiet = config['quiet']
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -105,7 +107,7 @@ def generate(config: dict):
 
         for _, example in progress_bar:
             try:
-                response = generate_response(model, example['instruction'])
+                response = generate_response(model, example['instruction'], quiet)
                 results.append({
                     **example.to_dict(),
                     'output': response,
@@ -142,6 +144,8 @@ def main():
                         help="Output file path")
     parser.add_argument("--generator", type=str, default=cfg.lm_name,
                         help="LLM name")
+    parser.add_argument("--quiet", action="store_true", default=False,
+                        help="Hides special tokens in the output")
 
     args = parser.parse_args()
     
@@ -167,7 +171,8 @@ def main():
         'samples': args.samples,
         'output_file': args.out, 
         'generator': args.generator,
-        'fabric_config': fabric_config
+        'fabric_config': fabric_config,
+        'quiet': args.quiet
     }
 
     generate(config)

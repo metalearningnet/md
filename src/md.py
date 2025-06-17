@@ -64,6 +64,9 @@ class MD(nn.Module):
             peft_config = LoraConfig(**peft_config_dict)
             peft_model = get_peft_model(model, peft_config)
             model = peft_model.to(self.dtype)
+
+            if self.lm_checkpoint:
+                model.gradient_checkpointing_enable()
         else:
             for param in model.parameters():
                 param.requires_grad = False
@@ -72,9 +75,6 @@ class MD(nn.Module):
         self.config = config
         self.max_length = self.config.max_length
         self.lm_hidden_size = self.config.hidden_size
-        
-        if self.lm_checkpoint:
-            self.lm.gradient_checkpointing_enable()
 
     def _init_skill(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""

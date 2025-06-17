@@ -59,6 +59,7 @@ ANNOTATION = {
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
+        "lm": False,                # Gradient checkpointing for the Language Model
         "skill": {                  # Skill Memory
             "mac": True,            #   MAC layers
             "policy": True,         #   Policy network
