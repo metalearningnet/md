@@ -109,8 +109,9 @@ def generate(config: dict):
             try:
                 response = generate_response(model, example['instruction'], quiet)
                 results.append({
-                    **example.to_dict(),
-                    'output': response,
+                    'dataset': example['dataset'],
+                    'instruction': example['instruction'],
+                    'output': response[len(example['instruction']):],
                     'generator': generator
                 })
             except Exception as e:
