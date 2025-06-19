@@ -14,14 +14,14 @@ from utils import md_validate, cfg, add_dist_config, default_dataset_path, get_s
 def test(config: dict):
     """
     config:
-        - path (str): Dataset path.
-        - name (str): Dataset name.
-        - split (str): Dataset split name (e.g., "test").
-        - batch_size (int): Testing batch size.
-        - samples (int): Number of samples.
-        - ckpt (str): Checkpoint path.
-        - dist (bool): Enable distributed testing.
-        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
+        - path: Dataset path.
+        - name: Dataset name.
+        - split: Dataset split name (e.g., "test").
+        - batch_size: Testing batch size.
+        - samples: Number of samples.
+        - ckpt: Checkpoint path.
+        - dist: Enable distributed testing.
+        - fabric_config: Configuration options for the Lightning Fabric setup.
     """
     try:
         dataset_path = config['path']

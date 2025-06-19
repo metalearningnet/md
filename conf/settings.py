@@ -39,7 +39,7 @@ MODEL = {
     },
     
     # Training Objective Weights
-    "lm_coef": 1,                   # Proportional weight for language modeling loss
+    "lm_coef": 1.0,                 # Proportional weight for language modeling loss
     "skill_coef": 0.05,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
@@ -72,9 +72,17 @@ CKPT = {
     }
 }
 
-# Optimization Strategy
+# Optimization Configuration
 OPTIMIZER = {
-    "preference": "SimPO"           # Preference optimization method; Options: 'SimPO' | 'NCA'
+    # Preference optimization method
+    "preference": "SimPO",          # Options: 'SimPO' | 'NCA'
+    
+    # Gradient optimizer settings
+    "gradient": {
+        "lr": 1e-4,                 # Base learning rate
+        "betas": (0.9, 0.98),       # Betas for AdamW optimizer
+        "weight_decay": 0.01        # Regularization parameter to prevent overfitting
+    }
 }
 
 # Data Processing Configuration

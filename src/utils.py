@@ -198,6 +198,18 @@ class Cfg:
         return self.optimizer.get('preference')
     
     @property
+    def lr(self):
+        return self.optimizer['gradient'].get('lr', 1e-4)
+    
+    @property
+    def betas(self):
+        return self.optimizer['gradient'].get('betas', (0.9, 0.98))
+    
+    @property
+    def weight_decay(self):
+        return self.optimizer['gradient'].get('weight_decay', 0.01)
+    
+    @property
     def po_conf_file(self):
         preference = self.optimizer.get('preference')
         

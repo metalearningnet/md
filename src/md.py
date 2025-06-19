@@ -66,9 +66,10 @@ class MD(nn.Module):
 
         self._init_tokenizer(model)
         
+        if self.lm_checkpoint:
+            model.gradient_checkpointing_enable()
+        
         if not self.lm_freeze:
-            if self.lm_checkpoint:
-                model.gradient_checkpointing_enable()
             peft_config_dict = load_peft_config()
             peft_config = LoraConfig(**peft_config_dict)
             model = get_peft_model(model, peft_config)

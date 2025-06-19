@@ -15,36 +15,38 @@ from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_d
 def train(config: dict):
     """
     config:
-        - path (str): Dataset path.
-        - name (str): Dataset name.
-        - split (str): Dataset split name (e.g., "train").
-        - split_ratio (float): Proportion of the dataset to be allocated for training or testing.
-        - epochs (int): Number of epochs.
-        - samples (int): Number of samples.
-        - batch_size (int): Training batch size.
-        - seed (int): Random seed.
-        - lr (float): Learning rate.
-        - val_split (float): Proportion of the training set to be used for validation.
-        - weight_decay (float): Weight decay.
-        - gradient_accumulation_steps (int): Number of steps to accumulate gradients before updating model weights.
-        - ckpt (str): Checkpoint path.
-        - save_interval (int): Checkpoint frequency.
-        - dist (bool): Enable distributed training.
-        - fabric_config (dict): Configuration options for the Lightning Fabric setup.
+        - path: Dataset path.
+        - name: Dataset name.
+        - split: Dataset split name (e.g., "train").
+        - split_ratio: Proportion of the dataset to be allocated for training or testing.
+        - val_split: Proportion of the training set to be used for validation.
+        - seed: Random seed.
+        - epochs: Number of epochs.
+        - samples: Number of samples.
+        - batch_size: Training batch size.
+        - gradient_accumulation_steps: Number of steps to accumulate gradients before updating model weights.
+        - lr: Learning rate.
+        - betas: Betas for AdamW optimizer
+        - weight_decay: Weight decay.
+        - ckpt: Checkpoint path.
+        - save_interval: Checkpoint frequency.
+        - dist: Enable distributed training.
+        - fabric_config: Configuration options for the Lightning Fabric setup.
     """
     try:
         path = config['path']
         name = config.get('name')
         split = config.get('split', 'train')
         split_ratio = config.get('split_ratio', 0.0)
+        val_split = config.get('val_split', 0.1)
+        seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
         num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
-        seed = config.get('seed', 42)
-        lr = config.get('lr', 5e-5)
-        val_split=config.get('val_split', 0.1)
+        gradient_accumulation_steps = config.get('gradient_accumulation_steps', 4)
+        lr = config.get('lr', 1e-4)
+        betas = config.get('betas', (0.9, 0.98))
         weight_decay = config.get('weight_decay', 0.01)
-        gradient_accumulation_steps = config.get('gradient_accumulation_steps', 1)
         ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
@@ -65,7 +67,8 @@ def train(config: dict):
             optimizer = torch.optim.AdamW(
                 trainable_params,
                 lr=lr,
-                weight_decay=weight_decay,
+                betas=betas,
+                weight_decay=weight_decay
             )
             model, optimizer = fabric.setup(model, optimizer)
         else:
@@ -152,22 +155,20 @@ def main():
                         help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
                         help="Train/test split ratio")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
 
     # Training configuration
-    parser.add_argument("--lr", type=float, default=5e-5,
-                        help="Learning rate")
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")
     parser.add_argument("--samples", type=int, default=-1,
                         help="Number of training samples")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Training batch size")
-    parser.add_argument("--val_split", type=float, default=0.1,
-                        help="Validation split ratio")
-    parser.add_argument("--weight_decay", type=float, default=0.01,
-                        help="Weight decay")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+                        help="Number of steps to accumulate gradients before updating model weights")
 
     # System configuration
     parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
@@ -190,17 +191,19 @@ def main():
     config = {
         'path': args.path,
         'name': args.name,
-
-        'seed': args.seed,
         'split': args.split,
         'split_ratio': args.split_ratio,
-        
-        'lr': args.lr,
         'val_split': args.val_split,
-        'weight_decay': args.weight_decay,
+        'seed': args.seed,
+        
         'epochs': args.epochs,
         'samples': args.samples,
         'batch_size': args.batch_size,
+        'gradient_accumulation_steps': args.gradient_accumulation_steps,
+
+        'lr': cfg.lr,
+        'betas': cfg.betas,
+        'weight_decay': cfg.weight_decay,
 
         'ckpt': args.ckpt,
         'save_interval': args.save_interval,
@@ -218,8 +221,9 @@ def main():
             main_addr=args.addr,
             main_port=args.port,
             num_nodes=args.nodes,
-            weight_decay=args.weight_decay,
-            lr=args.lr
+            weight_decay=cfg.weight_decay,
+            betas=cfg.betas,
+            lr=cfg.lr
         )
     
     train(config)
