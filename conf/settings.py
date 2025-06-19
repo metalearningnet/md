@@ -27,7 +27,7 @@ MODEL = {
         "forward_coef": 0.1,        # Weight for forward prediction consistency loss
 
         # Action Space Configuration
-        "action_dim": 64,           # Dimensionality of action embeddings
+        "action_dim": 64            # Dimensionality of action embeddings
     },
 
     # Skill-LM Adapter Configuration

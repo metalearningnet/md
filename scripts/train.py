@@ -38,7 +38,7 @@ def train(config: dict):
         name = config.get('name')
         split = config.get('split', 'train')
         split_ratio = config.get('split_ratio', 0.0)
-        val_split = config.get('val_split', 0.1)
+        val_split = config.get('val_split', 0.2)
         seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
         num_samples = config.get('samples', -1)
@@ -51,7 +51,9 @@ def train(config: dict):
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
         fabric_config = config['fabric_config']
-        
+
+        val_samples = max(int(num_samples * val_split), 1) if num_samples != -1 else -1
+
         if not dist:
             strategy = get_strategy()
             if strategy:
@@ -124,7 +126,8 @@ def train(config: dict):
                 f"Train Loss: {train_metrics['total_loss']:.4f}"
             ]
             
-            val_metrics = md_validate(model, val_loader, fabric, num_samples=num_samples)
+            val_metrics = md_validate(model, val_loader, fabric, num_samples=val_samples)
+
             if fabric.is_global_zero:
                 log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
             
@@ -155,7 +158,7 @@ def main():
                         help="Predefined dataset split")
     parser.add_argument("--split_ratio", type=float, default=0.0,
                         help="Train/test split ratio")
-    parser.add_argument("--val_split", type=float, default=0.1,
+    parser.add_argument("--val_split", type=float, default=0.2,
                         help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
