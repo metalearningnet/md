@@ -1,8 +1,8 @@
 # Distributed training strategy.
 # Options:
-#   - "ddp" for Distributed Data Parallel
-#   - "deepspeed" for DeepSpeed integration
-#   - "fsdp" for Fully Sharded Data Parallel
+#   - "ddp": Use Distributed Data Parallel
+#   - "deepspeed": Use DeepSpeed integration
+#   - "fsdp": Use Fully Sharded Data Parallel
 strategy: "deepspeed"
 
 # Number of nodes used in distributed training.

@@ -43,7 +43,7 @@ MODEL = {
     "skill_coef": 0.05,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
-    "skill_integration_strategy": "annotation",  # Options: ['fusion' | 'annotation']
+    "skill_integration_strategy": "annotation",  # Options: 'fusion' | 'annotation'
 
     # Inference Behavior
     "use_cache": False              # Use KV caching to accelerate autoregressive generation
@@ -62,7 +62,7 @@ ANNOTATION = {
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
-        "lm": False,                # Gradient checkpointing for the Language Model
+        "lm": True,                 # Gradient checkpointing for the Language Model
         "skill": {                  # Skill Memory
             "mac": True,            #   MAC layers
             "policy": True,         #   Policy network
@@ -74,7 +74,7 @@ CKPT = {
 
 # Optimization Strategy
 OPTIMIZER = {
-    "preference": "SimPO"           # Preference optimization method; Options: SimPO (default) | NCA
+    "preference": "SimPO"           # Preference optimization method; Options: 'SimPO' | 'NCA'
 }
 
 # Data Processing Configuration
@@ -83,7 +83,7 @@ LOADER = {
 }
 
 # Numerical Precision Setting
-PRECISION = "bf16-mixed"            # Floating-point precision; Options: 16-mixed | bf16-mixed
+PRECISION = "bf16-mixed"            # Floating-point precision; Options: '16-mixed' | 'bf16-mixed'
 
 # Logging Configuration
 LOG = False

@@ -175,9 +175,6 @@ class TestMD(unittest.TestCase):
                     self.assertIsNotNone(end_idx, "SEP tokens must be paired")
     
     def test_sample_generation(self):
-        if FAST_TEST:
-            return
-        
         input_ids = torch.randint(0, self.model.config.vocab_size, (self.batch_size, self.seq_len))
         outputs = self.model(input_ids)
         
