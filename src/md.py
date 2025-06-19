@@ -21,7 +21,7 @@ class MD(nn.Module):
         self.max_annotations = config.max_annotations
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
-        self.dtype = torch.float16 if config == "16-mixed" else torch.bfloat16
+        self.dtype = torch.float16 if config == '16-mixed' else torch.bfloat16
 
         self.anno_words = config.anno_words
         self.anno_max_length = config.anno_max_length

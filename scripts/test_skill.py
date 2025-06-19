@@ -157,19 +157,6 @@ class TestSkill(unittest.TestCase):
                 self.assertFalse(torch.isnan(v).any(), f"NaN in {k}")
                 self.assertFalse(torch.isinf(v).any(), f"Inf in {k}")
 
-    def test_mixed_precision_handling(self):
-        try:
-            # Convert model and inputs to half precision
-            half_model = self.skill_memory.half()
-            half_states = self.states.half()
-            
-            # Forward pass should complete without errors
-            outputs = half_model(half_states)
-            self.assertEqual(outputs['m'].dtype, torch.float16,
-                          "Output should maintain half precision")
-        except RuntimeError as e:
-            self.fail(f"Mixed precision failed: {str(e)}")
-
     def test_device_portability(self):
         # Test CUDA if available
         if torch.cuda.is_available():

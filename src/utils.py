@@ -37,7 +37,6 @@ VERBOSE = getattr(settings, 'VERBOSE', False)
 
 REMOVE_UNUSED_COLUMNS = False
 GRADIENT_ACCUMULATION_STEPS = 1
-ATTN_IMPL = 'flash_attention_2' if modeling_utils.is_flash_attn_2_available() else 'sdpa'
 
 MD_TAG = 'md'
 MD_FILE = f'{MD_TAG}.pt'
@@ -75,7 +74,6 @@ def warn(s):
 @dataclass
 class Cfg:
     log: bool
-    attn: str
     ckpt: dict
     model: dict
     loader: dict
@@ -95,6 +93,19 @@ class Cfg:
     gradient_accumulation_steps: int
     
     @property
+    def attn(self):
+        if self.lm_name.startswith('gemma'):
+            return 'eager'
+        elif modeling_utils.is_flash_attn_2_available():
+            return 'flash_attention_2'
+        else:
+            return 'sdpa'
+    
+    @property
+    def lm_checkpoint(self):
+        return self.ckpt['gradient'].get('lm', False)
+    
+    @property
     def lm_path(self):
         return self.model['lm']['path']
     
@@ -111,12 +122,24 @@ class Cfg:
         return self.model['lm'].get('freeze', False)
     
     @property
-    def lm_checkpoint(self):
-        return self.ckpt['gradient'].get('lm', False)
-    
-    @property
     def lm_temperature(self):
         return self.model['lm'].get('temperature', 0.7)
+
+    @property
+    def min_length(self):
+        return self.model['lm'].get('min_length', 16)
+    
+    @property
+    def max_length(self):
+        return self.model['lm'].get('max_length', 512)
+
+    @property
+    def max_prompt_length(self):
+        return self.model['lm'].get('max_prompt_length', 128)
+    
+    @property
+    def max_target_length(self):
+        return self.model['lm'].get('max_target_length', 256)
 
     @property
     def skill_config(self):
@@ -167,22 +190,6 @@ class Cfg:
         return self.annotation.get('max_annotations', -1)
     
     @property
-    def min_length(self):
-        return self.loader.get('min_length', 1)
-    
-    @property
-    def max_length(self):
-        return self.loader.get('max_length', 512)
-
-    @property
-    def max_prompt_length(self):
-        return self.loader.get('max_prompt_length', 128)
-    
-    @property
-    def max_target_length(self):
-        return self.loader.get('max_target_length', 128)
-    
-    @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
     
@@ -206,7 +213,6 @@ cfg = Cfg(
     ckpt=CKPT,
     model=MODEL,
     loader=LOADER,
-    attn=ATTN_IMPL,
     md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
@@ -373,7 +379,7 @@ def calculate_lm_loss(outputs, batch, loss_fn):
     _, logits_seq_len = lm_logits.size(0), lm_logits.size(1)
     input_len = input_ids.size(1)
     
-    M = logits_seq_len - input_len  # Memory tokens count
+    M = logits_seq_len - input_len
     
     logits = lm_logits[:, M:M+input_len-1, :]
     

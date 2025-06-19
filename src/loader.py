@@ -112,7 +112,6 @@ class MDLoader(Dataset):
         seed: int
     ):
         try:
-            load_kwargs = {'name': name} if name else {}
             if split:
                 from datasets import get_dataset_split_names
                 split_names = get_dataset_split_names(path)
@@ -121,13 +120,14 @@ class MDLoader(Dataset):
                     if new_split not in split_names:
                         raise RuntimeError(f"Invalid split: {split}")
                     split = new_split
-                self.dataset = load_dataset(path, **load_kwargs, split=split)
+                self.dataset = load_dataset(path, name=name, split=split)
             else:
-                full_ds = load_dataset(path, **load_kwargs)
+                full_ds = load_dataset(path, name=name)
                 self.dataset = self._auto_select_split(full_ds)
 
             if split_ratio > 0:
                 self._create_validation_split(split_ratio, seed)
+        
         except Exception as e:
             raise RuntimeError(f"Dataset loading failed: {str(e)}")
 
@@ -188,7 +188,7 @@ class MDLoader(Dataset):
             )
 
             # Create masks with correct dimensions
-            attention_mask = (padded_inputs != self.tokenizer.pad_token_id).long()  # [batch, seq_len]
+            attention_mask = (padded_inputs != self.tokenizer.pad_token_id).long()
 
             # Ensure labels have same seq_len as inputs
             labels = pad_sequence(

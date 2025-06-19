@@ -3,7 +3,10 @@ MODEL = {
     "lm": {
         "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
         "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
-        "freeze": True                     # Whether to freeze the pretrained LM weights during training
+        "freeze": True,                    # Whether to freeze the pretrained LM weights during training
+        "max_length": 512,                 # Maximum token length for input + output sequences
+        "max_target_length": 256,          # Maximum token length allowed for output sequences
+        "max_prompt_length": 256           # Max tokens allowed in prompt before truncation
     },
 
     # Skill Memory Configuration
@@ -74,15 +77,13 @@ OPTIMIZER = {
     "preference": "SimPO"           # Preference optimization method; Options: SimPO (default) | NCA
 }
 
-# Data Processing Pipeline
+# Data Processing Configuration
 LOADER = {
-    "max_length": 512,              # Maximum token length for input + output sequences
-    "max_prompt_length": 256,       # Max tokens allowed in prompt before truncation
-    "truncation_mode": "keep_end"   # Truncation strategy: 'keep_end' (preferred) or 'keep_start'
+    "truncation_mode": "keep_end"   # Truncation strategy; Options: 'keep_end' | 'keep_start'
 }
 
 # Numerical Precision Setting
 PRECISION = "bf16-mixed"            # Floating-point precision; Options: 16-mixed | bf16-mixed
 
-# Logging Configuration (enables detailed training logs)
+# Logging Configuration
 LOG = False

@@ -35,7 +35,7 @@ show_help() {
 ${BOLD}Usage:${RESET} $0 [OPTION]... [PYTHON_ARGS...]
 
 ${BOLD}Options:${RESET}
-  --unittest CATEGORY    Run unit tests for specified category (skill|md|loader|ckpt)
+  --unittest CATEGORY    Run unit tests for specified category (skill|md|ckpt|loader)
   --train                Start the training process
   --test                 Start the testing process
   --prepare              Prepare the data for processing
@@ -43,10 +43,9 @@ ${BOLD}Options:${RESET}
   -h, --help             Show this help message
 
 ${BOLD}Examples:${RESET}
+  $0 --train --samples 1024 --epochs 2 --batch_size 4
+  $0 --generate --samples 16
   $0 --unittest md
-  $0 --generate
-  $0 --generate --some-arg value
-  $0 --train --epochs 10 --batch_size 32
   $0 --prepare
 EOF
     exit 0
@@ -65,7 +64,7 @@ run_unittests() {
     shift
     
     case "$category" in
-        skill|md|loader|ckpt)
+        skill|md|ckpt|loader)
             local script_name="test_${category}.py"
             local script_path="${PROJECT_DIR}/scripts/${script_name}"
             

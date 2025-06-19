@@ -101,8 +101,7 @@ def generate(config: dict):
         progress_bar = tqdm(
             eval_set.head(total_samples).iterrows(),
             total=total_samples,
-            desc="Generating responses",
-            unit="example"
+            desc="Generating responses"
         )
 
         for _, example in progress_bar:

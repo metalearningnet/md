@@ -260,10 +260,6 @@ class TestMD(unittest.TestCase):
                 if device.type == 'cuda':
                     self.assertEqual(outputs['logits'].device.index, 0,
                                 "CUDA device index should be 0")
-                
-                # Verify MPS specific checks if needed
-                if device.type == 'mps':
-                    pass
                     
             finally:
                 # Clean up by moving model back to CPU

@@ -14,15 +14,15 @@ class TestLoader(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.test_config = {
-            'dataset_name': 'wikitext',
-            'dataset_config': 'wikitext-2-raw-v1',
+            'path': 'wikitext',
+            'name': 'wikitext-2-raw-v1',
             'max_length': 128,
             'batch_size': 2
         }
 
         cls.loader = MDLoader(
-            dataset_name=cls.test_config['dataset_name'],
-            dataset_config=cls.test_config['dataset_config'],
+            path=cls.test_config['path'],
+            name=cls.test_config['name'],
             max_length=cls.test_config['max_length']
         )
 
@@ -93,8 +93,8 @@ class TestLoader(unittest.TestCase):
         
         # Create new loader with filtered data
         filtered_loader = MDLoader(
-            dataset_name=self.test_config['dataset_name'],
-            dataset_config=self.test_config['dataset_config'],
+            path=self.test_config['path'],
+            name=self.test_config['name'],
             max_length=self.test_config['max_length'],
             dataset=filtered_dataset
         )
@@ -102,7 +102,7 @@ class TestLoader(unittest.TestCase):
         dataloader = filtered_loader.get_dataloader(
             batch_size=self.test_config['batch_size'],
             shuffle=False,
-            drop_last=True  # Ensure consistent batch sizes
+            drop_last=True
         )
         
         full_batches = 0
@@ -139,14 +139,14 @@ class TestLoader(unittest.TestCase):
 
     def test_edge_cases(self):
         # Empty dataset split
-        empty_loader = MDLoader(dataset_name="", dataset=Dataset.from_dict({}))
+        empty_loader = MDLoader(path="", dataset=Dataset.from_dict({}))
         with self.assertRaises(ValueError):
             empty_loader.get_dataloaders(batch_size=self.test_config['batch_size'], val_split=0.2)
 
     def test_dataset_splitting(self):
         full_loader = MDLoader(
-            dataset_name=self.test_config['dataset_name'],
-            dataset_config=self.test_config['dataset_config'],
+            path=self.test_config['path'],
+            name=self.test_config['name'],
             max_length=self.test_config['max_length']
         )
         
@@ -178,8 +178,8 @@ class TestLoader(unittest.TestCase):
 
     def test_factory_method(self):
         main_loader = MDLoader(
-            dataset_name=self.test_config['dataset_name'],
-            dataset_config=self.test_config['dataset_config'],
+            path=self.test_config['path'],
+            name=self.test_config['name'],
             max_length=self.test_config['max_length']
         )
         train_loader, val_loader = main_loader.get_dataloaders(
@@ -196,8 +196,8 @@ class TestLoader(unittest.TestCase):
 
     def test_split_reproducibility(self):
         loader = MDLoader(
-            dataset_name=self.test_config['dataset_name'],
-            dataset_config=self.test_config['dataset_config'],
+            path=self.test_config['path'],
+            name=self.test_config['name'],
             max_length=self.test_config['max_length']
         )
         

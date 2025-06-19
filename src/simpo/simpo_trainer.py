@@ -407,7 +407,8 @@ class SimPOTrainer(Trainer):
             for i in ['chosen', 'rejected']:
                 input_ids = batch[f'{i}_input_ids']
                 input_labels = batch[f'{i}_labels']
-                model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
+                with torch.autocast(model.device.type, dtype=model.dtype):
+                    model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
                 logits = model_out['logits']
                 labels = model_out['labels']
                 losses = model_out['losses']
