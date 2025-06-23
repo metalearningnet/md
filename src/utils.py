@@ -471,7 +471,7 @@ def md_train(
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     if num_samples > 0:
-        max_batches = num_samples
+        max_batches = min(num_samples, len(loader))
         loader_iter = iter(islice(loader, max_batches))
         pbar_total = max_batches
     else:
@@ -506,10 +506,11 @@ def md_train(
                 warn("NaN/Inf gradients detected, skipping update")
                 continue
         
-        if not loss.requires_grad:
-            fabric.backward(loss.detach())
-        else:
+        if loss.requires_grad:
             fabric.backward(loss)
+        else:
+            warn("Loss does not require grad, cannot backpropagate.")
+            continue
 
         if optimizer:
             optimizer.step()
@@ -573,7 +574,7 @@ def md_validate(
 
     with torch.no_grad():
         if num_samples > 0:
-            max_batches = num_samples
+            max_batches = min(num_samples, len(loader))
             loader_iter = iter(islice(loader, max_batches))
             pbar_total = max_batches
         else:
