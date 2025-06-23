@@ -46,7 +46,7 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
-        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size} vocab_size: {self.config.vocab_size})")
+        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size})")
 
     def _init_lm(self):
         config = AutoConfig.from_pretrained(self.model_dir)
@@ -80,7 +80,19 @@ class MD(nn.Module):
         self.lm = model
         self.config = config
         self.max_length = self.config.max_length
-        self.lm_hidden_size = self.config.hidden_size
+        
+        self.lm_hidden_size = getattr(
+            self.config,
+            'hidden_size',
+            getattr(
+                getattr(self.config, 'text_config', None),
+                'hidden_size',
+                None
+            )
+        )
+
+        if self.lm_hidden_size is None:
+            raise ValueError("Could not find hidden_size")
 
     def _init_skill(self) -> nn.Module:
         """Initialize SkillMemory with LM-compatible dimensions"""

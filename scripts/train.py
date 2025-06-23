@@ -10,7 +10,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path, get_strategy
+from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path, get_strategy, clear_directory
 
 def train(config: dict):
     """
@@ -28,10 +28,14 @@ def train(config: dict):
         - lr: Learning rate.
         - betas: Betas for AdamW optimizer
         - weight_decay: Weight decay.
-        - ckpt: Checkpoint path.
+        - ckpt_path: Checkpoint path.
         - save_interval: Checkpoint frequency.
-        - dist: Enable distributed training.
+        - dist: Whether to enable distributed training.
         - fabric_config: Configuration options for the Lightning Fabric setup.
+        - restore: Whether to restore the model from the provided checkpoint.
+        - log: Whether to enable logging.
+        - log_dir: Directory where logs should be saved.
+        - log_interval: Interval at which to update and write logs.
     """
     try:
         path = config['path']
@@ -47,13 +51,17 @@ def train(config: dict):
         lr = config.get('lr', 1e-4)
         betas = config.get('betas', (0.9, 0.98))
         weight_decay = config.get('weight_decay', 0.01)
-        ckpt_path = Path(config.get('ckpt', cfg.ckpt_path))
+        ckpt_path = Path(config.get('ckpt_path', ''))
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
         fabric_config = config['fabric_config']
+        restore = config.get('restore', False)
+        has_log = config.get('log', False)
+        log_dir = Path(config.get('log_dir', ''))
+        log_interval = config.get('log_interval', 1)
 
         val_samples = max(int(num_samples * val_split), 1) if num_samples != -1 else -1
-
+        
         if not dist:
             strategy = get_strategy()
             if strategy:
@@ -61,7 +69,13 @@ def train(config: dict):
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
-        model = MD()
+        if not restore:
+            model = MD()
+        else:
+            if ckpt_path:
+                model = MD.from_pretrained(checkpoint_path=ckpt_path)
+            else:
+                model = MD.from_pretrained()
 
         trainable_params = [p for p in model.get_trainable_parameters() if p.requires_grad]
 
@@ -99,16 +113,19 @@ def train(config: dict):
             val_loader = fabric.setup_dataloaders(val_loader, use_distributed_sampler=True)
         
         best_val_loss = np.inf
-        ckpt_dir = ckpt_path.parent
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-        if cfg.log:
-            cfg.log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = cfg.train_log
-            log_interval = cfg.log_interval
+        if ckpt_path:
+            ckpt_dir = ckpt_path.parent
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
         else:
-            log_path = None
-            log_interval = 0
+            ckpt_dir = None
         
+        if has_log:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            clear_directory(log_dir)
+        else:
+            log_dir = None
+            log_interval = 0
+
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1}/{num_epochs}")
             train_metrics = md_train(
@@ -117,7 +134,7 @@ def train(config: dict):
                 optimizer=optimizer,
                 fabric=fabric,
                 num_samples=num_samples,
-                log_path=log_path,
+                log_dir=log_dir,
                 log_interval=log_interval,
                 gradient_accumulation_steps=gradient_accumulation_steps
             )
@@ -135,12 +152,14 @@ def train(config: dict):
             
             if val_metrics.get('total_loss', np.inf) < best_val_loss:
                 best_val_loss = val_metrics['total_loss']
-                torch.save(model.state_dict(), ckpt_path)
+                if ckpt_path:
+                    torch.save(model.state_dict(), ckpt_path)
                 print(f"Saved best model with val loss: {best_val_loss:.4f}")
             
             if (epoch + 1) % save_interval == 0:
-                torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
-                print(f"Saved epoch {epoch+1} checkpoint")
+                if ckpt_dir:
+                    torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
+                    print(f"Saved epoch {epoch+1} checkpoint")
     
     finally:
         if torch.distributed.is_initialized():
@@ -174,11 +193,19 @@ def main():
                         help="Number of steps to accumulate gradients before updating model weights")
 
     # System configuration
-    parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
+    parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--save_interval", type=int, default=1,
                         help="Checkpoint saving frequency")
-
+    parser.add_argument("--restore", action="store_true", default=False,
+                        help="Restore the model from the provided checkpoint")
+    parser.add_argument("--log", action="store_true", default=cfg.log,
+                        help="Whether to enable logging")
+    parser.add_argument("--log_dir", type=str, default=cfg.train_log,
+                        help="Directory where logs should be saved")
+    parser.add_argument("--log_interval", type=int, default=100,
+                        help="Interval at which to update and write logs")
+    
     # Distributed training configuration
     parser.add_argument("--dist", action="store_true", default=False,
                         help="Enable distributed training")
@@ -208,8 +235,11 @@ def main():
         'betas': cfg.betas,
         'weight_decay': cfg.weight_decay,
 
-        'ckpt': args.ckpt,
+        'ckpt_path': args.ckpt_path,
         'save_interval': args.save_interval,
+        'log': args.log,
+        'log_dir': args.log_dir,
+        'log_interval': args.log_interval,
 
         'dist': args.dist,
         'fabric_config': {
@@ -228,7 +258,7 @@ def main():
             betas=cfg.betas,
             lr=cfg.lr
         )
-    
+
     train(config)
 
 if __name__ == '__main__':

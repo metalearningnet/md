@@ -22,8 +22,8 @@ class TestCkpt(unittest.TestCase):
             'split': 'train',
             'epochs': NR_EPOCHS,
             'samples': NR_SAMPLES,
+            'ckpt_path': cfg.ckpt_path,
             'batch_size': 1,
-            'dummy': True,
             'fabric_config': {
                 'precision': cfg.precision
             }
@@ -32,7 +32,7 @@ class TestCkpt(unittest.TestCase):
         self.test_args = {
             'path': default_dataset_path,
             'split': 'test',
-            'model_path': cfg.ckpt_dir / cfg.md_file,
+            'model_path': cfg.ckpt_path,
             'samples': 1,
             'batch_size': 1,
             'fabric_config': {

@@ -40,7 +40,7 @@ MODEL = {
     
     # Training Objective Weights
     "lm_coef": 1.0,                 # Proportional weight for language modeling loss
-    "skill_coef": 0.05,             # Proportional weight for skill learning objectives (0.0 = pure LM)
+    "skill_coef": 0.25,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
     "skill_integration_strategy": "annotation",  # Options: 'fusion' | 'annotation'
@@ -51,10 +51,10 @@ MODEL = {
 
 # Annotation Generation Settings (used when skill_integration_strategy == 'annotation')
 ANNOTATION = {
-    "words": 4,                     # Number of distinct word types allowed per annotation
+    "words": 8,                     # Number of distinct word types allowed per annotation
     "max_length": 2,                # Max token length per annotation
     "temperature": 0.7,             # Sampling temperature for annotations
-    "max_annotations": 4,           # Max number of annotations per response (-1 for unlimited)
+    "max_annotations": 8,           # Max number of annotations per response (-1 for unlimited)
     "trigger_sharpness": 0.5        # Controls the sharpness of the sampling distribution when deciding whether to trigger an annotation (lower = more deterministic, higher = more exploratory)
 }
 
@@ -94,4 +94,4 @@ LOADER = {
 PRECISION = "bf16-mixed"            # Floating-point precision; Options: '16-mixed' | 'bf16-mixed'
 
 # Logging Configuration
-LOG = False
+LOG = True

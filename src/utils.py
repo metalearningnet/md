@@ -3,6 +3,7 @@ import sys
 import yaml
 import time
 import torch
+import shutil
 import random
 import socket
 import signal
@@ -252,6 +253,15 @@ elif cfg.po == 'SimPO':
 else:
     default_dataset_path = "ag_news"
 
+def clear_directory(directory, include_subdirectories=True):
+    if os.path.exists(directory):
+        for item in os.listdir(directory):
+            item_path = os.path.join(directory, item)
+            if os.path.isfile(item_path) or os.path.islink(item_path):
+                os.unlink(item_path)
+            elif os.path.isdir(item_path) and include_subdirectories:
+                shutil.rmtree(item_path)
+
 def generate_special_token_dict(min_syl=1, max_syl=3):
     def shuffled_word_list(words, seed=SEED):
         rng = random.Random(seed)
@@ -370,8 +380,10 @@ def add_dist_config(
         os.environ['MASTER_PORT'] = str(dist_config['main_port'])
         config['fabric_config'].update({'num_nodes': dist_config['num_nodes']})
     config['fabric_config']['strategy'] = dist_config['strategy']
+
     if dist_config['strategy'] == 'deepspeed':
         from lightning.fabric.strategies import DeepSpeedStrategy
+
         if 'optimizer' in dist_config['deepspeed']:
             lr = dist_config['deepspeed']['optimizer']['params'].get('lr', lr)
             eps = dist_config['deepspeed']['optimizer']['params'].get('eps', eps)
@@ -381,6 +393,7 @@ def add_dist_config(
             dist_config['deepspeed']['optimizer']['params']['eps'] = float(eps)
             dist_config['deepspeed']['optimizer']['params']['betas'] = betas
             dist_config['deepspeed']['optimizer']['params']['weight_decay'] = float(weight_decay)
+        
         cfg.gradient_accumulation_steps = int(dist_config.get('gradient_accumulation_steps', GRADIENT_ACCUMULATION_STEPS))
         config['fabric_config']['strategy'] = DeepSpeedStrategy(config=dist_config['deepspeed'])
         config['gradient_accumulation_steps'] = cfg.gradient_accumulation_steps
@@ -440,7 +453,7 @@ def md_train(
     optimizer,
     fabric,
     num_samples=-1,
-    log_path=None,
+    log_dir=None,
     log_interval=1,
     gradient_accumulation_steps=1
 ):
@@ -454,7 +467,7 @@ def md_train(
 
     total_samples = 0
     last_log_step = 0
-    writer = SummaryWriter(log_path) if log_path else None
+    writer = SummaryWriter(log_dir) if log_dir else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     if num_samples > 0:
@@ -494,9 +507,9 @@ def md_train(
                 continue
         
         if not loss.requires_grad:
-            raise RuntimeError("Loss tensor doesn't require gradients")
-        
-        fabric.backward(loss)
+            fabric.backward(loss.detach())
+        else:
+            fabric.backward(loss)
 
         if optimizer:
             optimizer.step()
@@ -540,7 +553,7 @@ def md_validate(
     loader,
     fabric,
     num_samples=-1,
-    log_path=None,
+    log_dir=None,
     log_interval=1
 ) -> dict:
     if loader == None:
@@ -555,7 +568,7 @@ def md_validate(
     }
 
     total_samples = 0
-    writer = SummaryWriter(log_path) if log_path else None
+    writer = SummaryWriter(log_dir) if log_dir else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
     with torch.no_grad():

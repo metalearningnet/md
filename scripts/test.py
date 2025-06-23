@@ -9,7 +9,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, add_dist_config, default_dataset_path, get_strategy
+from utils import md_validate, cfg, add_dist_config, default_dataset_path, clear_directory
 
 def test(config: dict):
     """
@@ -19,9 +19,11 @@ def test(config: dict):
         - split: Dataset split name (e.g., "test").
         - batch_size: Testing batch size.
         - samples: Number of samples.
-        - ckpt: Checkpoint path.
-        - dist: Enable distributed testing.
+        - ckpt_path: Checkpoint path.
         - fabric_config: Configuration options for the Lightning Fabric setup.
+        - log: Whether to enable logging.
+        - log_dir: Directory where logs should be saved.
+        - log_interval: Interval at which to update and write logs.
     """
     try:
         dataset_path = config['path']
@@ -29,14 +31,11 @@ def test(config: dict):
         split = config.get('split', 'test')
         batch_size = config.get('batch_size', 1)
         num_samples = config.get('samples', -1)
-        ckpt_path = config.get('ckpt')
-        dist = config.get('dist', False)
+        ckpt_path = config.get('ckpt_path')
         fabric_config = config['fabric_config']
-
-        if not dist:
-            strategy = get_strategy()
-            if strategy:
-                fabric_config.update({'strategy': strategy})
+        has_log = config.get('log', False)
+        log_dir = Path(config.get('log_dir', ''))
+        log_interval = config.get('log_interval', 1)
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -57,19 +56,17 @@ def test(config: dict):
             name=dataset_name,
             split=split
         )
-        
-        cfg.log_dir.mkdir(parents=True, exist_ok=True)
-        if cfg.log:
-            cfg.log_dir.mkdir(parents=True, exist_ok=True)
-            log_path = cfg.test_log
-            log_interval = cfg.log_interval
+
+        if has_log:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            clear_directory(log_dir)
         else:
-            log_path = None
+            log_dir = None
             log_interval = 0
 
         test_loader = loader.get_dataloader(batch_size=batch_size, shuffle=False)
         test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
-        test_metrics = md_validate(model, test_loader, fabric, num_samples=num_samples, log_path=log_path, log_interval=log_interval)
+        test_metrics = md_validate(model, test_loader, fabric, num_samples=num_samples, log_dir=log_dir, log_interval=log_interval)
 
         print("\nTest Results:")
         for k, v in test_metrics.items():
@@ -91,7 +88,7 @@ def main():
                         help="Dataset name")
     parser.add_argument("--split", type=str, default="test",
                         help="Dataset split name")
-    parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
+    parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Testing batch size")
@@ -99,8 +96,6 @@ def main():
                         help="Number of testing samples")
 
     # Distributed testing configuration
-    parser.add_argument("--dist", action="store_true", default=False,
-                        help="Enable distributed testing")
     parser.add_argument("--addr", type=str, default=None,
                         help="Master address for distributed testing")
     parser.add_argument("--port", type=int, default=None,
@@ -108,10 +103,20 @@ def main():
     parser.add_argument("--nodes", type=int, default=None,
                         help="The number of nodes for distributed testing")
 
+    # System configuration
+    parser.add_argument("--dist", action="store_true", default=False,
+                        help="Enable distributed training")
+    parser.add_argument("--log", action="store_true", default=cfg.log,
+                        help="Whether to enable logging")
+    parser.add_argument("--log_dir", type=str, default=cfg.test_log,
+                        help="Directory where logs should be saved")
+    parser.add_argument("--log_interval", type=int, default=100,
+                        help="Interval at which to update and write logs")
+
     args = parser.parse_args()
     
-    if not Path(args.ckpt).exists():
-        raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt}")
+    if not Path(args.ckpt_path).exists():
+        raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt_path}")
     
     fabric_config = {
         'accelerator': 'auto',
@@ -132,9 +137,11 @@ def main():
         'split': args.split,
         'batch_size': args.batch_size,
         'samples': args.samples,
-        'ckpt': args.ckpt,
-        'dist': args.dist,
-        'fabric_config': fabric_config
+        'ckpt_path': args.ckpt_path,
+        'fabric_config': fabric_config,
+        'log': args.log,
+        'log_dir': args.log_dir,
+        'log_interval': args.log_interval
     }
 
     test(config)
