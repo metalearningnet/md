@@ -58,7 +58,7 @@ SEED = 42
 RETRY_MAX = 5
 LOG_INTERVAL = 1
 
-SEP_TOKEN = '<|SEP|>'
+SEP_TOKEN = '<separator>'
 RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
 
@@ -280,7 +280,7 @@ def generate_special_token_dict(min_syl=1, max_syl=3):
 
 def get_special_token_by_index(index):
     if 0 <= index < len(SPECIAL_TOKEN_DICT):
-        return f'<|{SPECIAL_TOKEN_DICT[index].capitalize()}|>'
+        return f'<{SPECIAL_TOKEN_DICT[index]}>'
     else:
         return None
 
