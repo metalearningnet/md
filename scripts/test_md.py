@@ -20,40 +20,75 @@ def show_results(results):
 class TestMD(unittest.TestCase):
     def setUp(self):
         self.model = MD(attn='sdpa')
-        self.seq_len = 10
+        self.model.max_length = 64
+        self.seq_len = 20
         self.batch_size = 2
+        self.hidden_size = self.model.lm_hidden_size
         self.params = self.model.get_trainable_parameters()
-    
+
     def _create_dummy_inputs(self, batch_size: int = None) -> Dict:
         batch = batch_size or self.batch_size
         input_ids = torch.randint(0, self.model.config.vocab_size, (batch, self.seq_len))
         return {'input_ids': input_ids}
     
     def _create_inputs(self):
-        """Create inputs without SEP tokens to trigger annotation"""
         vocab_size = self.model.lm_num_tokens
         input_ids = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
-        
-        # Ensure no SEP tokens in first position
         input_ids[:, 0] = torch.where(
             input_ids[:, 0] == self.model.token_sep_id,
             torch.randint(1, vocab_size, (self.batch_size,)),
             input_ids[:, 0]
         )
         return input_ids
+
+    def _create_text_inputs(self):
+        text = "What are the names of some famous actors that started their careers on Broadway?"
+        input_ids = self.model.tokenizer(
+            text,
+            padding=True,
+            truncation=True,
+            return_tensors="pt"
+        )['input_ids']
+        return input_ids
+    
+    def _create_anno_inputs(self):
+        vocab_size = self.model.lm_num_tokens
+        input_ids = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
+        input_labels = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
+        input_ids[input_ids == self.model.token_sep_id] = 1
+        return input_ids, input_labels
+    
+    def test_annotation_output_shapes(self):
+        """Test that output tensors have correct shapes"""
+        if not self.model.has_anno:
+            return
+        
+        input_ids, input_labels = self._create_anno_inputs()
+        result = self.model.annotate(input_ids, input_labels)
+        
+        self.assertEqual(result['labels'].shape[0], self.batch_size)
+        self.assertEqual(result['states'].shape[0], self.batch_size)
+        self.assertEqual(result['logits'].shape[0], self.batch_size)
+        
+        self.assertEqual(result['states'].shape[2], self.hidden_size)
+        self.assertEqual(result['logits'].shape[2], self.model.lm_num_tokens)
+        
+        self.assertGreaterEqual(result['labels'].shape[1], self.seq_len)
+        self.assertGreaterEqual(result['states'].shape[1], self.seq_len)
+        self.assertGreaterEqual(result['logits'].shape[1], self.seq_len)
     
     def test_begin_token_generation(self):
         if FAST_TEST:
             return
 
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             input_ids = self._create_inputs()
             original_sample = self.model._get_next_token
             
-            def patched_sample(logits, temperature=1.0):
+            def patched_sample(logits):
                 new_logits = torch.zeros_like(logits).fill_(-float('inf'))
                 new_logits[:, self.model.token_sep_id] = 1e9
-                return original_sample(new_logits, temperature)
+                return original_sample(new_logits)
             
             with patch.object(self.model, '_get_next_token', new=patched_sample):
                 generated_ids = self.model.generate(input_ids)
@@ -62,12 +97,31 @@ class TestMD(unittest.TestCase):
             self.assertTrue(begin_found, "No SEP tokens generated in any sequence")
     
     def test_annotation_content(self):
-        """Verify annotation contains only reasoning tokens"""
-        if self.model.enable_annotation:
+        """Verify annotation contains only special tokens"""
+        if self.model.has_anno:
+            input_ids = self._create_text_inputs()
+            model_out = self.model.annotate(input_ids, input_ids)
+
+            show_results(f'\nSEP ID: {self.model.token_sep_id}')
+            show_results(f'Special IDs: {self.model.token_special_ids}')
+            show_results(f"\nAnnotation lables:")
+            show_results(model_out['labels'])
+
+            logits = model_out['logits']
+            for seq_logits in logits:
+                tokens = []
+                for i in seq_logits:
+                    next_token = self.model._get_next_token(i).item()
+                    tokens.append(next_token)
+                
+                show_results(f"\nAnnotation tokens:")
+                show_results(tokens)
+                show_results('\nAnnotation text:')
+                show_results(self.model.tokenizer.decode(tokens))
+            
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
-            reasoning_tokens = set(self.model.token_anno_ids)
-            
+            special_tokens = set(self.model.token_special_ids)
             for seq in generated_ids:
                 seq = seq.tolist()
                 if self.model.token_sep_id in seq:
@@ -75,9 +129,9 @@ class TestMD(unittest.TestCase):
                     end_idx = seq.index(self.model.token_sep_id, begin_idx + 1)
                 
                     for token in seq[begin_idx + 1:end_idx]:
-                        self.assertIn(token, reasoning_tokens,
-                                    f"Token {token} not in reasoning tokens")
+                        self.assertIn(token, special_tokens, f"Token {token} not in specal tokens")
                 
+                show_results('\nGenerated text:')
                 show_results(self.model.tokenizer.decode(seq))
     
     def test_skillmemory_diversity(self):
@@ -85,7 +139,7 @@ class TestMD(unittest.TestCase):
         if FAST_TEST:
             return
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             import torch.nn.functional as F
             from torch.distributions import Categorical
             skill = self.model.skill_memory
@@ -112,7 +166,7 @@ class TestMD(unittest.TestCase):
         if FAST_TEST:
             return
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
             
@@ -135,11 +189,11 @@ class TestMD(unittest.TestCase):
         if FAST_TEST:
             return
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
             
-            allowed_tokens = set(self.model.token_anno_ids) | {
+            allowed_tokens = set(self.model.token_special_ids) | {
                 self.model.token_sep_id
             }
             
@@ -157,7 +211,7 @@ class TestMD(unittest.TestCase):
         if FAST_TEST:
             return
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             input_ids = self._create_inputs()
             generated_ids = self.model.generate(input_ids)
             
@@ -178,7 +232,7 @@ class TestMD(unittest.TestCase):
         input_ids = torch.randint(0, self.model.config.vocab_size, (self.batch_size, self.seq_len))
         outputs = self.model(input_ids)
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             batch_size, output_seq_len, vocab_size = outputs['logits'].shape
 
             min_expected = self.seq_len
@@ -200,7 +254,7 @@ class TestMD(unittest.TestCase):
         inputs = self._create_dummy_inputs()
         outputs = self.model(**inputs)
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             batch_size, output_seq_len, vocab_size = outputs['logits'].shape
 
             min_expected = self.seq_len
@@ -241,25 +295,20 @@ class TestMD(unittest.TestCase):
                 continue
                 
             try:
-                # Move model and inputs to target device
                 self.model.to(device)
                 device_inputs = {k: v.to(device) for k, v in inputs.items()}
                 
-                # Forward pass
                 outputs = self.model(**device_inputs)
                 
-                # Verify output device matches
                 self.assertEqual(outputs['logits'].device.type, device.type,
                             f"Output device {outputs['logits'].device.type} "
                             f"doesn't match expected {device.type}")
                 
-                # Verify CUDA device index when applicable
                 if device.type == 'cuda':
                     self.assertEqual(outputs['logits'].device.index, 0,
                                 "CUDA device index should be 0")
                     
             finally:
-                # Clean up by moving model back to CPU
                 self.model.cpu()
                 for param in self.params:
                     if param.grad is not None:

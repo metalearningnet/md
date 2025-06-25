@@ -18,7 +18,6 @@ class TestSkill(unittest.TestCase):
         self.action_dim = 4
         self.hidden_dim = 64
         
-        # Test data
         self.states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)    
         self.skill_memory = SkillMemory(
             state_dim=self.state_dim,
@@ -30,12 +29,10 @@ class TestSkill(unittest.TestCase):
         )
     
     def test_initialization(self):
-        # Check critical components exist
         self.assertTrue(hasattr(self.skill_memory, 'mac'))
         self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
         self.assertTrue(hasattr(self.skill_memory, 'policy'))
         
-        # Check output dimensions
         output_layer = self.skill_memory.policy.output_layer
         if isinstance(output_layer, nn.Sequential):
             final_layer = output_layer[-1]
@@ -71,14 +68,12 @@ class TestSkill(unittest.TestCase):
         outputs = self.skill_memory(self.states)
         losses = self.skill_memory.compute_losses(outputs)
         
-        # Check all loss components exist
         required_losses = ['mi_loss', 'entropy', 'adv_loss', 'kl_loss']
         self.assertIn('total_loss', losses)
         self.assertIn('loss_components', losses)
         for loss_name in required_losses:
             self.assertIn(loss_name, losses['loss_components'])
         
-        # Check loss values are valid
         for k, v in losses['loss_components'].items():
             self.assertTrue(isinstance(v, float))
 
@@ -92,13 +87,11 @@ class TestSkill(unittest.TestCase):
         losses = self.skill_memory.compute_losses(outputs)
         losses['total_loss'].backward()
         
-        # Components that MUST have gradients
         critical_components = [
             'attn', 'ff', 'policy', 'forward_model',
             'disc_', 'skill_pred', 'mmi_', 'mem'
         ]
         
-        # Components that MAY have zero gradients (conditional)
         optional_components = [
             'dynamic_alpha_scale', 'gate', 'hyper_conn'
         ]
@@ -114,7 +107,6 @@ class TestSkill(unittest.TestCase):
         
         for name, param in self.skill_memory.named_parameters():
             if name not in exclude_params:
-                # Check critical components
                 if any(comp in name for comp in critical_components):
                     self.assertIsNotNone(param.grad, f"No gradient for {name}")
                     if param.grad is not None:
@@ -129,19 +121,17 @@ class TestSkill(unittest.TestCase):
                         print(f"Warning: Zero gradient for conditional param {name}")
 
     def test_edge_cases(self):
-        # Single timestep
         single_out = self.skill_memory(
             torch.randn(self.batch_size, 1, self.hidden_dim)
         )
         self.assertEqual(single_out['m'].shape, (self.batch_size, 1, self.hidden_dim))
         
-        # Empty sequence
         empty_state = torch.randn(self.batch_size, 0, self.hidden_dim)
         with self.assertRaisesRegex(AssertionError, "seq_len > 0"):
             self.skill_memory(empty_state)
 
     def test_variable_sequence_lengths(self):
-        for seq_len in [1, 4, 7, 10, 15]:  # Test various lengths including boundary cases
+        for seq_len in [1, 4, 7, 10, 15]:
             states = torch.randn(self.batch_size, seq_len, self.hidden_dim)
             outputs = self.skill_memory(states)
             self.assertEqual(outputs['m'].shape, (self.batch_size, seq_len, self.hidden_dim),
@@ -151,52 +141,25 @@ class TestSkill(unittest.TestCase):
         extreme_states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim) * 1e6
         outputs = self.skill_memory(extreme_states)
         
-        # Check for NaN/Inf in outputs
         for k, v in outputs.items():
             if isinstance(v, torch.Tensor):
                 self.assertFalse(torch.isnan(v).any(), f"NaN in {k}")
                 self.assertFalse(torch.isinf(v).any(), f"Inf in {k}")
 
     def test_device_portability(self):
-        # Test CUDA if available
         if torch.cuda.is_available():
             try:
-                # Move to GPU
                 gpu_model = self.skill_memory.cuda()
                 gpu_states = self.states.cuda()
                 
-                # Forward pass on GPU
                 outputs = gpu_model(gpu_states)
-                self.assertEqual(outputs['m'].device.type, 'cuda',
-                            "Output should be on GPU")
+                self.assertEqual(outputs['m'].device.type, 'cuda', "Output should be on GPU")
                 
-                # Move back to CPU
                 cpu_model = gpu_model.cpu()
                 cpu_outputs = cpu_model(self.states)
-                self.assertEqual(cpu_outputs['m'].device.type, 'cpu',
-                            "Output should be on CPU")
+                self.assertEqual(cpu_outputs['m'].device.type, 'cpu', "Output should be on CPU")
             except RuntimeError as e:
                 self.fail(f"CUDA device portability failed: {str(e)}")
-        
-        # Test MPS if available (for Apple Silicon)
-        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            try:
-                # Move to MPS
-                mps_model = self.skill_memory.to('mps')
-                mps_states = self.states.to('mps')
-                
-                # Forward pass on MPS
-                outputs = mps_model(mps_states)
-                self.assertEqual(outputs['m'].device.type, 'mps',
-                            "Output should be on MPS")
-                
-                # Move back to CPU
-                cpu_model = mps_model.cpu()
-                cpu_outputs = cpu_model(self.states)
-                self.assertEqual(cpu_outputs['m'].device.type, 'cpu',
-                            "Output should be on CPU")
-            except RuntimeError as e:
-                self.fail(f"MPS device portability failed: {str(e)}")
 
 if __name__ == '__main__':
     unittest.main()

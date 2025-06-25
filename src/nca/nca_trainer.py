@@ -465,7 +465,7 @@ class NCATrainer(Trainer):
             if not all(k in batch for k in required_keys):
                 raise ValueError(f"Batch must contain all of {required_keys}")
         
-        if self.model.enable_annotation:
+        if self.model.has_anno:
             loss_list = []
             for i in range(total):
                 input_ids = batch[f'A{i}_input_ids']

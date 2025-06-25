@@ -17,9 +17,6 @@ main_address: ""
 main_port: 1112
 
 deepspeed:
-  train_micro_batch_size_per_gpu: 8
-  gradient_accumulation_steps: 4
-
   optimizer:
     type: "AdamW"
     params:
@@ -30,19 +27,14 @@ deepspeed:
 
   zero_optimization:
     stage: 2
-    offload_optimizer:
-      device: "cpu"
-    offload_param:
-      device: "cpu"
+    contiguous_gradients: true
 
   activation_checkpointing:
     enable: true
     use_reentrant: false
 
   bf16:
-    enabled: true
+    enabled: false
 
   fp16:
     enabled: false
-
-  elastic_checkpoint: false

@@ -126,7 +126,7 @@ class SkillMemory(nn.Module):
             nn.Linear(state_dim + hidden_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(),
-            nn.Linear(hidden_dim, state_dim)  # Predict next state
+            nn.Linear(hidden_dim, state_dim)
         )
 
         # Adversarial Discriminator (I(A;M|S))

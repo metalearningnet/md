@@ -66,6 +66,8 @@ def train(config: dict):
             strategy = get_strategy()
             if strategy:
                 fabric_config.update({'strategy': strategy})
+        else:
+            torch.backends.cudnn.enabled = False
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -91,7 +93,7 @@ def train(config: dict):
             model = fabric.setup(model)
             optimizer = None
         
-        if model.enable_annotation:
+        if model.has_anno:
             model.mark_forward_method('annotate')
         
         loader_args = {

@@ -43,7 +43,8 @@ MODEL = {
     "skill_coef": 0.25,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
-    "skill_integration_strategy": "annotation",  # Options: 'fusion' | 'annotation'
+    "context_window": 8,            # Lookahead window size for determining insertion position of skill output
+    "skill_integration_strategy": "hint",  # Options: 'fusion' | 'annotation' | 'hint'
 
     # Inference Behavior
     "use_cache": False              # Use KV caching to accelerate autoregressive generation
@@ -53,9 +54,13 @@ MODEL = {
 ANNOTATION = {
     "words": 8,                     # Number of distinct word types allowed per annotation
     "max_length": 2,                # Max token length per annotation
-    "temperature": 0.7,             # Sampling temperature for annotations
-    "max_annotations": 8,           # Max number of annotations per response (-1 for unlimited)
-    "trigger_sharpness": 0.5        # Controls the sharpness of the sampling distribution when deciding whether to trigger an annotation (lower = more deterministic, higher = more exploratory)
+    "max_annotations": 4            # Max number of annotations per response (-1 for unlimited)
+}
+
+# Hint Generation Settings (used when skill_integration_strategy == 'hint')
+HINT = {
+    "category": "minimal",          # Options: 'minimal' | 'standard' | 'enhanced' | 'advanced'
+    "max_hints": 16                 # Max number of hints per response (-1 for unlimited)
 }
 
 # Checkpointing Configuration

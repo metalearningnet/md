@@ -48,7 +48,7 @@ def test(config: dict):
         model = fabric.setup(model)
         model.eval()
 
-        if model.enable_annotation:
+        if model.has_anno:
             model.mark_forward_method('annotate')
         
         loader = MDLoader(

@@ -18,10 +18,17 @@ from dataclasses import dataclass
 from threading import Thread, Lock
 from itertools import product, islice
 from typing import Dict, Optional, List
-from transformers import modeling_utils
 from torch.utils.tensorboard import SummaryWriter
 from lightning.fabric.strategies import DDPStrategy
 from lightning.fabric.accelerators import CUDAAccelerator
+from transformers import (
+    modeling_utils,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
+    LogitsProcessorList,
+    TemperatureLogitsWarper,
+    RepetitionPenaltyLogitsProcessor
+)
 
 NODE_RANK_COORDINATOR_PORT = 10001
 
@@ -30,7 +37,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, ANNOTATION
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, ANNOTATION, HINT
 
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
@@ -64,6 +71,13 @@ LABEL_PAD_TOKEN_ID = -100
 
 SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
 
+HINT_VOCAB = {
+    'minimal' : ['<continue>', '<wait>'],
+    'standard': ['<continue>', '<wait>', '<verify>'],
+    'enhanced': ['<continue>', '<wait>', '<verify>', '<recall>'],
+    'advanced': ['<continue>', '<wait>', '<verify>', '<recall>', '<diversify>'],
+}
+
 def info(s):
     if VERBOSE:
         print(f"[INFO] {s}")
@@ -76,6 +90,7 @@ def warn(s):
 class Cfg:
     log: bool
     ckpt: dict
+    hint: dict
     model: dict
     loader: dict
     md_file: str
@@ -111,20 +126,20 @@ class Cfg:
         return self.model['lm']['path']
     
     @property
-    def lm_coef(self):
-        return self.model.get('lm_coef', 1.0)
-    
-    @property
     def lm_name(self):
         return os.path.basename(self.model['lm']['path'])
+    
+    @property
+    def lm_coef(self):
+        return self.model.get('lm_coef', 1.0)
     
     @property
     def lm_freeze(self):
         return self.model['lm'].get('freeze', False)
     
     @property
-    def lm_temperature(self):
-        return self.model['lm'].get('temperature', 0.7)
+    def temperature(self):
+        return self.model['lm'].get('temperature')
 
     @property
     def min_length(self):
@@ -156,7 +171,7 @@ class Cfg:
     
     @property
     def skill_integration_strategy(self):
-        return self.model.get('skill_integration_strategy', 'annotation')
+        return self.model.get('skill_integration_strategy', 'hint')
     
     @property
     def adapter(self):
@@ -167,28 +182,37 @@ class Cfg:
         return self.model['use_cache']
     
     @property
+    def context_window(self):
+        return self.model.get('context_window', 8)
+    
+    @property
     def ckpt_path(self):
         return self.ckpt_dir / MD_FILE
 
     @property
-    def anno_words(self):
-        return self.annotation.get('words', 5)
+    def num_special_words(self):
+        if self.skill_integration_strategy == 'annotation':
+            return self.annotation.get('words', 8)
+        elif self.skill_integration_strategy == 'hint':
+            return len(HINT_VOCAB[self.hint_category])
+        else:
+            return 0
     
     @property
     def anno_max_length(self):
         return self.annotation.get('max_length', 3)
     
     @property
-    def anno_temperature(self):
-        return self.annotation.get('temperature', 0.7)
-    
-    @property
-    def anno_trigger_sharpness(self):
-        return self.annotation.get('trigger_sharpness', 0.7)
-    
-    @property
     def max_annotations(self):
         return self.annotation.get('max_annotations', -1)
+    
+    @property
+    def hint_category(self):
+        return self.hint['category']
+    
+    @property
+    def max_hints(self):
+        return self.hint.get('max_hints', -1)
     
     @property
     def truncation_mode(self):
@@ -213,7 +237,6 @@ class Cfg:
     @property
     def po_conf_file(self):
         preference = self.optimizer.get('preference')
-        
         if preference == 'SimPO':
             return CONF_DIR / 'simpo.yaml'
         elif preference == 'NCA':
@@ -224,6 +247,7 @@ class Cfg:
 cfg = Cfg(
     log=LOG,
     ckpt=CKPT,
+    hint=HINT,
     model=MODEL,
     loader=LOADER,
     md_file=MD_FILE,
@@ -253,6 +277,48 @@ elif cfg.po == 'SimPO':
 else:
     default_dataset_path = "ag_news"
 
+class LogitsDecoder:
+    def __init__(self, config, tokenizer, temperature):
+        self.config = config
+        self.tokenizer = tokenizer
+        self.default_temp = temperature
+        self.default_top_k = getattr(self.config, 'top_k', None)
+        self.default_top_p = getattr(self.config, 'top_p', None)
+
+    def decode_logits(
+        self,
+        logits: torch.Tensor,
+        temperature: float = None,
+        top_k: int = None,
+        top_p: float = None,
+        repetition_penalty: float = 1.0,
+        do_sample: bool = True
+    ) -> torch.Tensor:
+        temperature = temperature if temperature is not None else self.default_temp
+        top_k = top_k if top_k is not None else self.default_top_k
+        top_p = top_p if top_p is not None else self.default_top_p
+
+        processors = LogitsProcessorList()
+        
+        if repetition_penalty != 1.0:
+            processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
+        
+        if do_sample:
+            if temperature != 1.0:
+                processors.append(TemperatureLogitsWarper(temperature))
+            if top_k is not None and top_k > 0:
+                processors.append(TopKLogitsWarper(top_k))
+            if top_p is not None and top_p < 1.0:
+                processors.append(TopPLogitsWarper(top_p))
+        
+        if processors:
+            logits = processors(None, logits)
+        
+        return torch.argmax(logits, dim=-1) if not do_sample else torch.multinomial(
+            torch.softmax(logits, dim=-1), 
+            num_samples=1
+        ).squeeze(-1)
+
 def clear_directory(directory, include_subdirectories=True):
     if os.path.exists(directory):
         for item in os.listdir(directory):
@@ -262,7 +328,7 @@ def clear_directory(directory, include_subdirectories=True):
             elif os.path.isdir(item_path) and include_subdirectories:
                 shutil.rmtree(item_path)
 
-def generate_special_token_dict(min_syl=1, max_syl=3):
+def generate_special_token_vocab(min_syl=1, max_syl=3):
     def shuffled_word_list(words, seed=SEED):
         rng = random.Random(seed)
         word_list = words[:]
@@ -279,12 +345,12 @@ def generate_special_token_dict(min_syl=1, max_syl=3):
     return shuffled_word_list(tokens)
 
 def get_special_token_by_index(index):
-    if 0 <= index < len(SPECIAL_TOKEN_DICT):
-        return f'<{SPECIAL_TOKEN_DICT[index]}>'
+    if 0 <= index < len(SPECIAL_TOKEN_VOCAB):
+        return f'<{SPECIAL_TOKEN_VOCAB[index]}>'
     else:
         return None
 
-SPECIAL_TOKEN_DICT = generate_special_token_dict()
+SPECIAL_TOKEN_VOCAB = generate_special_token_vocab()
 
 class RegisterRequest(BaseModel):
     hostname: str
@@ -361,24 +427,30 @@ def add_dist_config(
 
     if num_nodes != None:
         dist_config['num_nodes'] = num_nodes
+    
     if main_port != None:
         dist_config['main_port'] = main_port
+    
     if main_addr != None:
         dist_config['main_addr'] = main_addr
+    
     if dist_config['num_nodes'] > 1:
         assert dist_config.get('main_addr'), (
             'Main address must be specified for distributed training or testing. '
             'Please check your configuration file.'
         )
+
         node_rank = get_node_rank(
             dist_config['main_addr'],
             dist_config['main_port'],
             dist_config['num_nodes']
         )
+
         os.environ['NODE_RANK'] = str(node_rank)
         os.environ['MASTER_ADDR'] = dist_config['main_addr']
         os.environ['MASTER_PORT'] = str(dist_config['main_port'])
         config['fabric_config'].update({'num_nodes': dist_config['num_nodes']})
+    
     config['fabric_config']['strategy'] = dist_config['strategy']
 
     if dist_config['strategy'] == 'deepspeed':
@@ -389,6 +461,7 @@ def add_dist_config(
             eps = dist_config['deepspeed']['optimizer']['params'].get('eps', eps)
             betas = dist_config['deepspeed']['optimizer']['params'].get('betas', betas)
             weight_decay = dist_config['deepspeed']['optimizer']['params'].get('weight_decay', weight_decay)
+            
             dist_config['deepspeed']['optimizer']['params']['lr'] = float(lr)
             dist_config['deepspeed']['optimizer']['params']['eps'] = float(eps)
             dist_config['deepspeed']['optimizer']['params']['betas'] = betas

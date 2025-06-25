@@ -1004,15 +1004,16 @@ class NeuralMemory(Module):
 
             # store
 
-            next_updates, next_neural_mem_state, chunk_surprises = self.store_memories(
-                store_seq_chunk,
-                weights,
-                seq_index = seq_index,
-                past_state = past_state,
-                prev_weights = prev_weights,
-                mask = maybe_store_mask,
-                return_surprises = True
-            )
+            with torch.autocast(store_seq_chunk.device.type):
+                next_updates, next_neural_mem_state, chunk_surprises = self.store_memories(
+                    store_seq_chunk,
+                    weights,
+                    seq_index = seq_index,
+                    past_state = past_state,
+                    prev_weights = prev_weights,
+                    mask = maybe_store_mask,
+                    return_surprises = True
+                )
 
             weights = next_neural_mem_state.weights
             seq_index = next_neural_mem_state.seq_index

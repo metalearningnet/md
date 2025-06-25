@@ -401,7 +401,7 @@ class SimPOTrainer(Trainer):
         if not all(k in batch for k in required_keys):
             raise ValueError(f"Batch must contain all of {required_keys}")
         
-        if model.enable_annotation:
+        if model.has_anno:
             results = {}
             loss_list = []
             for i in ['chosen', 'rejected']:
