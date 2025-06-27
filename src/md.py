@@ -263,7 +263,9 @@ class MD(nn.Module):
         
         max_length = self.anno_max_length + 1 if self.enable_annotation else 1
         for step_idx in range(max_length):
-            skill_output = self.skill_memory(current_embeds)
+            with torch.autocast(self.device.type, enabled=False):
+                skill_output = self.skill_memory(current_embeds)
+            
             if return_loss:
                 skill_loss = self.skill_memory.compute_losses(skill_output)['total_loss']
                 loss_list.append(skill_loss)
