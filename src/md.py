@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 from skill import SkillMemory
+import torch.nn.functional as F
 from typing import Dict, Optional
 from huggingface_hub import model_info
 from peft import LoraConfig, get_peft_model
@@ -23,6 +24,7 @@ class MD(nn.Module):
         self.max_length = config.max_length
         self.adapter_config = config.adapter
         self.temperature = config.temperature
+        self.min_interval = config.min_interval
         self.hint_category = config.hint_category
         self.context_window = config.context_window
         self.max_annotations = config.max_annotations
@@ -50,8 +52,11 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
+        self.density_strength = 1.0
+        self.diversity_strength = 1.0
         self.has_anno = self.enable_hint or self.enable_annotation
-        info(f"LM {self.config.model_type} (hidden_size: {self.lm_hidden_size})")
+        self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
+        info(f"LM {self.config.model_type} (hidden_size: {self.hidden_size})")
 
     def _init_lm(self):
         config = AutoConfig.from_pretrained(self.model_dir)
@@ -84,8 +89,7 @@ class MD(nn.Module):
         
         self.lm = model
         self.config = config
-        
-        self.lm_hidden_size = getattr(
+        self.hidden_size = getattr(
             self.config,
             'hidden_size',
             getattr(
@@ -95,7 +99,7 @@ class MD(nn.Module):
             )
         )
 
-        if self.lm_hidden_size is None:
+        if self.hidden_size is None:
             raise ValueError("Could not find hidden_size")
         
         if self.temperature is None:
@@ -104,17 +108,16 @@ class MD(nn.Module):
         self.logits_decoder = LogitsDecoder(self.config, self.tokenizer, self.temperature)
 
     def _init_skill(self) -> nn.Module:
-        """Initialize SkillMemory with LM-compatible dimensions"""
         if self.skill_integration_strategy in ['hint', 'annotation']:
             self.action_dim = self.num_special_words + 1
         else:
-            self.action_dim = self.skill_config.get('action_dim', self.lm_num_tokens)
+            self.action_dim = self.skill_config.get('action_dim', self.num_tokens)
             
         self.skill_config.update({
-            'num_tokens': self.lm_num_tokens,
-            'state_dim': self.lm_hidden_size,
+            'num_tokens': self.num_tokens,
+            'state_dim': self.hidden_size,
             'action_dim': self.action_dim,
-            'hidden_dim': self.skill_config.get('hidden_dim', self.lm_hidden_size),
+            'hidden_dim': self.skill_config.get('hidden_dim', self.hidden_size),
             'checkpoint': self.skill_checkpoint
         })
 
@@ -123,13 +126,13 @@ class MD(nn.Module):
     def _init_action_projection(self):
         """Adapter between SkillMemory and LM"""
         self.fusion_gate = nn.Sequential(
-            nn.Linear(2 * self.lm_hidden_size, self.lm_hidden_size),
+            nn.Linear(2 * self.hidden_size, self.hidden_size),
             nn.Sigmoid()
         )
-        self.state_norm = nn.LayerNorm(self.lm_hidden_size)
-        self.action_norm = nn.LayerNorm(self.lm_hidden_size)
+        self.state_norm = nn.LayerNorm(self.hidden_size)
+        self.action_norm = nn.LayerNorm(self.hidden_size)
         proj_scale = self.adapter_config.get('proj_scale', 2)
-        min_dim = self.adapter_config.get('min_proj_dim', self.config.hidden_size)
+        min_dim = self.adapter_config.get('min_proj_dim', self.hidden_size)
         proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim)
 
         norm_pos = self.adapter_config.get('norm_position', 'post')
@@ -145,7 +148,7 @@ class MD(nn.Module):
             layers += [nn.GELU(), nn.LayerNorm(proj_dim)]
         
         layers += [
-            nn.Linear(proj_dim, self.config.hidden_size),
+            nn.Linear(proj_dim, self.hidden_size),
             nn.Dropout(self.adapter_config.get('proj_dropout', 0.1))
         ]
         
@@ -158,7 +161,7 @@ class MD(nn.Module):
         nn.init.xavier_normal_(self.action_proj[-2].weight, gain=1.0)
         nn.init.zeros_(self.action_proj[-2].bias)
         
-        assert self.action_proj[-2].out_features == self.config.hidden_size
+        assert self.action_proj[-2].out_features == self.hidden_size
 
     def _init_params(self):
         assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
@@ -182,7 +185,6 @@ class MD(nn.Module):
             param.requires_grad = True
     
     def _init_tokenizer(self, model):
-        """Add specialized tokens ensuring that all are newly added."""
         if self.enable_annotation:
             special_tokens = [get_special_token_by_index(i) for i in range(self.num_special_words)]
         elif self.enable_hint:
@@ -209,8 +211,8 @@ class MD(nn.Module):
             self.register_buffer('token_sep_id_tensor', token_sep_id_tensor)
             self.register_buffer('token_special_ids_tensor', token_special_ids_tensor)
             
-            self.lm_num_tokens = len(self.tokenizer)
-            model.resize_token_embeddings(self.lm_num_tokens)
+            self.num_tokens = len(self.tokenizer)
+            model.resize_token_embeddings(self.num_tokens)
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -226,18 +228,22 @@ class MD(nn.Module):
         if mask is not None:
             context_embeds = context_embeds * mask.unsqueeze(-1)
         
-        skill_output = self.skill_memory(context_embeds)
-        
+        with torch.autocast(self.device.type, enabled=False):
+            skill_output = self.skill_memory(context_embeds)
+
         step_logits = skill_output['action_logits'][:, -1, :]
-        anno_indices = self._get_anno_next_token(step_logits)
-        sep_index = self.action_dim - 1
-        return anno_indices == sep_index
+
+        if self.training:
+            sep_prob = torch.nn.functional.softmax(step_logits, dim=-1)[:, self.action_dim - 1]
+            return sep_prob > 0.5
+        else:
+            anno_indices = torch.argmax(step_logits, dim=-1)
+            return anno_indices == (self.action_dim - 1)
     
     def _get_annotation(self, 
                         context_embeds: torch.Tensor, 
                         return_ids: bool = True, 
                         return_loss: bool = False):
-        """Auto-regressively generate annotation embeddings"""
         if context_embeds.dim() == 2:
             context_embeds = context_embeds.unsqueeze(0)
         batch_size, _, hidden_size = context_embeds.shape
@@ -327,7 +333,15 @@ class MD(nn.Module):
         return annotation_embeds, annotation_ids, losses
     
     def _get_anno_next_token(self, logits):
-        return torch.argmax(logits, dim=-1)
+        if self.training:
+            return torch.nn.functional.gumbel_softmax(
+                logits,
+                tau=0.1,
+                hard=True,
+                dim=-1
+            ).argmax(-1)
+        else:
+            return torch.argmax(logits, dim=-1)
     
     def _get_next_token(self, logits):
         return self.logits_decoder.decode_logits(logits)
@@ -349,6 +363,51 @@ class MD(nn.Module):
             (self.enable_annotation and (self.max_annotations < 0 or count < self.max_annotations))
         )
 
+    def calculate_adaptive_loss(self, annotations_added, seq_len, loss_list, device):
+        if loss_list:
+            insertion_loss = torch.stack(loss_list).mean()
+        else:
+            insertion_loss = torch.tensor(0., device=device, requires_grad=True)
+        
+        annotations_added_f = torch.tensor(float(annotations_added),
+                                        dtype=torch.float32,
+                                        device=device,
+                                        requires_grad=True)
+        
+        min_annos_f = torch.tensor(1.0,
+                                dtype=torch.float32,
+                                device=device,
+                                requires_grad=True)
+        
+        max_annos = min(self.max_annotations, seq_len // max(1, self.min_interval))
+        max_annos_f = torch.tensor(float(max_annos),
+                                dtype=torch.float32,
+                                device=device,
+                                requires_grad=True)
+        
+        with torch.set_grad_enabled(True):
+            diversity_weight = torch.sigmoid(annotations_added_f - min_annos_f)
+            diversity_penalty = (1 - diversity_weight) * self.diversity_strength
+            
+            density_ratio = torch.where(
+                max_annos_f > 0,
+                annotations_added_f / max_annos_f,
+                torch.tensor(0., device=device, requires_grad=True)
+            )
+            
+            density_penalty = (
+                F.relu(0.2 - density_ratio) * self.density_strength +
+                F.relu(density_ratio - 0.8) * (self.density_strength * 0.5)
+            )
+            
+            adaptive_penalty = 0.6 * diversity_penalty + 0.4 * density_penalty
+            total_loss = insertion_loss + adaptive_penalty
+            
+            if self.training and torch.isnan(total_loss).any():
+                return torch.tensor(0., device=device, requires_grad=True)
+            
+        return total_loss
+    
     def annotate(
         self, 
         input_ids: torch.Tensor,
@@ -357,6 +416,7 @@ class MD(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         assert self.has_anno, "Annotation/Hint mode must be enabled"
         
+        device = input_ids.device
         state_embeds = self.lm.get_input_embeddings()(input_ids)
         batch_size, seq_len, hidden_size = state_embeds.shape
         sep_embed = self.lm.get_input_embeddings()(self.token_sep_id_tensor).view(1, 1, -1)
@@ -364,6 +424,7 @@ class MD(nn.Module):
         all_embeds = []
         all_labels = []
         loss_list = []
+        batch_annotations = []
         
         for i in range(batch_size):
             seq_embeds = []
@@ -375,18 +436,53 @@ class MD(nn.Module):
             
             pos = 0
             while pos < seq_len:
-                seq_embeds.append(token_embeds[pos].view(1, 1, -1))
-                seq_labels.append(token_labels[pos].view(1, 1))
-                
                 if self._need_anno(annotations_added):
-                    current_context = torch.cat(seq_embeds, dim=1)
+                    remaining_tokens = seq_len - pos - 1
+                    window_size = min(remaining_tokens, self.context_window)
                     
-                    if self._has_sep(current_context).item():
+                    if window_size == 0:
+                        seq_embeds.append(token_embeds[pos].view(1, 1, -1))
+                        seq_labels.append(token_labels[pos].view(1, 1))
+                        pos += 1
+                        continue
+                    
+                    current_context = torch.cat(seq_embeds, dim=1) if seq_embeds else torch.zeros(1, 0, hidden_size, device=device)
+                    max_length = current_context.size(1) + window_size
+                    padded_contexts = torch.zeros(window_size, max_length, hidden_size, device=device)
+                    mask = torch.zeros(window_size, max_length, dtype=torch.bool, device=device)
+                    
+                    base_context = current_context.squeeze(0)
+                    for j in range(window_size):
+                        context_length = base_context.size(0) + j + 1
+                        padded_contexts[j, :context_length] = torch.cat([
+                            base_context,
+                            token_embeds[pos:pos+j+1]
+                        ])
+                        mask[j, :context_length] = True
+                    
+                    sep_flags = self._has_sep(padded_contexts, mask=mask)
+                    sep_positions = (sep_flags == 1).nonzero(as_tuple=True)[0]
+                    
+                    if sep_positions.numel() > 0:
+                        first_sep_index = sep_positions[0].item()
+                        window_size = first_sep_index + 1
+                        has_sep = True
+                    else:
+                        has_sep = False
+                    
+                    for j in range(window_size):
+                        seq_embeds.append(token_embeds[pos + j].view(1, 1, -1))
+                        seq_labels.append(token_labels[pos + j].view(1, 1))
+                    
+                    pos += window_size
+                    
+                    if has_sep:
+                        current_context = torch.cat(seq_embeds, dim=1)
                         context_with_sep = torch.cat([
                             current_context, 
                             sep_embed
                         ], dim=1)
-                        
+
                         annotation_embeds, _, skill_loss = self._get_annotation(
                             context_with_sep,
                             return_loss=return_loss
@@ -406,62 +502,27 @@ class MD(nn.Module):
                             seq_embeds.append(annotation_embeds.unsqueeze(0))
                             anno_len = annotation_embeds.size(0)
                             seq_labels.append(
-                                torch.full((1, anno_len), self.label_pad_token_id, device=input_ids.device)
+                                torch.full((1, anno_len), self.label_pad_token_id, device=device)
                             )
-                            
                             annotations_added += 1
-                            remaining_tokens = seq_len - pos - 1
-                            
-                            window_size = min(remaining_tokens, self.context_window)
-                            if window_size > 0:
-                                max_length = current_context.size(1) + window_size
-                                padded_contexts = torch.zeros(window_size, max_length, hidden_size, 
-                                                            device=input_ids.device)
-                                
-                                mask = torch.zeros(window_size, max_length, dtype=torch.bool, 
-                                                device=input_ids.device)
-                                
-                                base_context = current_context.squeeze(0)
-                                for j in range(window_size):
-                                    context_length = base_context.size(0) + j + 1
-                                    padded_contexts[j, :context_length] = torch.cat([
-                                        base_context,
-                                        token_embeds[pos+1:pos+j+2]
-                                    ])
-                                    mask[j, :context_length] = True
-                                
-                                sep_flags = self._has_sep(padded_contexts, mask=mask)
-                                sep_positions = (sep_flags == 1).nonzero(as_tuple=True)[0]
-                                if sep_positions.numel() > 0:
-                                    first_sep_index = sep_positions[0].item()
-                                    
-                                    for j in range(first_sep_index + 1):
-                                        seq_embeds.append(token_embeds[pos + j + 1].view(1, 1, -1))
-                                        seq_labels.append(token_labels[pos + j + 1].view(1, 1))
-                                    
-                                    pos += first_sep_index + 1
-                                    continue
-                                else:
-                                    for j in range(window_size):
-                                        seq_embeds.append(token_embeds[pos + j + 1].view(1, 1, -1))
-                                        seq_labels.append(token_labels[pos + j + 1].view(1, 1))
-                                    pos += window_size
-                                    continue
-                
-                pos += 1
+                else:
+                    seq_embeds.append(token_embeds[pos].view(1, 1, -1))
+                    seq_labels.append(token_labels[pos].view(1, 1))
+                    pos += 1
             
             full_seq_embeds = torch.cat(seq_embeds, dim=1).squeeze(0)
             full_seq_labels = torch.cat(seq_labels, dim=1).squeeze(0)
             all_embeds.append(full_seq_embeds)
             all_labels.append(full_seq_labels)
+            batch_annotations.append(annotations_added)
         
         max_len = max(e.size(0) for e in all_embeds)
-        full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=input_ids.device)
+        full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=device)
         full_labels = torch.full(
             (batch_size, max_len), 
             self.label_pad_token_id, 
             dtype=torch.long, 
-            device=input_ids.device
+            device=device
         )
         
         for i, (embeds, labels) in enumerate(zip(all_embeds, all_labels)):
@@ -471,7 +532,15 @@ class MD(nn.Module):
         with torch.autocast(device_type=self.device.type, dtype=self.dtype):
             lm_out = self.lm(inputs_embeds=full_embeds)
 
-        losses = torch.stack(loss_list).mean() if loss_list and return_loss else None
+        if return_loss:
+            losses = self.calculate_adaptive_loss(
+                annotations_added=sum(batch_annotations) // batch_size,
+                seq_len=seq_len,
+                loss_list=loss_list,
+                device=device
+            )
+        else:
+            losses = None
 
         return {
             'labels': full_labels,
@@ -481,10 +550,11 @@ class MD(nn.Module):
         }
 
     def is_valid_anno(self, annotation_embeds):
+        seq_len = annotation_embeds.size(-2)
         if self.enable_annotation:
-            return annotation_embeds.size(1) > 1
+            return seq_len > 1
         elif self.enable_hint:
-            return annotation_embeds.size(1) > 0
+            return seq_len > 0
         else:
             return False
 
@@ -493,11 +563,12 @@ class MD(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        if torch.any(input_ids >= self.lm_num_tokens):
-            input_ids = input_ids.clamp(0, self.lm_num_tokens - 1)
+        device = input_ids.device
+        if torch.any(input_ids >= self.num_tokens):
+            input_ids = input_ids.clamp(0, self.num_tokens - 1)
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=input_ids.device)
+            attention_mask = torch.ones_like(input_ids, device=device)
         
         state_embeds = self.lm.get_input_embeddings()(input_ids)
         batch_size, _, hidden_size = state_embeds.shape
@@ -526,13 +597,13 @@ class MD(nn.Module):
                             annotation_embeds = torch.cat([sep_embed, annotation_embeds])
                         anno_len = annotation_embeds.size(0)
                         new_embeds_list.append(annotation_embeds)
-                        new_labels_list.append(torch.full((anno_len,), self.label_pad_token_id, device=input_ids.device))
+                        new_labels_list.append(torch.full((anno_len,), self.label_pad_token_id, device=device))
                 
                 new_embeds.append(torch.cat(new_embeds_list))
                 new_labels.append(torch.cat(new_labels_list))
             
             max_len = max(tensor.size(0) for tensor in new_embeds)
-            full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=state_embeds.device)
+            full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=device)
 
             for i in range(batch_size):
                 seq_len_i = new_embeds[i].size(0)
@@ -568,19 +639,16 @@ class MD(nn.Module):
             return torch.cat([seq, token.flatten()])
         return torch.cat([seq, torch.tensor([token], device=device)])
     
-    def _generate(
-        self,
-        input_ids: torch.Tensor
-    ) -> torch.Tensor:
-        device = input_ids.device
+    def _generate(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size = input_ids.shape[0]
         sequences = [input_ids[i].clone() for i in range(batch_size)]
-        
         embeddings = self.lm.get_input_embeddings()
         current_embeds = [embeddings(seq).unsqueeze(0) for seq in sequences]
         
         eos_flags = [False] * batch_size
+        annotations_added = [0] * batch_size
         active_indices = list(range(batch_size))
+        
         sep_embed = embeddings(self.token_sep_id_tensor).view(1, 1, -1)
         
         for _ in range(self.max_length - input_ids.shape[1]):
@@ -588,29 +656,47 @@ class MD(nn.Module):
                 break
                 
             next_active = []
+            
             for idx in active_indices:
                 if eos_flags[idx]:
                     continue
                 
-                if self.has_anno and self._has_sep(current_embeds[idx]).item():
-                    if self.enable_annotation:
-                        seq_ids = self.append_token(sequences[idx], self.token_sep_id_tensor, device)
+                if self.has_anno and self._has_sep(current_embeds[idx]).item() and self._need_anno(annotations_added[idx]):
+                    context_with_sep = torch.cat([
+                        current_embeds[idx],
+                        sep_embed
+                    ], dim=1)
                     
-                    seq_embeds = torch.cat([current_embeds[idx], sep_embed], dim=1)
                     annotation_embeds, annotation_ids, _ = self._get_annotation(
-                        seq_embeds,
+                        context_with_sep,
                         return_ids=True
                     )
-
+                    
                     if self.is_valid_anno(annotation_embeds):
                         if self.enable_annotation:
-                            sequences[idx] = self.append_token(seq_ids, annotation_ids, device)
-                            current_embeds[idx] = torch.cat([seq_embeds, annotation_embeds], dim=1)
+                            sequences[idx] = torch.cat([
+                                sequences[idx],
+                                self.token_sep_id_tensor.view(1),
+                                annotation_ids.squeeze(0)
+                            ])
+                            current_embeds[idx] = torch.cat([
+                                context_with_sep,
+                                annotation_embeds
+                            ], dim=1)
                         else:
-                            sequences[idx] = self.append_token(sequences[idx], annotation_ids, device)
-                            current_embeds[idx] = torch.cat([current_embeds[idx], annotation_embeds], dim=1)
+                            sequences[idx] = torch.cat([
+                                sequences[idx],
+                                annotation_ids.squeeze(0)
+                            ])
+                            current_embeds[idx] = torch.cat([
+                                current_embeds[idx],
+                                annotation_embeds
+                            ], dim=1)
+                        
+                        annotations_added[idx] += 1
                 
                 context_embeds = current_embeds[idx]
+                
                 if self.enable_fusion:
                     with torch.no_grad():
                         skill_output = self.skill_memory(context_embeds)
@@ -624,7 +710,7 @@ class MD(nn.Module):
                 next_token = self._get_next_token(lm_out.logits[:, -1, :])
                 next_token_embed = embeddings(next_token).view(1, 1, -1)
                 
-                sequences[idx] = self.append_token(sequences[idx], next_token, device)
+                sequences[idx] = torch.cat([sequences[idx], next_token.view(1)])
                 current_embeds[idx] = torch.cat([current_embeds[idx], next_token_embed], dim=1)
                 
                 if next_token.item() == self.tokenizer.eos_token_id:
@@ -635,8 +721,8 @@ class MD(nn.Module):
             active_indices = next_active
         
         return torch.nn.utils.rnn.pad_sequence(
-            sequences, 
-            batch_first=True, 
+            sequences,
+            batch_first=True,
             padding_value=self.tokenizer.pad_token_id
         )
     

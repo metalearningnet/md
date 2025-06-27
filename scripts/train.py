@@ -74,6 +74,7 @@ def train(config: dict):
         if not restore:
             model = MD()
         else:
+            print(f"Restore the model...")
             if ckpt_path:
                 model = MD.from_pretrained(checkpoint_path=ckpt_path)
             else:

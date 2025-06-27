@@ -54,13 +54,15 @@ MODEL = {
 ANNOTATION = {
     "words": 8,                     # Number of distinct word types allowed per annotation
     "max_length": 2,                # Max token length per annotation
-    "max_annotations": 4            # Max number of annotations per response (-1 for unlimited)
+    "max_annotations": 4,           # Max number of annotations per response (-1 for unlimited)
+    "min_interval": 128             # Minimum token distance between annotations
 }
 
 # Hint Generation Settings (used when skill_integration_strategy == 'hint')
 HINT = {
     "category": "minimal",          # Options: 'minimal' | 'standard' | 'enhanced' | 'advanced'
-    "max_hints": 16                 # Max number of hints per response (-1 for unlimited)
+    "max_hints": 16,                # Max number of hints per response (-1 for unlimited)
+    "min_interval": 32              # Minimum token distance between hints
 }
 
 # Checkpointing Configuration

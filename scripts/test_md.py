@@ -19,11 +19,12 @@ def show_results(results):
 
 class TestMD(unittest.TestCase):
     def setUp(self):
-        self.model = MD(attn='sdpa')
-        self.model.max_length = 64
         self.seq_len = 20
         self.batch_size = 2
-        self.hidden_size = self.model.lm_hidden_size
+        self.fast_test = FAST_TEST
+        self.model = MD(attn='sdpa')
+        self.model.max_length = 64
+        self.hidden_size = self.model.hidden_size
         self.params = self.model.get_trainable_parameters()
 
     def _create_dummy_inputs(self, batch_size: int = None) -> Dict:
@@ -32,7 +33,7 @@ class TestMD(unittest.TestCase):
         return {'input_ids': input_ids}
     
     def _create_inputs(self):
-        vocab_size = self.model.lm_num_tokens
+        vocab_size = self.model.num_tokens
         input_ids = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
         input_ids[:, 0] = torch.where(
             input_ids[:, 0] == self.model.token_sep_id,
@@ -52,14 +53,13 @@ class TestMD(unittest.TestCase):
         return input_ids
     
     def _create_anno_inputs(self):
-        vocab_size = self.model.lm_num_tokens
+        vocab_size = self.model.num_tokens
         input_ids = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
         input_labels = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
         input_ids[input_ids == self.model.token_sep_id] = 1
         return input_ids, input_labels
     
     def test_annotation_output_shapes(self):
-        """Test that output tensors have correct shapes"""
         if not self.model.has_anno:
             return
         
@@ -71,14 +71,14 @@ class TestMD(unittest.TestCase):
         self.assertEqual(result['logits'].shape[0], self.batch_size)
         
         self.assertEqual(result['states'].shape[2], self.hidden_size)
-        self.assertEqual(result['logits'].shape[2], self.model.lm_num_tokens)
+        self.assertEqual(result['logits'].shape[2], self.model.num_tokens)
         
         self.assertGreaterEqual(result['labels'].shape[1], self.seq_len)
         self.assertGreaterEqual(result['states'].shape[1], self.seq_len)
         self.assertGreaterEqual(result['logits'].shape[1], self.seq_len)
     
     def test_begin_token_generation(self):
-        if FAST_TEST:
+        if self.fast_test:
             return
 
         if self.model.has_anno:
@@ -97,7 +97,6 @@ class TestMD(unittest.TestCase):
             self.assertTrue(begin_found, "No SEP tokens generated in any sequence")
     
     def test_annotation_content(self):
-        """Verify annotation contains only special tokens"""
         if self.model.has_anno:
             input_ids = self._create_text_inputs()
             model_out = self.model.annotate(input_ids, input_ids)
@@ -135,8 +134,7 @@ class TestMD(unittest.TestCase):
                 show_results(self.model.tokenizer.decode(seq))
     
     def test_skillmemory_diversity(self):
-        """Ensure SkillMemory produces diverse outputs"""
-        if FAST_TEST:
+        if self.fast_test:
             return
         
         if self.model.has_anno:
@@ -144,7 +142,7 @@ class TestMD(unittest.TestCase):
             from torch.distributions import Categorical
             skill = self.model.skill_memory
             
-            states = torch.randn(5, 10, self.model.lm_hidden_size)
+            states = torch.randn(5, 10, self.model.hidden_size)
             
             with torch.no_grad():
                 outputs = skill(states)
@@ -162,8 +160,7 @@ class TestMD(unittest.TestCase):
             self.assertLess(similarity, 0.8, "Outputs not sensitive to input changes")
     
     def test_annotation_boundaries(self):
-        """Verify annotation placement and length constraints"""
-        if FAST_TEST:
+        if self.fast_test:
             return
         
         if self.model.has_anno:
@@ -185,8 +182,7 @@ class TestMD(unittest.TestCase):
                         self.fail("SEP tokens must be paired")
     
     def test_annotation_token_constraints(self):
-        """Verify only special tokens appear in annotations"""
-        if FAST_TEST:
+        if self.fast_test:
             return
         
         if self.model.has_anno:
@@ -207,8 +203,7 @@ class TestMD(unittest.TestCase):
                         self.assertIn(token, allowed_tokens, f"Invalid token {token} in annotation")
     
     def test_annotation_encapsulation(self):
-        """Verify all annotations are properly encapsulated"""
-        if FAST_TEST:
+        if self.fast_test:
             return
         
         if self.model.has_anno:
@@ -239,16 +234,16 @@ class TestMD(unittest.TestCase):
             max_expected = self.seq_len + self.model.anno_max_length + 2
             
             self.assertEqual(batch_size, self.batch_size)
-            self.assertEqual(vocab_size, self.model.lm_num_tokens)
+            self.assertEqual(vocab_size, self.model.num_tokens)
             self.assertTrue(min_expected <= output_seq_len <= max_expected,
                             f"Output length {output_seq_len} not in range "
                             f"[{min_expected}, {max_expected}]")
         else:
             self.assertEqual(outputs['logits'].shape, 
-                            (self.batch_size, self.seq_len, self.model.lm_num_tokens))
+                            (self.batch_size, self.seq_len, self.model.num_tokens))
 
     def test_forward_pass_dimensions(self):
-        if FAST_TEST:
+        if self.fast_test:
             return
 
         inputs = self._create_dummy_inputs()
@@ -261,18 +256,18 @@ class TestMD(unittest.TestCase):
             max_expected = self.seq_len + self.model.anno_max_length + 2
             
             self.assertEqual(batch_size, self.batch_size)
-            self.assertEqual(vocab_size, self.model.lm_num_tokens)
+            self.assertEqual(vocab_size, self.model.num_tokens)
             self.assertTrue(min_expected <= output_seq_len <= max_expected,
                             f"Output length {output_seq_len} not in range "
                             f"[{min_expected}, {max_expected}]")
         else:
             self.assertEqual(
                 outputs['logits'].shape,
-                (self.batch_size, self.seq_len, self.model.lm_num_tokens)
+                (self.batch_size, self.seq_len, self.model.num_tokens)
             )
     
     def test_generation_interface(self):
-        if FAST_TEST:
+        if self.fast_test:
             return
         
         inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt")
@@ -280,7 +275,7 @@ class TestMD(unittest.TestCase):
         self.assertEqual(outputs.shape[0], 1)
 
     def test_device_compatibility(self):
-        if FAST_TEST:
+        if self.fast_test:
             return
 
         inputs = self._create_dummy_inputs()

@@ -215,6 +215,15 @@ class Cfg:
         return self.hint.get('max_hints', -1)
     
     @property
+    def min_interval(self):
+        if self.skill_integration_strategy == 'hint':
+            return self.hint.get('min_interval', 1)
+        elif self.skill_integration_strategy == 'annotation':
+            return self.annotation.get('min_interval', 1)
+        else:
+            return 1
+    
+    @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
     
