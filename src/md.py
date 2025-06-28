@@ -123,8 +123,7 @@ class MD(nn.Module):
 
         self.skill_memory = SkillMemory(**self.skill_config)
     
-    def _init_action_projection(self):
-        """Adapter between SkillMemory and LM"""
+    def _init_adapter(self):
         self.fusion_gate = nn.Sequential(
             nn.Linear(2 * self.hidden_size, self.hidden_size),
             nn.Sigmoid()
@@ -167,7 +166,7 @@ class MD(nn.Module):
         assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
        
         if self.skill_integration_strategy == 'fusion':
-            self._init_action_projection()
+            self._init_adapter()
     
         self.ext_params = []
         
@@ -620,7 +619,7 @@ class MD(nn.Module):
             }
         else:
             if self.enable_fusion:
-                with torch.amp.autocast(self.device.type, enabled=False):
+                with torch.autocast(self.device.type, enabled=False):
                     skill_output = self.skill_memory(state_embeds)
                 action_logits = skill_output['action_logits']
                 action_embeds = self.action_proj(action_logits)

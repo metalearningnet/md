@@ -85,7 +85,6 @@ class SkillMemory(nn.Module):
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         
-        # Memory-Augmented Context Transformer
         self.mac = MemoryAsContextTransformer(
             num_tokens=num_tokens,
             dim=hidden_dim,
@@ -101,7 +100,6 @@ class SkillMemory(nn.Module):
         self.memory_var = nn.Parameter(torch.zeros(1, hidden_dim))
         nn.init.constant_(self.memory_var, math.log(0.5))
 
-        # Policy Network
         self.policy = PolicyNetwork(
             state_dim=state_dim,
             hidden_dim=hidden_dim,
@@ -161,7 +159,6 @@ class SkillMemory(nn.Module):
         return action_logits, m
 
     def forward(self, states):
-        # Process Through MAC
         if self.checkpoint_mac:
             def run_mac(states):
                 mac_output = self.mac(states)
@@ -171,7 +168,6 @@ class SkillMemory(nn.Module):
             mac_output = self.mac(states)
             m = self.mac_output_proj(mac_output)
 
-        # Skill-Conditioned Prior
         if self.checkpoint_prior:
             def run_prior(m):
                 prior_out, _ = self.prior_net(m)
@@ -229,7 +225,7 @@ class SkillMemory(nn.Module):
             neg_scores, torch.zeros_like(neg_scores)
         )
         
-        # Policy MI loss (with gradient reversal)
+        # Policy MI loss
         policy_scores = GradientReversal.apply(pos_scores)
         mi_policy_loss = F.binary_cross_entropy_with_logits(
             policy_scores, torch.ones_like(policy_scores)
@@ -262,7 +258,6 @@ class SkillMemory(nn.Module):
         else:
             real_logits = self.mmi_discriminator(real_input)
         
-        # Apply gradient reversal
         real_logits_rev = GradientReversal.apply(real_logits)
         adv_loss = F.binary_cross_entropy_with_logits(
             real_logits_rev, 
@@ -274,7 +269,6 @@ class SkillMemory(nn.Module):
         kl_loss = torch.clamp(kl_loss, min=-self.kl_epsilon, max=1e3)
         kl_loss = kl_loss.mean()
 
-        # Total loss with coefficients
         total_loss = (
             self.mi_coef * mi_loss +
             self.forward_coef * forward_loss +

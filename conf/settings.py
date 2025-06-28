@@ -3,7 +3,7 @@ MODEL = {
     "lm": {
         "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
         "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
-        "freeze": True,                    # Whether to freeze the pretrained LM weights during training
+        "freeze": False,                   # Whether to freeze the pretrained LM weights during training
         "max_length": 512,                 # Maximum token length for input + output sequences
         "max_target_length": 256,          # Maximum token length allowed for output sequences
         "max_prompt_length": 256           # Max tokens allowed in prompt before truncation
@@ -29,25 +29,28 @@ MODEL = {
         # Action Space Configuration
         "action_dim": 64            # Dimensionality of action embeddings
     },
-
-    # Skill-LM Adapter Configuration
-    "adapter": {
-        "min_proj_dim": 32,         # Minimum hidden dimension size in adapter layers
-        "proj_scale": 2,            # Expansion factor for intermediate adapter dimensions
-        "proj_dropout": 0.1,        # Dropout rate applied after adapter projections
-        "norm_position": "post"     # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
-    },
     
     # Training Objective Weights
     "lm_coef": 1.0,                 # Proportional weight for language modeling loss
     "skill_coef": 0.25,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
-    "context_window": 8,            # Lookahead window size for determining insertion position of skill output
+    "context_window": 8,                   # Lookahead window size for determining insertion position of skill output
     "skill_integration_strategy": "hint",  # Options: 'fusion' | 'annotation' | 'hint'
 
     # Inference Behavior
     "use_cache": False              # Use KV caching to accelerate autoregressive generation
+}
+
+# Fusion Settings (used when skill_integration_strategy == 'fusion')
+FUSION = {
+      # Skill-LM Adapter Configuration
+    "adapter": {
+        "min_proj_dim": 32,         # Minimum hidden dimension size in adapter layers
+        "proj_scale": 2,            # Expansion factor for intermediate adapter dimensions
+        "proj_dropout": 0.1,        # Dropout rate applied after adapter projections
+        "norm_position": "post"     # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
+    }
 }
 
 # Annotation Generation Settings (used when skill_integration_strategy == 'annotation')

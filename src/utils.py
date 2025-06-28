@@ -37,7 +37,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, ANNOTATION, HINT
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT
 
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
@@ -93,6 +93,7 @@ class Cfg:
     hint: dict
     model: dict
     loader: dict
+    fusion: dict
     md_file: str
     log_dir: Path
     test_log: str
@@ -172,10 +173,6 @@ class Cfg:
     @property
     def skill_integration_strategy(self):
         return self.model.get('skill_integration_strategy', 'hint')
-    
-    @property
-    def adapter(self):
-        return self.model['adapter']
 
     @property
     def use_cache(self):
@@ -197,6 +194,10 @@ class Cfg:
             return len(HINT_VOCAB[self.hint_category])
         else:
             return 0
+    
+    @property
+    def adapter(self):
+        return self.fusion['adapter']
     
     @property
     def anno_max_length(self):
@@ -259,6 +260,7 @@ cfg = Cfg(
     hint=HINT,
     model=MODEL,
     loader=LOADER,
+    fusion=FUSION,
     md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,

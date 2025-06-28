@@ -179,7 +179,6 @@ class MDLoader(Dataset):
     
     def collate_fn(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         if all('input_ids' in item for item in batch):
-            # Process text sequences
             input_ids = [item['input_ids'] for item in batch]
             padded_inputs = pad_sequence(
                 input_ids,
@@ -187,10 +186,8 @@ class MDLoader(Dataset):
                 padding_value=self.tokenizer.pad_token_id
             )
 
-            # Create masks with correct dimensions
             attention_mask = (padded_inputs != self.tokenizer.pad_token_id).long()
 
-            # Ensure labels have same seq_len as inputs
             labels = pad_sequence(
                 [item['labels'] for item in batch],
                 batch_first=True,
@@ -244,7 +241,6 @@ class MDLoader(Dataset):
         if not val_split or val_split <= 0:
             return self.get_dataloader(batch_size), None
 
-        # Create split
         val_size = int(len(self) * val_split)
         train_set, val_set = random_split(
             self,
