@@ -66,19 +66,17 @@ def train(config: dict):
             strategy = get_strategy()
             if strategy:
                 fabric_config.update({'strategy': strategy})
-        else:
-            torch.backends.cudnn.enabled = False
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
         if not restore:
-            model = MD()
+            model = MD(dist=dist)
         else:
             print(f"Restore the model...")
             if ckpt_path:
-                model = MD.from_pretrained(checkpoint_path=ckpt_path)
+                model = MD.from_pretrained(checkpoint_path=ckpt_path, dist=dist)
             else:
-                model = MD.from_pretrained()
+                model = MD.from_pretrained(dist=dist)
 
         trainable_params = [p for p in model.get_trainable_parameters() if p.requires_grad]
 
@@ -246,8 +244,8 @@ def main():
 
         'dist': args.dist,
         'fabric_config': {
-            'accelerator': 'auto',
-            'precision': cfg.precision
+            'devices': 'auto',
+            'precision': cfg.precision if not args.dist else '32-true'
         }
     }
 

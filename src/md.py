@@ -13,10 +13,12 @@ from utils import (
 )
 
 class MD(nn.Module):
-    def __init__(self, 
-                 config = cfg, 
-                 attn: str = None):
+    def __init__(self,
+                 config = cfg,
+                 attn: str = None,
+                 dist: bool = False):
         super().__init__()
+        self.dist = dist
         self.device = get_device()
         self.use_cache = config.use_cache
         self.model_dir = config.model_dir
@@ -739,14 +741,15 @@ class MD(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        checkpoint_path: str = cfg.ckpt_path,
         config = cfg,
         attn: str = None,
+        dist: bool = False,
+        checkpoint_path: str = cfg.ckpt_path,
         **kwargs
     ) -> 'MD':
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
-        model = cls(config=config, attn=attn, **kwargs)
+        model = cls(config=config, attn=attn, dist=dist, **kwargs)
         try:
             state_dict = torch.load(checkpoint_path, map_location='cpu')
         except Exception as e:

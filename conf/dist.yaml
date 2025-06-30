@@ -1,20 +1,10 @@
-# Distributed training strategy.
-# Options:
-#   - "ddp": Use Distributed Data Parallel
-#   - "deepspeed": Use DeepSpeed integration
-#   - "fsdp": Use Fully Sharded Data Parallel
-strategy: "deepspeed"
+strategy: "deepspeed" # Options: 'ddp' | 'fsdp' | 'deepspeed'
 
-# Number of nodes used in distributed training.
-# Set >1 for multi-node training.
-num_nodes: 1
+num_nodes: 1 # Number of nodes used in distributed training
 
-# IP address or hostname of the rank 0 (master) node.
-# Leave empty for single-node training.
-main_address: ""
+main_address: "" # Leave empty for single-node training
 
-# Communication port for distributed training.
-main_port: 1112
+main_port: 1112 # Communication port for distributed training
 
 deepspeed:
   optimizer:
@@ -32,9 +22,3 @@ deepspeed:
   activation_checkpointing:
     enable: true
     use_reentrant: false
-
-  bf16:
-    enabled: false
-
-  fp16:
-    enabled: false

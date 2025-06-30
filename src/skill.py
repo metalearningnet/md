@@ -70,20 +70,16 @@ class SkillMemory(nn.Module):
                  adv_coef: float = 0.5,
                  kl_coef: float = 0.05,
                  forward_coef: float = 0.1,
-                 checkpoint: dict = None):
+                 checkpoint: bool = False):
         
         super().__init__()
         info(f"Skill memory (state_dim: {state_dim} action_dim: {action_dim} hidden_dim: {hidden_dim})")
         
-        ckpt_config = checkpoint or {}
-        self.checkpoint_mac = ckpt_config.get('mac', False)
-        self.checkpoint_policy = ckpt_config.get('policy', False)
-        self.checkpoint_prior = ckpt_config.get('prior', False)
-        self.checkpoint_discriminators = ckpt_config.get('discriminators', False)
-
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
+
+        self.checkpoint = checkpoint
         
         self.mac = MemoryAsContextTransformer(
             num_tokens=num_tokens,
@@ -149,7 +145,7 @@ class SkillMemory(nn.Module):
     def get_action_logits(self, states, m):
         policy_input = torch.cat([states, m], dim=-1)
         
-        if self.checkpoint_policy:
+        if self.checkpoint:
             def run_policy(policy_input):
                 return torch.clamp(self.policy(policy_input), min=-50, max=50)
             action_logits = checkpoint(run_policy, policy_input)
@@ -159,7 +155,7 @@ class SkillMemory(nn.Module):
         return action_logits, m
 
     def forward(self, states):
-        if self.checkpoint_mac:
+        if self.checkpoint:
             def run_mac(states):
                 mac_output = self.mac(states)
                 return self.mac_output_proj(mac_output)
@@ -168,7 +164,7 @@ class SkillMemory(nn.Module):
             mac_output = self.mac(states)
             m = self.mac_output_proj(mac_output)
 
-        if self.checkpoint_prior:
+        if self.checkpoint:
             def run_prior(m):
                 prior_out, _ = self.prior_net(m)
                 prior_mean = self.prior_mean(prior_out)
@@ -206,7 +202,7 @@ class SkillMemory(nn.Module):
         neg_m = m[torch.randperm(m.size(0))]
         neg_pairs = torch.cat([states, neg_m], dim=-1)
 
-        if self.checkpoint_discriminators:
+        if self.checkpoint:
             def run_discriminator(pairs):
                 gru_out, _ = self.disc_gru(pairs)
                 return self.disc_linear(gru_out[:, -1])
@@ -251,7 +247,7 @@ class SkillMemory(nn.Module):
             m.detach()
         ], dim=-1)
         
-        if self.checkpoint_discriminators:
+        if self.checkpoint:
             def run_mmi_discriminator(inputs):
                 return self.mmi_discriminator(inputs)
             real_logits = checkpoint(run_mmi_discriminator, real_input)

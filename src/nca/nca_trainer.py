@@ -470,7 +470,10 @@ class NCATrainer(Trainer):
             for i in range(total):
                 input_ids = batch[f'A{i}_input_ids']
                 input_labels = batch[f'A{i}_labels']
-                with torch.autocast(model.device.type, dtype=model.dtype):
+                if not self.model.dist:
+                    with torch.autocast(model.device.type, dtype=model.dtype):
+                        model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
+                else:
                     model_out = model.annotate(input_ids, input_labels=input_labels, return_loss=True)
                 logits = model_out['logits']
                 labels = model_out['labels']

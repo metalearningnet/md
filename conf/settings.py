@@ -4,18 +4,18 @@ MODEL = {
         "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
         "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
         "freeze": False,                   # Whether to freeze the pretrained LM weights during training
-        "max_length": 512,                 # Maximum token length for input + output sequences
-        "max_target_length": 256,          # Maximum token length allowed for output sequences
-        "max_prompt_length": 256           # Max tokens allowed in prompt before truncation
+        "max_length": 256,                 # Maximum token length for input + output sequences
+        "max_target_length": 128,          # Maximum token length allowed for output sequences
+        "max_prompt_length": 128           # Max tokens allowed in prompt before truncation
     },
 
     # Skill Memory Configuration
     "skill": {
         # Memory Architecture Parameters (MAC - Memory as Context)
-        "mac_persistent_mem_tokens": 64,   # Tokens reserved for long-lasting contextual memory
-        "mac_longterm_mem_tokens": 64,     # Tokens allocated for extended memory retention
+        "mac_persistent_mem_tokens": 32,   # Tokens reserved for long-lasting contextual memory
+        "mac_longterm_mem_tokens": 32,     # Tokens allocated for extended memory retention
         "mac_depth": 1,                    # Number of stacked MAC blocks
-        "mac_segment_len": 256,            # Segment length processed per MAC block
+        "mac_segment_len": 128,            # Segment length processed per MAC block
         "mac_neural_memory_qkv_receives_diff_views": True,  # If True, Q/K/V projections come from different layers/views
         "mac_neural_mem_weight_residual": True,  # Adds residual connections in neural memory weight updates
 
@@ -35,7 +35,7 @@ MODEL = {
     "skill_coef": 0.25,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
-    "context_window": 8,                   # Lookahead window size for determining insertion position of skill output
+    "context_window": 4,                   # Lookahead window size for determining insertion position of skill output
     "skill_integration_strategy": "hint",  # Options: 'fusion' | 'annotation' | 'hint'
 
     # Inference Behavior
@@ -72,13 +72,8 @@ HINT = {
 CKPT = {
     # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
-        "lm": True,                 # Gradient checkpointing for the Language Model
-        "skill": {                  # Skill Memory
-            "mac": True,            #   MAC layers
-            "policy": True,         #   Policy network
-            "prior": True,          #   Skill prior model
-            "discriminators": True  #   MI discriminators
-        }
+        "lm": False,                # Gradient checkpointing for the Language Model
+        "skill": False              # Skill Memory
     }
 }
 
