@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn as nn
 from skill import SkillMemory
@@ -8,9 +9,38 @@ from huggingface_hub import model_info
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
-    cfg, info, get_device, load_peft_config, get_special_token_by_index,
+    cfg, info, warn, get_device, load_peft_config, get_special_token_by_index,
     LogitsDecoder, SEP_TOKEN, HINT_VOCAB, RESERVED_TOKENS
 )
+
+class AdaptedEmbedding(nn.Module):
+    def __init__(self, original_embedding, peft_config):
+        super().__init__()
+        self.original = original_embedding
+        vocab_size, embedding_dim = original_embedding.weight.shape
+        
+        self.lora_A = nn.Parameter(
+            torch.empty(peft_config.r, vocab_size)
+        )
+        self.lora_B = nn.Parameter(
+            torch.empty(embedding_dim, peft_config.r)
+        )
+        
+        if getattr(peft_config, "init_lora_weights", "gaussian") == "gaussian":
+            nn.init.normal_(self.lora_A, std=1/peft_config.r)
+            nn.init.zeros_(self.lora_B)
+        else:
+            nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B)
+        
+        self.peft_config = peft_config
+        self.scaling = peft_config.lora_alpha / peft_config.r
+        
+    def forward(self, input):
+        orig_out = self.original(input)
+        one_hot = F.one_hot(input, num_classes=self.original.num_embeddings).float()
+        lora_out = (one_hot @ self.lora_A.T @ self.lora_B.T) * self.scaling
+        return orig_out + lora_out
 
 class MD(nn.Module):
     def __init__(self,
@@ -54,11 +84,50 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
+        self.sep_temperature = 0.5
+        self.sep_noise_scale = 0.1
+        self.anno_temperature = 0.5
         self.density_strength = 1.0
         self.diversity_strength = 1.0
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
-        info(f"LM {self.config.model_type} (hidden_size: {self.hidden_size})")
+        info(f"MD (base_model: {self.config.model_type} hidden_size: {self.hidden_size} strategy: '{self.skill_integration_strategy}' special_tokens: {self.num_special_words})")
+
+    def _init_peft(self, model):
+        embedding_layer = model.model.embed_tokens
+        base_config = load_peft_config()
+        target_modules = list(set(base_config.get('target_modules', []) + ['embed_tokens']))
+        modules_to_save = list(set(base_config.get('modules_to_save', []) + ['embed_tokens']))
+        info(f'target_modules: {", ".join(target_modules)}')
+        info(f'modules_to_save: {", ".join(modules_to_save)}')
+
+        peft_config = LoraConfig(
+            r=base_config.get('r', 8),
+            target_modules=target_modules,
+            modules_to_save=modules_to_save,
+            bias=base_config.get('bias', 'none'),
+            use_dora=base_config.get('use_dora', False),
+            lora_alpha=base_config.get('lora_alpha', 16),
+            use_rslora=base_config.get('use_rslora', True),
+            lora_dropout=base_config.get('lora_dropout', 0.1),
+            task_type=base_config.get('task_type', 'CAUSAL_LM'),
+            fan_in_fan_out=base_config.get('fan_in_fan_out', False),
+            init_lora_weights=base_config.get('init_lora_weights', 'gaussian')
+        )
+        
+        try:
+            return get_peft_model(model, peft_config)
+        except Exception as e:
+            try:
+                warn(f"Using adapted embeddings fallback: {str(e)}")
+                model.model.embed_tokens = AdaptedEmbedding(embedding_layer, peft_config)
+                return model
+            except Exception as e:
+                warn(f"Using minimal trainable embeddings: {str(e)}")
+                for param in model.parameters():
+                    param.requires_grad = False
+                self._make_special_token_embeddings_trainable(model)
+                return model
 
     def _init_lm(self):
         config = AutoConfig.from_pretrained(self.model_dir)
@@ -75,19 +144,14 @@ class MD(nn.Module):
             trust_remote_code=True,
             attn_implementation=self.attn
         )
-
+        
         self._init_tokenizer(model)
         
         if self.lm_checkpoint:
             model.gradient_checkpointing_enable()
         
         if not self.lm_freeze:
-            peft_config_dict = load_peft_config()
-            peft_config = LoraConfig(**peft_config_dict)
-            model = get_peft_model(model, peft_config)
-        else:
-            for param in model.parameters():
-                param.requires_grad = False
+            model = self._init_peft(model)
         
         self.lm = model
         self.config = config
@@ -164,24 +228,40 @@ class MD(nn.Module):
         
         assert self.action_proj[-2].out_features == self.hidden_size
 
+    def _make_special_token_embeddings_trainable(self, model):
+        embedding_layer = model.get_input_embeddings()
+        device = embedding_layer.weight.device
+        
+        embedding_layer.weight.requires_grad_(True)
+        
+        self.register_buffer('_trainable_mask', torch.zeros_like(embedding_layer.weight, dtype=torch.bool, device=device))
+        
+        with torch.no_grad():
+            for token_id in self.token_extended_ids:
+                self._trainable_mask[token_id] = True
+        
+        def _hook(grad):
+            return grad * self._trainable_mask.to(grad.device)
+        
+        embedding_layer.weight.register_hook(_hook)
+        
+        with torch.no_grad():
+            for i, param in enumerate(embedding_layer.weight):
+                if i not in self.token_extended_ids:
+                    param.requires_grad_(False)
+    
     def _init_params(self):
         assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
        
         if self.skill_integration_strategy == 'fusion':
             self._init_adapter()
-    
-        self.ext_params = []
         
         if self.lm_freeze:
             for param in self.lm.parameters():
                 param.requires_grad = False
-            
-            embedding_layer = self.lm.get_input_embeddings()
-            for id in self.token_extended_ids:
-                self.ext_params.append(embedding_layer.weight[id])
+            self._make_special_token_embeddings_trainable(self.lm)
         
         trainable_params = self.get_trainable_parameters()
-
         for param in trainable_params:
             param.requires_grad = True
     
@@ -200,7 +280,7 @@ class MD(nn.Module):
         if special_tokens:
             self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
             self.tokenizer.add_special_tokens({'additional_special_tokens': special_tokens})
-        
+
             self.token_sep_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)
             self.token_special_ids = self.tokenizer.convert_tokens_to_ids(special_tokens)
             self.token_extended_ids =  self.token_special_ids + [self.token_sep_id]
@@ -217,15 +297,14 @@ class MD(nn.Module):
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
-        
+
             assert len(set(self.token_special_ids)) == len(self.token_special_ids), \
                 f"Duplicate special token IDs detected: {self.token_special_ids}"
             
             assert len(self.token_special_ids) == self.num_special_words, \
                 f"Expected {self.num_special_words} special tokens, got {len(self.token_special_ids)}"
-    
+
     def _has_sep(self, context_embeds: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Determine if SkillMemory would generate SEP token at the end of context"""
         if mask is not None:
             context_embeds = context_embeds * mask.unsqueeze(-1)
         
@@ -233,13 +312,33 @@ class MD(nn.Module):
             skill_output = self.skill_memory(context_embeds)
 
         step_logits = skill_output['action_logits'][:, -1, :]
+        sep_index = self.action_dim - 1
 
         if self.training:
-            sep_prob = torch.nn.functional.softmax(step_logits, dim=-1)[:, self.action_dim - 1]
-            return sep_prob > 0.5
+            non_sep_mask = torch.ones_like(step_logits, dtype=torch.bool)
+            non_sep_mask[:, sep_index] = False
+            other_logits = step_logits[non_sep_mask].view(step_logits.size(0), -1)
+            
+            logit_gap = step_logits[:, sep_index] - other_logits.mean(dim=-1)
+            sep_prob = torch.sigmoid(logit_gap / max(self.sep_temperature, 1e-6))
+
+            with torch.no_grad():
+                if not hasattr(self, '_sep_prob_ema'):
+                    self.register_buffer('_sep_prob_ema', sep_prob.mean())
+                self._sep_prob_ema = 0.9 * self._sep_prob_ema + 0.1 * sep_prob.mean()
+                threshold = self._sep_prob_ema * 1.1
+
+            noise = torch.randn_like(step_logits) * self.sep_noise_scale
+            noise[:, sep_index] = 0
+            noisy_logits = step_logits + noise
+            
+            noisy_other_logits = noisy_logits[non_sep_mask].view(noisy_logits.size(0), -1)
+            final_logit_gap = noisy_logits[:, sep_index] - noisy_other_logits.mean(dim=-1)
+            final_sep_prob = torch.sigmoid(final_logit_gap / max(self.sep_temperature, 1e-6))
+
+            return final_sep_prob > threshold
         else:
-            anno_indices = torch.argmax(step_logits, dim=-1)
-            return anno_indices == (self.action_dim - 1)
+            return torch.argmax(step_logits, dim=-1) == sep_index
     
     def _get_annotation(self, 
                         context_embeds: torch.Tensor, 
@@ -258,9 +357,10 @@ class MD(nn.Module):
         if self.enable_annotation:
             sep_count = torch.zeros(batch_size, dtype=torch.int, device=device)
         
+        embeding_layer = self.lm.get_input_embeddings()
         special_ids = self.token_special_ids_tensor
-        special_embeddings = self.lm.get_input_embeddings()(special_ids)
-        sep_embed = self.lm.get_input_embeddings()(self.token_sep_id_tensor) if self.enable_annotation else None
+        special_embeddings = embeding_layer(special_ids)
+        sep_embed = embeding_layer(self.token_sep_id_tensor) if self.enable_annotation else None
         
         max_length = self.anno_max_length + 1 if self.enable_annotation else 1
         for step_idx in range(max_length):
@@ -337,9 +437,13 @@ class MD(nn.Module):
     
     def _get_anno_next_token(self, logits):
         if self.training:
-            return torch.nn.functional.gumbel_softmax(
-                logits,
-                tau=0.1,
+            noise_mask = torch.ones_like(logits)
+            noise_mask[..., -1] = 0  # Do not perturb SEP token selection
+            perturbed_logits = logits + (torch.randn_like(logits) * 0.1 * noise_mask)
+            
+            return F.gumbel_softmax(
+                perturbed_logits,
+                tau=self.anno_temperature,
                 hard=True,
                 dim=-1
             ).argmax(-1)
@@ -420,9 +524,10 @@ class MD(nn.Module):
         assert self.has_anno, "Annotation/Hint mode must be enabled"
         
         device = input_ids.device
-        state_embeds = self.lm.get_input_embeddings()(input_ids)
+        embedding_layer = self.lm.get_input_embeddings()
+        state_embeds = embedding_layer(input_ids)
         batch_size, seq_len, hidden_size = state_embeds.shape
-        sep_embed = self.lm.get_input_embeddings()(self.token_sep_id_tensor).view(1, 1, -1)
+        sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
         
         all_embeds = []
         all_labels = []
@@ -573,7 +678,8 @@ class MD(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=device)
         
-        state_embeds = self.lm.get_input_embeddings()(input_ids)
+        embedding_layer = self.lm.get_input_embeddings()
+        state_embeds = embedding_layer(input_ids)
         batch_size, _, hidden_size = state_embeds.shape
         
         if self.has_anno:
@@ -582,7 +688,7 @@ class MD(nn.Module):
             new_embeds = []
             new_labels = []
             
-            sep_embed = self.lm.get_input_embeddings()(self.token_sep_id_tensor).view(1, -1)
+            sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, -1)
 
             for i in range(batch_size):
                 seq_embeds = state_embeds[i]
@@ -645,14 +751,14 @@ class MD(nn.Module):
     def _generate(self, input_ids: torch.Tensor) -> torch.Tensor:
         batch_size = input_ids.shape[0]
         sequences = [input_ids[i].clone() for i in range(batch_size)]
-        embeddings = self.lm.get_input_embeddings()
-        current_embeds = [embeddings(seq).unsqueeze(0) for seq in sequences]
+        embedding_layer = self.lm.get_input_embeddings()
+        current_embeds = [embedding_layer(seq).unsqueeze(0) for seq in sequences]
         
         eos_flags = [False] * batch_size
         annotations_added = [0] * batch_size
         active_indices = list(range(batch_size))
         
-        sep_embed = embeddings(self.token_sep_id_tensor).view(1, 1, -1)
+        sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
         
         for _ in range(self.max_length - input_ids.shape[1]):
             if not active_indices:
@@ -711,7 +817,7 @@ class MD(nn.Module):
                     lm_out = self.lm(inputs_embeds=context_embeds)
                 
                 next_token = self._get_next_token(lm_out.logits[:, -1, :])
-                next_token_embed = embeddings(next_token).view(1, 1, -1)
+                next_token_embed = embedding_layer(next_token).view(1, 1, -1)
                 
                 sequences[idx] = torch.cat([sequences[idx], next_token.view(1)])
                 current_embeds[idx] = torch.cat([current_embeds[idx], next_token_embed], dim=1)
@@ -778,8 +884,9 @@ class MD(nn.Module):
             ])
         
         trainable_params.extend(self.skill_memory.parameters())
+
+        for param in self.lm.parameters():
+            if param.requires_grad:
+                trainable_params.append(param)
         
-        if not self.lm_freeze:
-            trainable_params.extend(self.lm.parameters())
-        
-        return trainable_params + self.ext_params
+        return trainable_params

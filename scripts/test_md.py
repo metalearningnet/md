@@ -19,7 +19,7 @@ def show_results(results):
 
 class TestMD(unittest.TestCase):
     def setUp(self):
-        self.seq_len = 20
+        self.seq_len = 50
         self.batch_size = 2
         self.fast_test = FAST_TEST
         self.model = MD(attn='sdpa')

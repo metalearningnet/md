@@ -77,11 +77,12 @@ class MDLoader(Dataset):
             self.dataset = dataset
         else:
             self._load_dataset(path, name, split, split_ratio, seed)
+        
         fields = [
             field for field, feature in self.dataset.features.items()
             if isinstance(feature, Value) and feature.dtype == 'string'
         ]
-        info(f'fields: {', '.join(fields)}')
+        
         if fields and 'text' not in fields:
             from utils import DatasetMap
             dataset_map = DatasetMap(

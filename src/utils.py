@@ -41,7 +41,7 @@ from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATI
 
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
-VERBOSE = getattr(settings, 'VERBOSE', False)
+VERBOSE = getattr(settings, 'VERBOSE', True)
 
 REMOVE_UNUSED_COLUMNS = False
 GRADIENT_ACCUMULATION_STEPS = 1

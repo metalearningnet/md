@@ -73,7 +73,7 @@ class SkillMemory(nn.Module):
                  checkpoint: bool = False):
         
         super().__init__()
-        info(f"Skill memory (state_dim: {state_dim} action_dim: {action_dim} hidden_dim: {hidden_dim})")
+        info(f"Skill memory (state_size: {state_dim} action_size: {action_dim})")
         
         self.state_dim = state_dim
         self.action_dim = action_dim
