@@ -60,22 +60,20 @@ class TestMD(unittest.TestCase):
         return input_ids, input_labels
     
     def test_annotation_output_shapes(self):
-        if not self.model.has_anno:
-            return
-        
-        input_ids, input_labels = self._create_anno_inputs()
-        result = self.model.annotate(input_ids, input_labels)
-        
-        self.assertEqual(result['labels'].shape[0], self.batch_size)
-        self.assertEqual(result['states'].shape[0], self.batch_size)
-        self.assertEqual(result['logits'].shape[0], self.batch_size)
-        
-        self.assertEqual(result['states'].shape[2], self.hidden_size)
-        self.assertEqual(result['logits'].shape[2], self.model.num_tokens)
-        
-        self.assertGreaterEqual(result['labels'].shape[1], self.seq_len)
-        self.assertGreaterEqual(result['states'].shape[1], self.seq_len)
-        self.assertGreaterEqual(result['logits'].shape[1], self.seq_len)
+        if self.model.has_anno:
+            input_ids, input_labels = self._create_anno_inputs()
+            result = self.model.annotate(input_ids, input_labels)
+            
+            self.assertEqual(result['labels'].shape[0], self.batch_size)
+            self.assertEqual(result['states'].shape[0], self.batch_size)
+            self.assertEqual(result['logits'].shape[0], self.batch_size)
+            
+            self.assertEqual(result['states'].shape[2], self.hidden_size)
+            self.assertEqual(result['logits'].shape[2], self.model.num_tokens)
+            
+            self.assertGreaterEqual(result['labels'].shape[1], self.seq_len)
+            self.assertGreaterEqual(result['states'].shape[1], self.seq_len)
+            self.assertGreaterEqual(result['logits'].shape[1], self.seq_len)
     
     def test_begin_token_generation(self):
         if self.fast_test:
