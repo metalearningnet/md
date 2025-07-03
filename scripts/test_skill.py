@@ -12,13 +12,13 @@ from skill import SkillMemory
 
 class TestSkill(unittest.TestCase):
     def setUp(self):
-        self.batch_size = 4
         self.seq_len = 10
+        self.batch_size = 4
         self.state_dim = 64
         self.action_dim = 4
         self.hidden_dim = 64
         
-        self.states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)    
+        self.states = torch.randn(self.batch_size, self.seq_len, self.hidden_dim)
         self.skill_memory = SkillMemory(
             state_dim=self.state_dim,
             action_dim=self.action_dim,
@@ -30,8 +30,8 @@ class TestSkill(unittest.TestCase):
     
     def test_initialization(self):
         self.assertTrue(hasattr(self.skill_memory, 'mac'))
-        self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
         self.assertTrue(hasattr(self.skill_memory, 'policy'))
+        self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
         
         output_layer = self.skill_memory.policy.output_layer
         if isinstance(output_layer, nn.Sequential):

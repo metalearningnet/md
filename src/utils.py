@@ -545,32 +545,31 @@ def md_train(
     po = get_po(model)
     
     metrics = {
-        'num_batches': 0,
+        'steps': 0,
         'total_loss': 0.0
     }
 
-    total_samples = 0
-    last_log_step = 0
     writer = SummaryWriter(log_dir) if log_dir else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     if num_samples > 0:
-        max_batches = min(num_samples, len(loader))
-        loader_iter = iter(islice(loader, max_batches))
-        pbar_total = max_batches
+        max_steps = min(num_samples, len(loader))
+        loader_iter = iter(islice(loader, max_steps))
     else:
+        max_steps = len(loader)
         loader_iter = iter(loader)
-        pbar_total = len(loader)
-
+    
     pbar = tqdm(
         loader_iter,
         desc=f'Training',
         disable=not fabric.is_global_zero,
         dynamic_ncols=True,
-        total=pbar_total
+        total=max_steps
     )
 
+    model.set_max_steps(max_steps)
     for step, batch in enumerate(pbar):
+        model.step()
         if po:
             loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
             po.store_metrics(metrics=train_metrics, train_eval='train')
@@ -603,26 +602,19 @@ def md_train(
             if (step + 1) % gradient_accumulation_steps == 0:
                 model._forward_module.step()
 
-        total_samples += 1
-        metrics['num_batches'] += 1
+        metrics['steps'] += 1
         metrics['total_loss'] += loss.item()
         
         if writer:
-            if num_samples > 0:
-                sample_progress = int((total_samples / num_samples) * 100)
-            else:
-                estimated_total = len(loader)
-                sample_progress = int((total_samples / estimated_total) * 100)
-
-            if sample_progress >= log_interval and (sample_progress // log_interval) > (last_log_step // log_interval):
-                writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
-                last_log_step = sample_progress
+            sample_progress = int((metrics['steps'] / max_steps) * 100)
+            if sample_progress % log_interval == 0:
+                writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
     
     pbar.close()
 
     if po is None:
-        if metrics['num_batches'] > 0:
-            metrics['total_loss'] /= metrics['num_batches']
+        if metrics['steps'] > 0:
+            metrics['total_loss'] /= metrics['steps']
     else:
         train_metrics = po.get_metrics()['train']
         for key, val in train_metrics.items():
@@ -648,31 +640,29 @@ def md_validate(
     po = get_po(model)
 
     metrics = {
-        'num_batches': 0,
+        'steps': 0,
         'total_loss': 0.0
     }
 
-    total_samples = 0
     writer = SummaryWriter(log_dir) if log_dir else None
     lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
 
+    if num_samples > 0:
+        max_steps = min(num_samples, len(loader))
+        loader_iter = iter(islice(loader, max_steps))
+    else:
+        max_steps = len(loader)
+        loader_iter = iter(loader)
+    
+    pbar = tqdm(
+        loader_iter,
+        desc='Validating',
+        disable=not fabric.is_global_zero,
+        dynamic_ncols=True,
+        total=max_steps
+    )
+
     with torch.no_grad():
-        if num_samples > 0:
-            max_batches = min(num_samples, len(loader))
-            loader_iter = iter(islice(loader, max_batches))
-            pbar_total = max_batches
-        else:
-            loader_iter = iter(loader)
-            pbar_total = len(loader)
-        
-        pbar = tqdm(
-            loader_iter,
-            desc='Validating',
-            disable=not fabric.is_global_zero,
-            dynamic_ncols=True,
-            total=pbar_total
-        )
-        
         for batch in pbar:
             if po:
                 loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval')
@@ -697,29 +687,24 @@ def md_validate(
                     lm_labels.flatten()[lm_mask]
                 ) if lm_mask.any() else 0.0
             
-            total_samples += 1
-            metrics['num_batches'] += 1
+            metrics['steps'] += 1
             metrics['total_loss'] += loss.item()
 
             if writer:
-                if num_samples > 0:
-                    sample_progress = int((total_samples / num_samples) * 100)
-                else:
-                    sample_progress = int((total_samples / len(loader)) * 100)
-
+                sample_progress = int((metrics['steps'] / max_steps) * 100)
                 if sample_progress % log_interval == 0:
-                    writer.add_scalar("Loss/batch", loss.item(), metrics['num_batches'])
+                    writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
 
     if po is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-        gathered_samples = fabric.all_gather(torch.tensor(total_samples)).sum()
+        gathered_samples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
         if fabric.is_global_zero and gathered_samples > 0:
             avg_loss = gathered_loss / gathered_samples
             metrics['avg_loss'] = avg_loss
             print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
 
-        if metrics['num_batches'] > 0:
-            metrics['total_loss'] /= metrics['num_batches']
+        if metrics['steps'] > 0:
+            metrics['total_loss'] /= metrics['steps']
     else:
         eval_metrics = po.get_metrics()['eval']
         for key, val in eval_metrics.items():

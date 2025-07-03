@@ -50,6 +50,7 @@ class MD(nn.Module):
         super().__init__()
         self.dist = dist
         self.device = get_device()
+
         self.use_cache = config.use_cache
         self.model_dir = config.model_dir
         self.max_hints = config.max_hints
@@ -84,17 +85,28 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
-        self.sep_temperature = 1.0
-        self.sep_noise_scale = 0.2
-        self.anno_temperature = 1.0
+        self.sep_temperature = 0.7
+        self.sep_noise_scale = 0.1
+        self.anno_temperature = 0.7
+        self.anno_noise_scale = 0.1
         self.density_strength = 1.0
         self.diversity_strength = 1.0
-        self.sep_lookback_window = 10
+        self.sep_lookback_window = 16
+
+        self.max_steps = 0
+        self.current_step = 0
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
         info(f"MD (base_model: {self.config.model_type} hidden_size: {self.hidden_size} strategy: '{self.skill_integration_strategy}' special_tokens: {self.num_special_words})")
 
+    def set_max_steps(self, max_steps):
+        self.max_steps = max_steps
+    
+    def step(self):
+        if self.current_step < self.max_steps:
+            self.current_step += 1
+    
     def _init_peft(self, model):
         embedding_layer = model.model.embed_tokens
         base_config = load_peft_config()
@@ -146,7 +158,7 @@ class MD(nn.Module):
             trust_remote_code=True,
             attn_implementation=self.attn
         )
-        
+        self.config = config
         self._init_tokenizer(model)
         
         if self.lm_checkpoint:
@@ -156,7 +168,6 @@ class MD(nn.Module):
             model = self._init_peft(model)
         
         self.lm = model
-        self.config = config
         self.hidden_size = getattr(
             self.config,
             'hidden_size',
@@ -293,8 +304,9 @@ class MD(nn.Module):
             self.register_buffer('token_sep_id_tensor', token_sep_id_tensor)
             self.register_buffer('token_special_ids_tensor', token_special_ids_tensor)
             
-            self.num_tokens = len(self.tokenizer)
-            model.resize_token_embeddings(self.num_tokens)
+            model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
+            self.num_tokens = model.get_output_embeddings().weight.shape[0]
+            self.config.vocab_size = self.num_tokens
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -334,25 +346,33 @@ class MD(nn.Module):
             has_content = ~window_pad_mask.any(dim=1)
 
         if self.training:
+            final_tau = 0.5
+            initial_tau = 1.0
+            if self.max_steps:
+                tau = initial_tau - (initial_tau - final_tau) * (self.current_step / self.max_steps)
+            else:
+                tau = self.sep_temperature
+        
             noise_mask = torch.ones_like(step_logits, dtype=torch.bool)
             noise_mask[:, sep_index] = False
             noisy_logits = step_logits + (torch.randn_like(step_logits) * self.sep_noise_scale * noise_mask)
             
             gumbel_samples = F.gumbel_softmax(
                 noisy_logits,
-                tau=self.sep_temperature,
+                tau=tau,
                 hard=False,
                 dim=-1
             )
             
             return (gumbel_samples[:, sep_index] > 0.5) & has_content
         else:
-            sep_pred = torch.argmax(step_logits, dim=-1) == sep_index
+            probs = F.softmax(step_logits / self.sep_temperature, dim=-1)
+            sep_pred = torch.multinomial(probs, num_samples=1).squeeze(-1) == sep_index
             return sep_pred & has_content
     
-    def _get_annotation(self, 
-                        context_embeds: torch.Tensor, 
-                        return_ids: bool = True, 
+    def _get_annotation(self,
+                        context_embeds: torch.Tensor,
+                        return_ids: bool = True,
                         return_loss: bool = False):
         if context_embeds.dim() == 2:
             context_embeds = context_embeds.unsqueeze(0)
@@ -447,18 +467,26 @@ class MD(nn.Module):
     
     def _get_anno_next_token(self, logits):
         if self.training:
+            final_tau = 0.5
+            initial_tau = 1.0
+            if self.max_steps:
+                tau = initial_tau - (initial_tau - final_tau) * (self.current_step / self.max_steps)
+            else:
+                tau = self.anno_temperature
+
             noise_mask = torch.ones_like(logits)
             noise_mask[..., -1] = 0  # Do not perturb SEP token selection
-            perturbed_logits = logits + (torch.randn_like(logits) * 0.1 * noise_mask)
+            perturbed_logits = logits + (torch.randn_like(logits) * self.anno_noise_scale * noise_mask)
             
             return F.gumbel_softmax(
                 perturbed_logits,
-                tau=self.anno_temperature,
+                tau=tau,
                 hard=True,
                 dim=-1
             ).argmax(-1)
         else:
-            return torch.argmax(logits, dim=-1)
+            probs = F.softmax(logits / self.anno_temperature, dim=-1)
+            return torch.multinomial(probs, num_samples=1).squeeze(-1)
     
     def _get_next_token(self, logits):
         return self.logits_decoder.decode_logits(logits)

@@ -4,8 +4,8 @@ MODEL = {
         "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
         "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
         "freeze": False,                   # Whether to freeze the pretrained LM weights during training
-        "max_length": 256,                 # Maximum token length for input + output sequences
-        "max_target_length": 128,          # Maximum token length allowed for output sequences
+        "max_length": 512,                 # Maximum token length for input + output sequences
+        "max_target_length": 384,          # Maximum token length allowed for output sequences
         "max_prompt_length": 128           # Max tokens allowed in prompt before truncation
     },
 

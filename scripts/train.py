@@ -10,7 +10,10 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import MD_TAG, md_train, md_validate, cfg, add_dist_config, default_dataset_path, get_strategy, clear_directory
+from utils import (
+    MD_TAG, md_train, md_validate, cfg, add_dist_config,
+    default_dataset_path, get_strategy, clear_directory, info
+)
 
 def train(config: dict):
     """
@@ -72,7 +75,7 @@ def train(config: dict):
         if not restore:
             model = MD(dist=dist)
         else:
-            print(f"Restore the model...")
+            info(f"Restore the model...")
             if ckpt_path:
                 model = MD.from_pretrained(checkpoint_path=ckpt_path, dist=dist)
             else:
@@ -246,7 +249,9 @@ def main():
         'fabric_config': {
             'devices': 'auto',
             'precision': cfg.precision if not args.dist else '32-true'
-        }
+        },
+        
+        'restore': args.restore
     }
 
     if args.dist:
