@@ -55,21 +55,21 @@ class ResidualBlock(nn.Module):
 
 class SkillMemory(nn.Module):
     def __init__(self,
-                 state_dim: int = 892,
-                 num_tokens: int = 151936,
-                 action_dim: int = 1024,
-                 hidden_dim: int = 892,
-                 mac_persistent_mem_tokens: int = 128,
-                 mac_longterm_mem_tokens: int = 128,
-                 mac_depth: int = 4,
-                 mac_segment_len: int = 512,
+                 state_dim: int = 1152,
+                 num_tokens: int = 262152,
+                 action_dim: int = 128,
+                 hidden_dim: int = 1152,
+                 mac_persistent_mem_tokens: int = 16,
+                 mac_longterm_mem_tokens: int = 48,
+                 mac_depth: int = 2,
+                 mac_segment_len: int = 32,
                  mac_neural_memory_qkv_receives_diff_views: bool = False,
                  mac_neural_mem_weight_residual: bool = False,
-                 mi_coef: float = 1.0,
-                 entropy_coef: float = 0.5,
-                 adv_coef: float = 0.5,
+                 mi_coef: float = 0.8,
+                 entropy_coef: float = 0.3,
+                 adv_coef: float = 0.3,
                  kl_coef: float = 0.05,
-                 forward_coef: float = 0.1,
+                 forward_coef: float = 0.2,
                  checkpoint: bool = False):
         
         super().__init__()

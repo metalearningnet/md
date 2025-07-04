@@ -98,7 +98,7 @@ class MD(nn.Module):
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
-        info(f"MD (base_model: {self.config.model_type} hidden_size: {self.hidden_size} strategy: '{self.skill_integration_strategy}' special_tokens: {self.num_special_words})")
+        info(f"MD (hidden_size: {self.hidden_size} strategy: '{self.skill_integration_strategy}' special_tokens: {self.num_special_words})")
 
     def set_max_steps(self, max_steps):
         self.max_steps = max_steps
@@ -307,6 +307,8 @@ class MD(nn.Module):
             model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
             self.config.vocab_size = self.num_tokens
+
+            info(f'LM (model_type: {self.config.model_type} vocab_size: {self.num_tokens})')
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"

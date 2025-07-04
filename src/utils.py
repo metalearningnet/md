@@ -132,7 +132,7 @@ class Cfg:
     
     @property
     def lm_coef(self):
-        return self.model.get('lm_coef', 1.0)
+        return self.model.get('lm_coef', 0.8)
     
     @property
     def lm_freeze(self):
@@ -141,14 +141,14 @@ class Cfg:
     @property
     def temperature(self):
         return self.model['lm'].get('temperature')
-
+    
     @property
     def min_length(self):
         return self.model['lm'].get('min_length', 16)
     
     @property
     def max_length(self):
-        return self.model['lm'].get('max_length', 512)
+        return self.model['lm'].get('max_length', 384)
 
     @property
     def max_prompt_length(self):
@@ -164,7 +164,7 @@ class Cfg:
     
     @property
     def skill_coef(self):
-        return self.model.get('skill_coef', 0.05)
+        return self.model.get('skill_coef', 0.4)
     
     @property
     def skill_checkpoint(self):
@@ -185,7 +185,7 @@ class Cfg:
     @property
     def ckpt_path(self):
         return self.ckpt_dir / MD_FILE
-
+    
     @property
     def num_special_words(self):
         if self.skill_integration_strategy == 'annotation':
