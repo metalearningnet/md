@@ -55,6 +55,7 @@ class MD(nn.Module):
         self.model_dir = config.model_dir
         self.max_hints = config.max_hints
         self.max_length = config.max_length
+        self.mem_config = config.mem_config
         self.adapter_config = config.adapter
         self.temperature = config.temperature
         self.min_interval = config.min_interval
@@ -112,6 +113,7 @@ class MD(nn.Module):
         base_config = load_peft_config()
         target_modules = list(set(base_config.get('target_modules', []) + ['embed_tokens']))
         modules_to_save = list(set(base_config.get('modules_to_save', []) + ['embed_tokens']))
+        
         info(f'target_modules: {", ".join(target_modules)}')
         info(f'modules_to_save: {", ".join(modules_to_save)}')
 
@@ -191,15 +193,15 @@ class MD(nn.Module):
             self.action_dim = self.num_special_words + 1
         else:
             self.action_dim = self.skill_config.get('action_dim', self.num_tokens)
-            
+        self.skill_hidden_dim = self.skill_config.get('hidden_dim', self.hidden_size)
         self.skill_config.update({
             'num_tokens': self.num_tokens,
             'state_dim': self.hidden_size,
             'action_dim': self.action_dim,
-            'hidden_dim': self.skill_config.get('hidden_dim', self.hidden_size),
+            'hidden_dim': self.skill_hidden_dim,
+            'mem_config': self.mem_config,
             'checkpoint': self.skill_checkpoint
         })
-
         self.skill_memory = SkillMemory(**self.skill_config)
     
     def _init_adapter(self):
@@ -921,18 +923,27 @@ class MD(nn.Module):
     ) -> 'MD':
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
+
         model = cls(config=config, attn=attn, dist=dist, **kwargs)
+
         try:
-            state_dict = torch.load(checkpoint_path, map_location='cpu')
+            state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
         except Exception as e:
             raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {str(e)}") from e
         
         model_state = state_dict.get('model', state_dict)
         model_state = model_state.get('state_dict', model_state)
-        missing, unexpected = model.load_state_dict(model_state, strict=False)
         
+        try:
+            missing, unexpected = model.load_state_dict(model_state, strict=False)
+            if missing:
+                warn(f"Missing keys: {missing}")
+            if unexpected:
+                warn(f"Unexpected keys: {unexpected}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading state dict: {str(e)}") from e
+
         info(f"Loaded pre-trained model from {checkpoint_path}")
-        info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
         return model.to(get_device())
 
     def get_trainable_parameters(self):

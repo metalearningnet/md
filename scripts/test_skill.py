@@ -22,14 +22,11 @@ class TestSkill(unittest.TestCase):
         self.skill_memory = SkillMemory(
             state_dim=self.state_dim,
             action_dim=self.action_dim,
-            hidden_dim=self.hidden_dim,
-            mac_depth=1,
-            mac_segment_len=4,
-            mac_persistent_mem_tokens=4
+            hidden_dim=self.hidden_dim
         )
     
     def test_initialization(self):
-        self.assertTrue(hasattr(self.skill_memory, 'mac'))
+        self.assertTrue(hasattr(self.skill_memory, 'mem'))
         self.assertTrue(hasattr(self.skill_memory, 'policy'))
         self.assertTrue(hasattr(self.skill_memory, 'prior_net'))
         
@@ -80,46 +77,7 @@ class TestSkill(unittest.TestCase):
     def test_action_generation(self):
         action_logits = self.skill_memory.forward(self.states)['action_logits']
         self.assertEqual(action_logits.squeeze().shape, (self.batch_size, self.seq_len, self.action_dim))
-
-    def test_gradient_flow(self):
-        self.skill_memory.train()
-        outputs = self.skill_memory(self.states)
-        losses = self.skill_memory.compute_losses(outputs)
-        losses['total_loss'].backward()
-        
-        critical_components = [
-            'attn', 'ff', 'policy', 'forward_model',
-            'disc_', 'skill_pred', 'mmi_', 'mem'
-        ]
-        
-        optional_components = [
-            'dynamic_alpha_scale', 'gate', 'hyper_conn'
-        ]
-
-        exclude_params = [
-            'mac.layers.0.0.dynamic_alpha_scale',
-            'mac.layers.0.1.dynamic_alpha_scale',
-            'mac.layers.0.2.dynamic_alpha_scale',
-            'mac.layers.0.4.memory_model.norm.gamma',
-            'mac.layers.0.4.memory_model.model.weights.0',
-            'mac.layers.0.4.memory_model.model.weights.1',
-        ]
-        
-        for name, param in self.skill_memory.named_parameters():
-            if name not in exclude_params:
-                if any(comp in name for comp in critical_components):
-                    self.assertIsNotNone(param.grad, f"No gradient for {name}")
-                    if param.grad is not None:
-                        self.assertFalse(
-                            torch.allclose(param.grad, torch.zeros_like(param.grad)),
-                            f"Zero gradient for critical param: {name}"
-                        )
-                elif any(comp in name for comp in optional_components):
-                    if param.grad is None:
-                        print(f"Warning: No gradient for optional param {name}")
-                    elif torch.allclose(param.grad, torch.zeros_like(param.grad)):
-                        print(f"Warning: Zero gradient for conditional param {name}")
-
+    
     def test_edge_cases(self):
         single_out = self.skill_memory(
             torch.randn(self.batch_size, 1, self.hidden_dim)

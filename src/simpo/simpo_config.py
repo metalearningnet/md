@@ -63,4 +63,5 @@ class SimPOConfig(TrainingArguments):
     is_encoder_decoder: Optional[bool] = None
     model_init_kwargs: Optional[Dict] = None
     dataset_num_proc: Optional[int] = None
-    output_dir: str = 'outputs'
+    output_dir: str = "output"
+    report_to: str = "all"

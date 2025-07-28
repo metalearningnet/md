@@ -26,11 +26,17 @@ class TestMD(unittest.TestCase):
         self.model.max_length = 64
         self.hidden_size = self.model.hidden_size
         self.params = self.model.get_trainable_parameters()
+        self.is_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        if self.is_mps:
+            self.device = torch.device('cpu')
+        else:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
 
     def _create_dummy_inputs(self, batch_size: int = None) -> Dict:
         batch = batch_size or self.batch_size
         input_ids = torch.randint(0, self.model.config.vocab_size, (batch, self.seq_len))
-        return {'input_ids': input_ids}
+        return {'input_ids': input_ids.to(self.device)}
     
     def _create_inputs(self):
         vocab_size = self.model.num_tokens
@@ -40,7 +46,7 @@ class TestMD(unittest.TestCase):
             torch.randint(1, vocab_size, (self.batch_size,)),
             input_ids[:, 0]
         )
-        return input_ids
+        return input_ids.to(self.device)
 
     def _create_text_inputs(self):
         text = "What are the names of some famous actors that started their careers on Broadway?"
@@ -50,14 +56,14 @@ class TestMD(unittest.TestCase):
             truncation=True,
             return_tensors="pt"
         )['input_ids']
-        return input_ids
+        return input_ids.to(self.device)
     
     def _create_anno_inputs(self):
         vocab_size = self.model.num_tokens
         input_ids = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
         input_labels = torch.randint(0, vocab_size, (self.batch_size, self.seq_len))
         input_ids[input_ids == self.model.token_sep_id] = 1
-        return input_ids, input_labels
+        return input_ids.to(self.device), input_labels.to(self.device)
     
     def test_annotation_output_shapes(self):
         if self.model.has_anno:

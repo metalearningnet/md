@@ -477,20 +477,19 @@ class MemoryAsContextTransformer(Module):
         dim,
         depth,
         segment_len,
-        neural_memory_segment_len = None,
+        neural_mem_segment_len = None,
         neural_mem_gate_attn_output = False,
-        neural_memory_add_value_residual = False,
         num_longterm_mem_tokens = 0,
         num_persist_mem_tokens = 0,
-        neural_memory_batch_size = None,
-        neural_memory_qkv_receives_diff_views = False,
+        neural_mem_batch_size = None,
+        neural_mem_qkv_receives_diff_views = False,
         dim_head = 64,
         heads = 8,
         ff_mult = 4,
         num_residual_streams = 4,
-        neural_memory_model: Module | None = None,
-        neural_memory_kwargs: dict = dict(),
-        neural_memory_layers: tuple[int, ...] | None = None,
+        neural_mem_model: Module | None = None,
+        neural_mem_kwargs: dict = dict(),
+        neural_mem_layers: tuple[int, ...] | None = None,
         use_flex_attn = False,
         sliding_window_attn = False,
         neural_mem_weight_residual = False,
@@ -516,7 +515,6 @@ class MemoryAsContextTransformer(Module):
         self.segment_len = segment_len
 
         self.num_longterm_mem_tokens = num_longterm_mem_tokens
-        has_longterm_mems = num_longterm_mem_tokens > 0
 
         self.longterm_mems = nn.Parameter(torch.randn(num_longterm_mem_tokens, dim) * 0.02)
 
@@ -531,11 +529,11 @@ class MemoryAsContextTransformer(Module):
 
         self.layers = ModuleList([])
 
-        self.neural_memory_segment_len = default(neural_memory_segment_len, num_longterm_mem_tokens + segment_len)
+        self.neural_mem_segment_len = default(neural_mem_segment_len, num_longterm_mem_tokens + segment_len)
 
         layers = tuple(range(1, depth + 1))
 
-        neural_memory_layers = default(neural_memory_layers, layers)
+        neural_mem_layers = default(neural_mem_layers, layers)
 
         # weight residual related
 
@@ -565,10 +563,10 @@ class MemoryAsContextTransformer(Module):
             mem_qkv_layer_selector = None
             mem_hyper_conn = None
 
-            if layer in neural_memory_layers:
+            if layer in neural_mem_layers:
                 mem_hyper_conn = init_hyper_conn(add_branch_out_to_residual = not neural_mem_gate_attn_output)
 
-                if not is_first and neural_memory_qkv_receives_diff_views:
+                if not is_first and neural_mem_qkv_receives_diff_views:
                     num_layer_choices = (layer - 1) * 4 + 1 # for each layer, have memory input select from attn inp, attn out, ff inp, and ff out - plus one for the current point in the residual stream (memory input)
 
                     mem_qkv_layer_selector = nn.Sequential(
@@ -577,15 +575,15 @@ class MemoryAsContextTransformer(Module):
                         Rearrange('... (views layers) -> views ... layers', views = 3),
                         nn.Softmax(dim = -1)
                     )
-
+                
                 mem = NeuralMemory(
                     dim = dim,
-                    chunk_size = self.neural_memory_segment_len,
-                    batch_size = neural_memory_batch_size,
-                    model = deepcopy(neural_memory_model),
+                    chunk_size = self.neural_mem_segment_len,
+                    batch_size = neural_mem_batch_size,
+                    model = deepcopy(neural_mem_model),
                     qkv_receives_diff_views = True,
                     accept_weight_residual = neural_mem_weight_residual and not is_first_neural_mem,
-                    **neural_memory_kwargs
+                    **neural_mem_kwargs
                 )
 
                 is_first_neural_mem = False
@@ -675,7 +673,7 @@ class MemoryAsContextTransformer(Module):
         if use_cache:
             seq_len_with_mem = self.seq_len_with_longterm_mem(seq_len)
 
-            axial_dims = self.axial_pos_emb.maybe_derive_outer_dim(seq_len_with_mem, (self.neural_memory_segment_len,))
+            axial_dims = self.axial_pos_emb.maybe_derive_outer_dim(seq_len_with_mem, (self.neural_mem_segment_len,))
 
             factorized_pos_emb = self.axial_pos_emb(axial_dims, return_factorized = True)
 
@@ -730,11 +728,11 @@ class MemoryAsContextTransformer(Module):
         #############################
         # Original:
         #############################
-        # batch, seq_len, neural_mem_segment_len, segment_len, num_longterm_mem_tokens, attn_window_size = *x.shape, self.neural_memory_segment_len, self.segment_len, self.num_longterm_mem_tokens, self.attn_window_size
+        # batch, seq_len, neural_mem_segment_len, segment_len, num_longterm_mem_tokens, attn_window_size = *x.shape, self.neural_mem_segment_len, self.segment_len, self.num_longterm_mem_tokens, self.attn_window_size
         #############################
         # Changed:
         #############################
-        neural_mem_segment_len = self.neural_memory_segment_len
+        neural_mem_segment_len = self.neural_mem_segment_len
         segment_len = self.segment_len
         attn_window_size = self.attn_window_size
         _, seq_len, _ = x.shape

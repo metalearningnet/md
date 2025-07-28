@@ -6,14 +6,15 @@ MODEL_DIR=${MODEL_DIR:-model}
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-RED="\033[31m"
-RESET="\033[0m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
+readonly BOLD=$(tput bold)
+readonly RED=$(tput setaf 1)
+readonly YELLOW=$(tput setaf 3)
+readonly BLUE=$(tput setaf 4)
+readonly RESET=$(tput sgr0)
 
-log_info()  { echo -e "${GREEN}[INFO]${RESET} $1"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${RESET} $1" >&2; }
-log_error() { echo -e "${RED}[ERROR]${RESET} $1" >&2; exit 1; }
+log_info()  { echo -e "${BLUE}${BOLD}[INFO]${RESET} $1"; }
+log_warn()  { echo -e "${YELLOW}${BOLD}[WARN]${RESET} $1" >&2; }
+log_error() { echo -e "${RED}${BOLD}[ERROR]${RESET} $1" >&2; exit 1; }
 
 usage() {
     cat <<EOF

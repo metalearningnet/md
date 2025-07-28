@@ -55,44 +55,79 @@ class ResidualBlock(nn.Module):
 
 class SkillMemory(nn.Module):
     def __init__(self,
+                 mem_type: str = 'mac',
                  state_dim: int = 1024,
                  num_tokens: int = 151672,
                  action_dim: int = 128,
                  hidden_dim: int = 1024,
-                 mac_persistent_mem_tokens: int = 16,
-                 mac_longterm_mem_tokens: int = 48,
-                 mac_depth: int = 1,
-                 mac_segment_len: int = 32,
-                 mac_neural_memory_qkv_receives_diff_views: bool = False,
-                 mac_neural_mem_weight_residual: bool = False,
                  mi_coef: float = 0.5,
-                 entropy_coef: float = 0.3,
-                 adv_coef: float = 0.1,
                  kl_coef: float = 0.01,
+                 adv_coef: float = 0.1,
                  forward_coef: float = 0.2,
-                 checkpoint: bool = False):
-        
+                 entropy_coef: float = 0.3,
+                 checkpoint: bool = False,
+                 mem_config: dict = dict(mac=dict())):
         super().__init__()
-        info(f"Skill memory (state_size: {state_dim}, action_size: {action_dim})")
+        info(f"Skill memory (state_size: {state_dim}, action_size: {action_dim}, mem_type: {mem_type})")
         
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
-
         self.checkpoint = checkpoint
         
-        self.mac = MemoryAsContextTransformer(
-            num_tokens=num_tokens,
-            dim=hidden_dim,
-            depth=mac_depth,
-            segment_len=mac_segment_len,
-            num_persist_mem_tokens=mac_persistent_mem_tokens,
-            num_longterm_mem_tokens=mac_longterm_mem_tokens,
-            neural_memory_qkv_receives_diff_views=mac_neural_memory_qkv_receives_diff_views,
-            neural_mem_weight_residual=mac_neural_mem_weight_residual,
-            token_emb=None
-        )
-        self.mac_output_proj = nn.Linear(num_tokens, hidden_dim)
+        if 'mac' == mem_type:
+            mac_kwargs = mem_config[mem_type]
+            mac_depth = mac_kwargs.get('depth', 1)
+            mac_segment_len = mac_kwargs.get('segment_len', 32)
+            mac_use_flex_attn = mac_kwargs.get('use_flex_attn', False)
+            mac_longterm_mem_tokens = mac_kwargs.get('longterm_mem_tokens', 32)
+            mac_persistent_mem_tokens = mac_kwargs.get('persistent_mem_tokens', 16)
+            mac_sliding_window_attn = mac_kwargs.get('sliding_window_attn', False)
+            mac_neural_mem_heads = mac_kwargs.get('neural_mem_heads', 4)
+            mac_neural_mem_head_dim = mac_kwargs.get('neural_mem_head_dim', 64)
+            mac_neural_mem_batch_size = mac_kwargs.get('neural_mem_batch_size', 64)
+            mac_neural_mem_momentum = mac_kwargs.get('neural_mem_momentum', True)
+            mac_neural_mem_momentum_order = mac_kwargs.get('neural_mem_momentum_order', 1)
+            mac_neural_mem_qk_rmsnorm = mac_kwargs.get('neural_mem_qk_rmsnorm', False)
+            mac_neural_mem_weight_residual = mac_kwargs.get('neural_mem_weight_residual', False)
+            mac_neural_mem_attn_pool_chunks = mac_kwargs.get('neural_mem_attn_pool_chunks', False)
+            mac_neural_mem_use_accelerated_scan = mac_kwargs.get('neural_mem_use_accelerated_scan', False)
+            mac_neural_mem_step_transform_max_lr = mac_kwargs.get('neural_mem_step_transform_max_lr', 1e-1)
+            mac_neural_mem_qkv_receives_diff_views = mac_kwargs.get('neural_mem_qkv_receives_diff_views', False)
+            mac_neural_mem_spectral_norm_surprises = mac_kwargs.get('neural_mem_spectral_norm_surprises', False)
+            mac_neural_mem_per_head_learned_parameters = mac_kwargs.get('neural_mem_per_head_learned_parameters', True)
+            mac_neural_mem_per_parameter_lr_modulation = mac_kwargs.get('neural_mem_per_parameter_lr_modulation', False)
+            self.mem = MemoryAsContextTransformer(
+                dim=hidden_dim,
+                token_emb=None,
+                depth=mac_depth,
+                num_tokens=num_tokens,
+                segment_len=mac_segment_len,
+                use_flex_attn=mac_use_flex_attn,
+                sliding_window_attn=mac_sliding_window_attn,
+                num_persist_mem_tokens=mac_persistent_mem_tokens,
+                num_longterm_mem_tokens=mac_longterm_mem_tokens,
+                neural_mem_batch_size=mac_neural_mem_batch_size,
+                neural_mem_weight_residual=mac_neural_mem_weight_residual,
+                neural_mem_qkv_receives_diff_views=mac_neural_mem_qkv_receives_diff_views,
+                neural_mem_kwargs = dict(
+                    heads=mac_neural_mem_heads,
+                    dim_head=mac_neural_mem_head_dim,
+                    momentum=mac_neural_mem_momentum,
+                    qk_rmsnorm=mac_neural_mem_qk_rmsnorm,
+                    momentum_order=mac_neural_mem_momentum_order,
+                    attn_pool_chunks=mac_neural_mem_attn_pool_chunks,
+                    use_accelerated_scan=mac_neural_mem_use_accelerated_scan,
+                    spectral_norm_surprises=mac_neural_mem_spectral_norm_surprises,
+                    default_step_transform_max_lr=mac_neural_mem_step_transform_max_lr,
+                    per_head_learned_parameters=mac_neural_mem_per_head_learned_parameters,
+                    per_parameter_lr_modulation=mac_neural_mem_per_parameter_lr_modulation
+                )
+            )
+        else:
+            raise ValueError(f"No memory configuration")
+        
+        self.mem_output_proj = nn.Linear(num_tokens, hidden_dim)
         self.memory_var = nn.Parameter(torch.zeros(1, hidden_dim))
         nn.init.constant_(self.memory_var, math.log(0.5))
 
@@ -148,7 +183,7 @@ class SkillMemory(nn.Module):
         if self.checkpoint:
             def run_policy(policy_input):
                 return torch.clamp(self.policy(policy_input), min=-50, max=50)
-            action_logits = checkpoint(run_policy, policy_input)
+            action_logits = checkpoint(run_policy, policy_input, use_reentrant=False)
         else:
             action_logits = torch.clamp(self.policy(policy_input), min=-50, max=50)
             
@@ -156,13 +191,13 @@ class SkillMemory(nn.Module):
 
     def forward(self, states):
         if self.checkpoint:
-            def run_mac(states):
-                mac_output = self.mac(states)
-                return self.mac_output_proj(mac_output)
-            m = checkpoint(run_mac, states)
+            def run_mem(states):
+                mem_output = self.mem(states)
+                return self.mem_output_proj(mem_output)
+            m = checkpoint(run_mem, states, use_reentrant=True)
         else:
-            mac_output = self.mac(states)
-            m = self.mac_output_proj(mac_output)
+            mem_output = self.mem(states)
+            m = self.mem_output_proj(mem_output)
 
         if self.checkpoint:
             def run_prior(m):
@@ -170,7 +205,7 @@ class SkillMemory(nn.Module):
                 prior_mean = self.prior_mean(prior_out)
                 prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
                 return prior_mean, prior_std
-            prior_mean, prior_std = checkpoint(run_prior, m)
+            prior_mean, prior_std = checkpoint(run_prior, m, use_reentrant=False)
         else:
             prior_out, _ = self.prior_net(m)
             prior_mean = self.prior_mean(prior_out)

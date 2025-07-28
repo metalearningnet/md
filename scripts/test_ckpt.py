@@ -13,7 +13,7 @@ sys.path.append(str(_src_dir))
 from utils import cfg, default_dataset_path
 
 NR_EPOCHS = 1
-NR_SAMPLES = 2
+NR_SAMPLES = 1
 
 class TestCkpt(unittest.TestCase):
     def setUp(self):

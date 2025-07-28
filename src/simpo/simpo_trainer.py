@@ -48,7 +48,7 @@ class SimPOTrainer(Trainer):
             The dataset to use for training.
         eval_dataset (`datasets.Dataset`):
             The dataset to use for evaluation.
-        tokenizer (`transformers.PreTrainedTokenizerBase`):
+        processing_class (`transformers.PreTrainedTokenizerBase`):
             The tokenizer to use for training. This argument is required if you want to use the default data collator.
         model_init (`Callable[[], transformers.PreTrainedModel]`):
             The model initializer to use for training. If None is specified, the default model initializer will be used.
@@ -74,7 +74,7 @@ class SimPOTrainer(Trainer):
         data_collator: Optional[DataCollator] = None,
         train_dataset: Optional[Dataset] = None,
         eval_dataset: Optional[Union[Dataset, Dict[str, Dataset]]] = None,
-        tokenizer: Optional[PreTrainedTokenizerBase] = None,
+        processing_class: Optional[PreTrainedTokenizerBase] = None,
         model_init: Optional[Callable[[], PreTrainedModel]] = None,
         callbacks: Optional[List[TrainerCallback]] = None,
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
@@ -82,6 +82,8 @@ class SimPOTrainer(Trainer):
         peft_config: Optional[Dict] = None,
         compute_metrics: Optional[Callable[[EvalLoopOutput], Dict]] = None,
     ):
+        tokenizer = processing_class
+
         if args.model_init_kwargs is None:
             model_init_kwargs = {}
         elif not isinstance(model, str):
@@ -236,7 +238,6 @@ class SimPOTrainer(Trainer):
         self.max_prompt_length = max_prompt_length
         self.truncation_mode = args.truncation_mode
         self.max_target_length = max_target_length
-        self.tokenizer = tokenizer
 
         if args.loss_type in ["hinge"] and args.label_smoothing > 0:
             warnings.warn(
@@ -252,7 +253,7 @@ class SimPOTrainer(Trainer):
         self._stored_metrics = defaultdict(lambda: defaultdict(list))
 
         self.dataset_map = DatasetMap(
-            self.tokenizer,
+            processing_class,
             self.truncation_mode,
             self.max_prompt_length,
             self.max_length,
@@ -275,13 +276,15 @@ class SimPOTrainer(Trainer):
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
+            processing_class=processing_class,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
             optimizers=optimizers,
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
+        
+        self.processing_class = processing_class
 
         # Add tags for models that have been loaded with the correct transformers version
         if hasattr(self.model, "add_model_tags"):
@@ -608,11 +611,11 @@ class SimPOTrainer(Trainer):
                 attention_mask=batch["prompt_attention_mask"],
                 max_length=self.max_length,
                 do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
+                pad_token_id=self.processing_class.pad_token_id,
             )
 
-        policy_output = pad_to_length(policy_output, self.max_length, self.tokenizer.pad_token_id)
-        policy_output_decoded = self.tokenizer.batch_decode(policy_output, skip_special_tokens=True)
+        policy_output = pad_to_length(policy_output, self.max_length, self.processing_class.pad_token_id)
+        policy_output_decoded = self.processing_class.batch_decode(policy_output, skip_special_tokens=True)
 
         return policy_output_decoded
 

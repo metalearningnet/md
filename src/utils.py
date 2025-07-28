@@ -10,9 +10,11 @@ import signal
 import uvicorn
 import requests
 import subprocess
+import transformers
 from tqdm import tqdm
 from pathlib import Path
 from fastapi import FastAPI
+from packaging import version
 from pydantic import BaseModel
 from dataclasses import dataclass
 from threading import Thread, Lock
@@ -38,7 +40,7 @@ sys.path.append(str(_conf_dir))
 
 import settings
 from vocab import HINT_VOCAB
-from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT, MEMORY
 
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
@@ -53,7 +55,7 @@ MD_FILE = f'{MD_TAG}.pt'
 ROOT_DIR = Path(__file__).parent.parent
 MODEL_DIR = ROOT_DIR  / 'model'
 CONF_DIR = ROOT_DIR / 'conf'
-OUT_DIR = ROOT_DIR / 'outputs'
+OUT_DIR = ROOT_DIR / 'output'
 CKPT_DIR = OUT_DIR / 'checkpoints'
 LOG_DIR = OUT_DIR / 'logs'
 EVAL_DIR = OUT_DIR / 'eval'
@@ -72,13 +74,18 @@ LABEL_PAD_TOKEN_ID = -100
 
 SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
 
+BOLD = '\033[1m'
+RESET = '\033[0m'
+BLUE = '\033[1;34m'
+YELLOW = '\033[1;33m'
+
 def info(s):
     if VERBOSE:
-        print(f"[INFO] {s}")
+        print(f"{BLUE}{BOLD}[INFO]{RESET} {s}")
 
 def warn(s):
     if WARN:
-        print(f"[WARN] {s}")
+        print(f"{YELLOW}{BOLD}[WARNING]{RESET} {s}", file=sys.stderr)
 
 @dataclass
 class Cfg:
@@ -98,6 +105,7 @@ class Cfg:
     model_dir: Path
     optimizer: dict
     annotation: dict
+    mem_config: dict
     log_interval: int
     label_pad_token_id: int
     remove_unused_columns: bool
@@ -268,6 +276,7 @@ cfg = Cfg(
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
     eval_dir=EVAL_DIR,
+    mem_config=MEMORY,
     train_log=TRAIN_LOG,
     model_dir=MODEL_DIR,
     precision=PRECISION,
@@ -521,16 +530,21 @@ def get_po(model):
     
     if trainer:
         from alignment import H4ArgumentParser
+
+        assert version.parse(transformers.__version__) >= version.parse("4.36.0"), \
+            f"transformers version 4.36.0 or higher is required, but found {transformers.__version__}. "
+        
         parser = H4ArgumentParser((config,))
         training_args = parser.parse(cfg.po_conf_file)
         training_args.max_length = cfg.max_length
         training_args.gradient_checkpointing = False
         training_args.max_prompt_length = cfg.max_prompt_length
         training_args.remove_unused_columns = cfg.remove_unused_columns
+
         return trainer(
             model=model,
             args=training_args,
-            tokenizer=model.tokenizer
+            processing_class=model.tokenizer
         )
 
 def md_train(
