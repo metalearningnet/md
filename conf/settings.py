@@ -1,9 +1,9 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "path": "google/gemma-3-1b-it",    # Identifier for the pretrained language model (from HuggingFace)
+        "path": "Qwen/Qwen3-0.6B",         # Identifier for the pretrained language model (from HuggingFace)
         "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
-        "freeze": False,                   # Whether to freeze the pretrained LM weights during training
+        "freeze": True,                    # Whether to freeze the pretrained LM weights during training
         "max_length": 384,                 # Maximum token length for input + output sequences
         "max_target_length": 256,          # Maximum token length allowed for output sequences
         "max_prompt_length": 128           # Max tokens allowed in prompt before truncation
@@ -20,10 +20,10 @@ MODEL = {
         "mac_neural_mem_weight_residual": False,  # Adds residual connections in neural memory weight updates
 
         # Loss Balancing Coefficients
-        "mi_coef": 0.8,             # Weight for mutual information maximization
+        "mi_coef": 0.5,             # Weight for mutual information maximization
         "entropy_coef": 0.3,        # Encourages exploration via policy entropy regularization
-        "adv_coef": 0.3,            # Scales adversarial loss component
-        "kl_coef": 0.05,            # Controls KL divergence penalty for prior-policy alignment
+        "adv_coef": 0.1,            # Scales adversarial loss component
+        "kl_coef": 0.01,            # Controls KL divergence penalty for prior-policy alignment
         "forward_coef": 0.2,        # Weight for forward prediction consistency loss
 
         # Action Space Configuration
@@ -31,8 +31,8 @@ MODEL = {
     },
     
     # Training Objective Weights
-    "lm_coef": 0.8,                 # Proportional weight for language modeling loss
-    "skill_coef": 0.4,              # Proportional weight for skill learning objectives (0.0 = pure LM)
+    "lm_coef": 1.0,                 # Proportional weight for language modeling loss
+    "skill_coef": 0.05,             # Proportional weight for skill learning objectives (0.0 = pure LM)
 
     # Integration Strategy for Skill Output into the Language Model
     "context_window": 4,                   # Lookahead window size for determining insertion position of skill output

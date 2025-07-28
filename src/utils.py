@@ -37,6 +37,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
+from vocab import HINT_VOCAB
 from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT
 
 LOG = getattr(settings, 'LOG', False)
@@ -70,13 +71,6 @@ RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
 
 SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
-
-HINT_VOCAB = {
-    'minimal' : ['<continue>', '<wait>'],
-    'standard': ['<continue>', '<wait>', '<verify>'],
-    'enhanced': ['<continue>', '<wait>', '<verify>', '<recall>'],
-    'advanced': ['<continue>', '<wait>', '<verify>', '<recall>', '<diversify>'],
-}
 
 def info(s):
     if VERBOSE:
@@ -132,7 +126,7 @@ class Cfg:
     
     @property
     def lm_coef(self):
-        return self.model.get('lm_coef', 0.8)
+        return self.model.get('lm_coef', 1.0)
     
     @property
     def lm_freeze(self):
@@ -164,7 +158,7 @@ class Cfg:
     
     @property
     def skill_coef(self):
-        return self.model.get('skill_coef', 0.4)
+        return self.model.get('skill_coef', 0.05)
     
     @property
     def skill_checkpoint(self):
@@ -175,12 +169,20 @@ class Cfg:
         return self.model.get('skill_integration_strategy', 'hint')
 
     @property
+    def skill_info(self):
+        strategy = self.skill_integration_strategy
+        if strategy == 'hint':
+            return f'{strategy}-{self.hint_category}'
+        else:
+            return strategy
+
+    @property
     def use_cache(self):
         return self.model['use_cache']
     
     @property
     def context_window(self):
-        return self.model.get('context_window', 8)
+        return self.model.get('context_window', 4)
     
     @property
     def ckpt_path(self):
@@ -234,7 +236,7 @@ class Cfg:
     
     @property
     def lr(self):
-        return self.optimizer['gradient'].get('lr', 1e-4)
+        return self.optimizer['gradient'].get('lr', 5e-5)
     
     @property
     def betas(self):
@@ -242,7 +244,7 @@ class Cfg:
     
     @property
     def weight_decay(self):
-        return self.optimizer['gradient'].get('weight_decay', 0.01)
+        return self.optimizer['gradient'].get('weight_decay', 0.05)
     
     @property
     def po_conf_file(self):
@@ -424,13 +426,13 @@ def add_dist_config(
         main_port: Optional[int] = None,
         num_nodes: Optional[int] = None,
         betas: Optional[List[float]] = None,
-        weight_decay: float = 0.01,
+        weight_decay: float = 0.05,
         eps: float = 1e-8,
-        lr: float = 1e-4
+        lr: float = 5e-5
     ):
  
     if betas is None:
-        betas = (0.9, 0.95)
+        betas = (0.9, 0.98)
     else:
         betas = tuple(float(b) for b in betas)
 
@@ -566,8 +568,7 @@ def md_train(
         dynamic_ncols=True,
         total=max_steps
     )
-
-    model.set_max_steps(max_steps)
+    
     for step, batch in enumerate(pbar):
         model.step()
         if po:
@@ -754,7 +755,7 @@ def get_node_rank(main_address: str, main_port: int, num_nodes: int) -> int:
                     timeout=2
                 )
                 if response.status_code == 200:
-                    info(f'node_rank: {response.json()['node_rank']}')
+                    info(f"node_rank: {response.json()['node_rank']}")
                     return response.json()['node_rank']
             except (requests.ConnectionError, requests.Timeout):
                 if attempt == RETRY_MAX - 1:

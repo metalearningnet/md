@@ -8,6 +8,8 @@ from typing import Optional, Union, Tuple, Dict, Any
 from datasets import load_dataset, Dataset, DatasetDict
 from torch.utils.data import DataLoader, Dataset, random_split
 
+LOADER_CPU_MAX = 8
+
 class MDLoader(Dataset):
     def __init__(self,
                  path: str,
@@ -18,29 +20,21 @@ class MDLoader(Dataset):
                  max_prompt_length: int = cfg.max_prompt_length,
                  max_target_length: int = cfg.max_target_length,
                  label_pad_token_id: int = cfg.label_pad_token_id,
-                 split: Optional[str] = None,
-                 split_ratio: float = 0.0,
+                 split: str = 'train',
                  truncation_mode: str = cfg.truncation_mode,
-                 seed: int = 42,
                  dataset: Optional[Union[Dataset, DatasetDict]] = None):
         """       
         Args:
             path: Path of the dataset to load.
-            name: Configuration name for the dataset, if applicable.
+            name: Configuration name for the dataset.
             tokenizer_name: Name or path of the pretrained tokenizer to use.
             max_length: Maximum total sequence length.
             min_length: Minimum sequence length to keep during filtering.
             max_prompt_length: Maximum allowed length for the prompt portion.
             max_target_length: Maximum allowed length for the target sequence.
-                               Required when using encoder-decoder architectures.
             label_pad_token_id: Token ID used for padding labels.
-                                Required when using the default data collator.
             split: Predefined dataset split to load (e.g., 'train', 'test').
-            split_ratio: Ratio for train/validation split (0.0 means no split).
-            truncation_mode: Mode for truncating prompts. Options:
-                             - 'keep_end': Preserve the end of the prompt
-                             - 'keep_start': Preserve the start of the prompt
-            seed: Random seed for reproducibility of operations.
+            truncation_mode: Mode for truncating prompts.
             dataset: Preloaded dataset to use instead of loading from dataset_name.
         """
         super().__init__()
@@ -57,26 +51,25 @@ class MDLoader(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         if self.tokenizer.pad_token is None:
+            info('add pad token')
             if self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             else:
                 self.tokenizer.add_special_tokens({'pad_token': '<pad>'})
         
-        self._init_dataset(path, name, split, split_ratio, seed, dataset)
+        self._init_dataset(path, name, split, dataset)
     
     def _init_dataset(
         self,
         path: str,
         name: Optional[str],
         split: Optional[str],
-        split_ratio: float,
-        seed: int,
         dataset: Optional[Union[Dataset, DatasetDict]]
     ):
         if dataset is not None:
             self.dataset = dataset
         else:
-            self._load_dataset(path, name, split, split_ratio, seed)
+            self._load_dataset(path, name, split)
         
         fields = [
             field for field, feature in self.dataset.features.items()
@@ -95,7 +88,7 @@ class MDLoader(Dataset):
             )
             self.dataset = dataset_map.generate(self.dataset)
         else:
-            num_proc = os.cpu_count()
+            num_proc = self.get_cpu_count()
             self.dataset = self.dataset.filter(
                 lambda x: all(
                     len(self.tokenizer.encode(x[field])) >= self.min_length
@@ -107,49 +100,20 @@ class MDLoader(Dataset):
     def _load_dataset(
         self,
         path: str,
-        name: Optional[str],
-        split: Optional[str],
-        split_ratio: float,
-        seed: int
+        name: str,
+        split: str
     ):
         try:
-            if split:
-                from datasets import get_dataset_split_names
-                split_names = get_dataset_split_names(path)
-                if split not in split_names:
-                    new_split = split + '_prefs'
-                    if new_split not in split_names:
-                        raise RuntimeError(f"Invalid split: {split}")
-                    split = new_split
-                self.dataset = load_dataset(path, name=name, split=split)
-            else:
-                full_ds = load_dataset(path, name=name)
-                self.dataset = self._auto_select_split(full_ds)
-
-            if split_ratio > 0:
-                self._create_validation_split(split_ratio, seed)
-        
+            from datasets import get_dataset_split_names
+            split_names = get_dataset_split_names(path, config_name=name)
+            if split and split_names and split not in split_names:
+                new_split = split + '_prefs'
+                if new_split not in split_names:
+                    raise RuntimeError(f"Invalid split: {split}")
+                split = new_split
+            self.dataset = load_dataset(path, name, split=split)
         except Exception as e:
             raise RuntimeError(f"Dataset loading failed: {str(e)}")
-
-    def _auto_select_split(self, dataset: Union[Dataset, DatasetDict]) -> Dataset:
-        if isinstance(dataset, DatasetDict):
-            for split_name in ['train', 'validation', 'test']:
-                if split_name in dataset:
-                    return dataset[split_name]
-            return next(iter(dataset.values()))
-        return dataset
-
-    def _create_validation_split(self, split_ratio: float, seed: int):
-        split = self.dataset.train_test_split(
-            test_size=split_ratio,
-            seed=seed,
-            shuffle=True
-        )
-        self.dataset = DatasetDict({
-            'train': split['train'],
-            'validation': split['test']
-        })
     
     def __len__(self) -> int:
         return len(self.dataset)
@@ -212,8 +176,11 @@ class MDLoader(Dataset):
                is_encoder_decoder=self.is_encoder_decoder
             )
 
+    def get_cpu_count(self):
+        return min(LOADER_CPU_MAX, os.cpu_count())
+    
     def get_workers(self):
-        return 0 if get_device().type == 'mps' else os.cpu_count()
+        return 0 if get_device().type == 'mps' else self.get_cpu_count()
 
     def get_dataloader(
         self, 
@@ -249,6 +216,7 @@ class MDLoader(Dataset):
             generator=torch.Generator().manual_seed(seed)
         )
         num_workers = self.get_workers()
+        info(f'DataLooader (train_size: {len(self) - val_size} val_size: {val_size} batch_size: {batch_size} seed: {seed})')
         return (
             DataLoader(
                 train_set,

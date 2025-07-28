@@ -98,7 +98,7 @@ class MD(nn.Module):
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
-        info(f"MD (hidden_size: {self.hidden_size} strategy: '{self.skill_integration_strategy}' special_tokens: {self.num_special_words})")
+        info(f"MD (hidden_size: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_words}, preference_optimizer: {config.po})")
 
     def set_max_steps(self, max_steps):
         self.max_steps = max_steps
@@ -308,7 +308,7 @@ class MD(nn.Module):
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
             self.config.vocab_size = self.num_tokens
 
-            info(f'LM (model_type: {self.config.model_type} vocab_size: {self.num_tokens})')
+            info(f'LM (model_type: {self.config.model_type}, vocab_size: {self.num_tokens})')
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -878,7 +878,10 @@ class MD(nn.Module):
                 with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                     lm_out = self.lm(inputs_embeds=context_embeds)
                 
-                next_token = self._get_next_token(lm_out.logits[:, -1, :])
+                logits = lm_out.logits[:, -1, :]
+                if hasattr(self, 'token_extended_ids'):
+                    logits[:, self.token_extended_ids] = -float('inf')
+                next_token = self._get_next_token(logits)
                 next_token_embed = embedding_layer(next_token).view(1, 1, -1)
                 
                 sequences[idx] = torch.cat([sequences[idx], next_token.view(1)])
@@ -926,11 +929,8 @@ class MD(nn.Module):
         
         model_state = state_dict.get('model', state_dict)
         model_state = model_state.get('state_dict', model_state)
+        missing, unexpected = model.load_state_dict(model_state, strict=False)
         
-        model_keys = set(dict(model.named_parameters()).keys())
-        filtered_state = {k: v for k, v in model_state.items() if k in model_keys}
-        
-        missing, unexpected = model.load_state_dict(filtered_state, strict=False)
         info(f"Loaded pre-trained model from {checkpoint_path}")
         info(f"Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
         return model.to(get_device())

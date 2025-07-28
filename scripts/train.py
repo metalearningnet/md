@@ -21,7 +21,6 @@ def train(config: dict):
         - path: Dataset path.
         - name: Dataset name.
         - split: Dataset split name (e.g., "train").
-        - split_ratio: Proportion of the dataset to be allocated for training or testing.
         - val_split: Proportion of the training set to be used for validation.
         - seed: Random seed.
         - epochs: Number of epochs.
@@ -29,7 +28,7 @@ def train(config: dict):
         - batch_size: Training batch size.
         - gradient_accumulation_steps: Number of steps to accumulate gradients before updating model weights.
         - lr: Learning rate.
-        - betas: Betas for AdamW optimizer
+        - betas: Betas for AdamW optimizer.
         - weight_decay: Weight decay.
         - ckpt_path: Checkpoint path.
         - save_interval: Checkpoint frequency.
@@ -44,16 +43,15 @@ def train(config: dict):
         path = config['path']
         name = config.get('name')
         split = config.get('split', 'train')
-        split_ratio = config.get('split_ratio', 0.0)
-        val_split = config.get('val_split', 0.2)
+        val_split = config.get('val_split', 0.1)
         seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
         num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
         gradient_accumulation_steps = config.get('gradient_accumulation_steps', 4)
-        lr = config.get('lr', 1e-4)
+        lr = config.get('lr', 5e-5)
         betas = config.get('betas', (0.9, 0.98))
-        weight_decay = config.get('weight_decay', 0.01)
+        weight_decay = config.get('weight_decay', 0.05)
         ckpt_path = Path(config.get('ckpt_path', ''))
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
@@ -101,9 +99,7 @@ def train(config: dict):
         loader_args = {
             'path': path,
             'name': name,
-            'split': split,
-            'split_ratio': split_ratio,
-            'seed': seed
+            'split': split
         }
         
         loader = MDLoader(**loader_args)
@@ -130,6 +126,13 @@ def train(config: dict):
             log_dir = None
             log_interval = 0
 
+        if num_samples > 0:
+            steps = min(num_samples, len(train_loader))
+        else:
+            steps = len(train_loader)
+        total_steps = num_epochs * steps
+        model.set_max_steps(total_steps)
+        
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1}/{num_epochs}")
             train_metrics = md_train(
@@ -147,8 +150,13 @@ def train(config: dict):
                 f"Train Loss: {train_metrics['total_loss']:.4f}"
             ]
             
+            if (epoch + 1) % save_interval == 0:
+                if ckpt_dir:
+                    torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
+                    print(f"Saved epoch {epoch+1} checkpoint")
+            
             val_metrics = md_validate(model, val_loader, fabric, num_samples=val_samples)
-
+            
             if fabric.is_global_zero:
                 log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
             
@@ -159,11 +167,6 @@ def train(config: dict):
                 if ckpt_path:
                     torch.save(model.state_dict(), ckpt_path)
                 print(f"Saved best model with val loss: {best_val_loss:.4f}")
-            
-            if (epoch + 1) % save_interval == 0:
-                if ckpt_dir:
-                    torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
-                    print(f"Saved epoch {epoch+1} checkpoint")
     
     finally:
         if torch.distributed.is_initialized():
@@ -177,14 +180,12 @@ def main():
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
                         help="Dataset name")
-    parser.add_argument("--split", type=str, default="train",
-                        help="Predefined dataset split")
-    parser.add_argument("--split_ratio", type=float, default=0.0,
-                        help="Train/test split ratio")
-    parser.add_argument("--val_split", type=float, default=0.2,
-                        help="Validation split ratio")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
+    parser.add_argument("--split", type=str, default="train",
+                        help="Predefined dataset split")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Validation split ratio")
 
     # Training configuration
     parser.add_argument("--epochs", type=int, default=1,
@@ -225,10 +226,9 @@ def main():
     config = {
         'path': args.path,
         'name': args.name,
-        'split': args.split,
-        'split_ratio': args.split_ratio,
-        'val_split': args.val_split,
         'seed': args.seed,
+        'split': args.split,
+        'val_split': args.val_split,
         
         'epochs': args.epochs,
         'samples': args.samples,
@@ -241,6 +241,7 @@ def main():
 
         'ckpt_path': args.ckpt_path,
         'save_interval': args.save_interval,
+
         'log': args.log,
         'log_dir': args.log_dir,
         'log_interval': args.log_interval,
@@ -250,7 +251,7 @@ def main():
             'devices': 'auto',
             'precision': cfg.precision if not args.dist else '32-true'
         },
-        
+
         'restore': args.restore
     }
 
