@@ -32,8 +32,9 @@ MODEL = {
     "context_window": 4,                   # Lookahead window size for determining insertion position of skill output
     "skill_integration_strategy": "hint",  # Options: 'fusion' | 'annotation' | 'hint'
 
-    # Inference Behavior
-    "use_cache": False                     # Use KV caching to accelerate autoregressive generation
+    # Inference-Time Behavior
+    "use_cache": False,                    # Enable KV caching for faster autoregressive decoding
+    "update_memory": True                  # Allow memory updates during inference
 }
 
 # Memory Architecture
@@ -67,7 +68,7 @@ MEMORY = {
 
 # Fusion Settings (used when skill_integration_strategy == 'fusion')
 FUSION = {
-      # Skill-LM Adapter Configuration
+    # Skill-LM Adapter Configuration
     "adapter": {
         "proj_scale": 2,                   # Expansion factor for intermediate adapter dimensions
         "proj_dropout": 0.1,               # Dropout rate applied after adapter projections
@@ -81,14 +82,16 @@ ANNOTATION = {
     "words": 8,                            # Number of distinct word types allowed per annotation
     "max_length": 2,                       # Max token length per annotation
     "max_annotations": 4,                  # Max number of annotations per response (-1 for unlimited)
-    "min_interval": 128                    # Minimum token distance between annotations
+    "min_interval": 128,                   # Minimum token distance between annotations
+    "tune": True                           # Whether annotation embeddings are fine-tuned during training
 }
 
 # Hint Generation Settings (used when skill_integration_strategy == 'hint')
 HINT = {
     "category": "minimal",                 # Options: 'minimal' | 'standard' | 'enhanced' | 'advanced'
     "max_hints": 16,                       # Max number of hints per response (-1 for unlimited)
-    "min_interval": 16                     # Minimum token distance between hints
+    "min_interval": 16,                    # Minimum token distance between hints
+    "tune": True                           # Whether hint token embeddings are trainable
 }
 
 # Checkpointing Configuration

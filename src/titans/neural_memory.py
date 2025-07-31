@@ -190,11 +190,34 @@ def newtonschulz5(
 class MultiheadRMSNorm(Module):
     def __init__(self, dim, heads):
         super().__init__()
+        self.heads = heads
         self.rmsnorm = nn.RMSNorm(dim, elementwise_affine = False)
         self.gamma = Parameter(torch.zeros(heads, 1, dim))
 
     def forward(self, x):
-        return self.rmsnorm(x) * (self.gamma + 1.)
+        #############################################
+        # Original:
+        #############################################
+        # return self.rmsnorm(x) * (self.gamma + 1.)
+        #############################################
+        orig_shape = x.shape
+        x = self.rmsnorm(x)
+        
+        # Handle 4D input [batch, heads, seq_len, dim]
+        if x.dim() == 4:
+            B, H, N, D = x.shape
+            assert H == self.heads, f"Expected {self.heads} heads, got {H}"
+            gamma = self.gamma.unsqueeze(0).expand(B, -1, -1, -1)  # [B, H, 1, D]
+            return x * (gamma + 1)
+        
+        # Handle 3D input [batch*heads, seq_len, dim]
+        elif x.dim() == 3:
+            BH, N, D = x.shape
+            B = BH // self.heads
+            gamma = self.gamma.unsqueeze(0).expand(B, -1, -1, -1).reshape(BH, 1, D)
+            return x * (gamma + 1)
+        
+        raise ValueError(f"Unsupported input shape: {orig_shape}")
 
 # chunk pooling
 
@@ -290,6 +313,7 @@ class NeuralMemory(Module):
         spectral_norm_surprises = False,
         gated_transition = False,
         mem_model_norm_add_residual = True, # by default, layernorm output and add residual as proposed in TTT paper, but could be removed
+        update_memory = True,
         default_model_kwargs: dict = dict(
             depth = 2,
             expansion_factor = 4.
@@ -299,6 +323,7 @@ class NeuralMemory(Module):
         dim_head = default(dim_head, dim)
         assert not (heads == 1 and dim_head != dim)
 
+        self.update_memory = update_memory
         self.retrieve_chunk_size, self.store_chunk_size = pair(chunk_size)
 
         # batch size
@@ -619,11 +644,13 @@ class NeuralMemory(Module):
         # derive learned hparams for optimization of memory network
 
         adaptive_lr = self.to_adaptive_step(seq)
-        adaptive_lr = self.adaptive_step_transform(adaptive_lr)
+        adaptive_lr = self.adaptive_step_transform(adaptive_lr) if self.update_memory else torch.zeros_like(adaptive_lr)
 
         chunked_seq = self.reduce_to_chunk_rep(seq, chunk_size = chunk_size)
 
         decay_factor = self.to_decay_factor(chunked_seq).sigmoid()
+        if not self.update_memory:
+            decay_factor = torch.zeros_like(decay_factor)
 
         need_layer_lr_mod = exists(self.to_layer_modulation) and num_chunks > 0
         has_momentum = exists(self.to_momentum)
@@ -728,6 +755,45 @@ class NeuralMemory(Module):
             init_momentum = self.init_momentum(batch)
 
             past_state = (minibatch_init_weight, init_momentum)
+        
+        if not self.update_memory:
+            if weights is None:
+                weights = self.memory_model_parameter_dict
+            
+            if self.per_head_learned_parameters:
+                updates = {name: param[0] for name, param in weights.items()}
+            else:
+                updates = weights
+
+            H = self.heads
+            B, N = batch, seq.shape[-2]
+            if N < chunk_size:
+                updates = {}
+                for k, v in weights.items():
+                    if self.per_head_learned_parameters:
+                        updates[k] = v.unsqueeze(1) if v.ndim == 2 else v
+                    else:
+                        if v.ndim == 1:
+                            updates[k] = repeat(v, '... -> b 1 ...', b=batch)
+                        else:
+                            updates[k] = v.unsqueeze(1) if v.ndim == 2 else v
+            
+            next_store_state = NeuralMemState(
+                seq_index + seq.shape[-2],
+                self.memory_model_parameter_dict,
+                None,
+                past_state,
+                updates
+            )
+            
+            if not return_surprises:
+                return updates, next_store_state
+            
+            surprises = (
+                torch.zeros(B, H, seq.shape[-2], device=seq.device),
+                torch.zeros(B, H, seq.shape[-2], device=seq.device)
+            )
+            return updates, next_store_state, surprises
 
         past_last_update, past_last_momentum = past_state
 
@@ -815,85 +881,85 @@ class NeuralMemory(Module):
         weights: dict[str, Tensor],
     ):
         chunk_size = self.retrieve_chunk_size
-
-        weights_have_expanded_shape = dict_get_value_shapes(weights) != self.init_weight_shape
-
         batch, seq_len = seq.shape[:2]
 
-        # auto infer single token decoding, if there are only 1 set of weights and 1 token
+        if not self.update_memory:
+            functional_weights = dict(self.memory_model_parameter_dict)
+        
+            is_single_token_decode = seq_len == 1
+            if is_single_token_decode:
+                chunk_size = 1
+            
+            need_pad = chunk_size > 1
+            if need_pad:
+                seq = pad_at_dim(seq, (1, 0), dim=1)
 
-        is_one_token = seq_len == 1
-        is_one_weight = (not weights_have_expanded_shape) or next(iter(weights.values())).shape[1] == 1
+            seq_len_plus_one = seq.shape[-2]
+            next_seq_len = round_up_multiple(seq_len_plus_one, chunk_size)
+            padding = next_seq_len - seq_len_plus_one
+            seq = pad_at_dim(seq, (0, padding), dim=1)
+        else:
+            expandable_weights = {
+                name: param for name, param in weights.items() 
+                if param.ndim >= 2 and name in self.memory_model_parameter_names
+            }
+        
+            non_expandable_weights = {
+                name: param for name, param in weights.items()
+                if name not in expandable_weights
+            }
 
-        is_single_token_decode = is_one_token and is_one_weight
+            weights_have_expanded_shape = any(
+                expandable_weights[name].shape != self.init_weight_shape[i]
+                for i, name in enumerate(self.memory_model_parameter_names)
+                if name in expandable_weights
+            )
+            
+            # auto infer single token decoding, if there are only 1 set of weights and 1 token
+            is_one_token = seq_len == 1
+            is_one_weight = (not weights_have_expanded_shape) or next(iter(weights.values())).shape[1] == 1
+            is_single_token_decode = is_one_token and is_one_weight
+            if is_single_token_decode:
+                chunk_size = 1
 
-        if is_single_token_decode:
-            chunk_size = 1
+            # padding related, for chunked processing
+            need_pad = chunk_size > 1 or not is_one_weight
+            if need_pad:
+                seq = pad_at_dim(seq, (1, 0), dim = 1)
 
-        # padding related, for chunked processing
+            seq_len_plus_one = seq.shape[-2]
+            next_seq_len = round_up_multiple(seq_len_plus_one, chunk_size)
+            padding = next_seq_len - seq_len_plus_one
+            seq = pad_at_dim(seq, (0, padding), dim = 1)
 
-        need_pad = chunk_size > 1 or not is_one_weight
-
-        if need_pad:
-            seq = pad_at_dim(seq, (1, 0), dim = 1)
-
-        seq_len_plus_one = seq.shape[-2]
-
-        next_seq_len = round_up_multiple(seq_len_plus_one, chunk_size)
-
-        padding = next_seq_len - seq_len_plus_one
-        seq = pad_at_dim(seq, (0, padding), dim = 1)
-
-        # the parameters of the memory model stores the memories of the key / values
-        # when the MLP has only 1 weight matrix, it is equivalent to `kv` fast weight memories from linear attention literature (recall fetching of memories is q @ (kv)) / schmidhuber's paper
-
-        weights = TensorDict(weights)
-
-        # pre norm
+            # the parameters of the memory model stores the memories of the key / values
+            # when the MLP has only 1 weight matrix, it is equivalent to `kv` fast weight memories from linear attention literature (recall fetching of memories is q @ (kv)) / schmidhuber's paper
+            if weights_have_expanded_shape:
+                expandable_weights = rearrange_dict_values(
+                    TensorDict(expandable_weights), 
+                    'b n ... -> (b n) ...'
+                )
+        
+            functional_weights = {**dict(expandable_weights), **non_expandable_weights}
 
         seq = self.retrieve_norm(seq)
-
-        # sequence Float['b n d'] to queries
-
         queries = self.to_queries(seq)
-
-        # maybe multihead
-
         queries = self.split_heads(queries)
-
-        # maybe qk rmsnorm
-
         queries = self.q_norm(queries)
-
-        # fetch values from memory model
-
-        if weights_have_expanded_shape:
-            weights = rearrange_dict_values(weights, 'b n ... -> (b n) ...')
-
         queries = rearrange(queries, 'b h (n c) d -> (b h n) c d', c = chunk_size)
 
         # forward functional call
-
-        values = functional_call(self.memory_model, dict(weights), queries)
+        values = functional_call(self.memory_model, functional_weights, queries)
 
         # reconstitute batch dimension
-
         values = rearrange(values, '(b h n) c d -> b h (n c) d', b = batch, h = self.heads)
-
         values = self.multihead_rmsnorm(values)
-
-        # maybe gate
 
         if exists(self.retrieve_gate):
             values = values * self.retrieve_gate(seq)
 
-        # maybe merge heads and combine
-
         values = self.merge_heads(values)
-
         values = self.combine_heads(values)
-
-        # restore, pad with empty memory embed
 
         if need_pad:
             values = values[:, 1:]
@@ -980,7 +1046,47 @@ class NeuralMemory(Module):
             if not exists(past_updates):
                 return future_updates
 
-            return TensorDict({param_name: cat((past_update[:, :-1], future_update), dim = 1) for (param_name, past_update), (_, future_update) in zip(past_updates.items(), future_updates.items())})
+            if not self.update_memory:
+                accumulated = {}
+                for (param_name, past_update), (_, future_update) in zip(past_updates.items(), future_updates.items()):
+                    # Handle empty sequence dimension case
+                    if past_update.shape[1] == 0:
+                        accumulated[param_name] = future_update
+                        continue
+                    if future_update.shape[1] == 0:
+                        accumulated[param_name] = past_update
+                        continue
+                        
+                    # Ensure matching dimensions
+                    if past_update.ndim != future_update.ndim:
+                        # Align dimensions by expanding
+                        if past_update.ndim < future_update.ndim:
+                            past_update = past_update.unsqueeze(-1).expand(*past_update.shape, 
+                                                                        *(future_update.shape[2:] if future_update.ndim > 2 else (1,)))
+                        else:
+                            future_update = future_update.unsqueeze(-1).expand(*future_update.shape,
+                                                                            *(past_update.shape[2:] if past_update.ndim > 2 else (1,)))
+
+                    # Handle batch dimension (dim 0)
+                    if past_update.shape[0] != future_update.shape[0]:
+                        if past_update.shape[0] == 1:
+                            past_update = past_update.expand(future_update.shape[0], *past_update.shape[1:])
+                        elif future_update.shape[0] == 1:
+                            future_update = future_update.expand(past_update.shape[0], *future_update.shape[1:])
+                        else:
+                            raise ValueError(f"Batch size mismatch: {past_update.shape[0]} vs {future_update.shape[0]}")
+
+                    # Handle sequence dimension (dim 1)
+                    seq_len = min(past_update.shape[1], future_update.shape[1])
+                    past_slice = past_update[:, :seq_len-1] if seq_len > 1 else past_update[:, :0]  # Handle empty case
+                    future_slice = future_update[:, :seq_len]
+                    
+                    # Concatenate along sequence dimension
+                    accumulated[param_name] = torch.cat((past_slice, future_slice), dim=1)
+                
+                return TensorDict(accumulated)
+            else:
+                return TensorDict({param_name: cat((past_update[:, :-1], future_update), dim = 1) for (param_name, past_update), (_, future_update) in zip(past_updates.items(), future_updates.items())})
 
         # loop through chunks of store sequences
 
@@ -1013,13 +1119,11 @@ class NeuralMemory(Module):
                 mask = maybe_store_mask,
                 return_surprises = True
             )
-
+            
             weights = next_neural_mem_state.weights
             seq_index = next_neural_mem_state.seq_index
             past_state = next_neural_mem_state.states
-
             updates = accum_updates(updates, next_updates)
-
             surprises = tuple(safe_cat(args, dim = -1) for args in zip(surprises, chunk_surprises))
 
             if is_last and not update_after_final_store:

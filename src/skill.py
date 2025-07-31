@@ -66,6 +66,7 @@ class SkillMemory(nn.Module):
                  forward_coef: float = 0.2,
                  entropy_coef: float = 0.3,
                  checkpoint: bool = False,
+                 update_memory: bool = True,
                  mem_config: dict = dict(mac=dict())):
         super().__init__()
         info(f"Skill memory (state_size: {state_dim}, action_size: {action_dim}, mem_type: {mem_type})")
@@ -112,6 +113,7 @@ class SkillMemory(nn.Module):
                 neural_mem_qkv_receives_diff_views=mac_neural_mem_qkv_receives_diff_views,
                 neural_mem_kwargs = dict(
                     heads=mac_neural_mem_heads,
+                    update_memory=update_memory,
                     dim_head=mac_neural_mem_head_dim,
                     momentum=mac_neural_mem_momentum,
                     qk_rmsnorm=mac_neural_mem_qk_rmsnorm,
@@ -171,9 +173,9 @@ class SkillMemory(nn.Module):
         self.rev = GradientReversal.apply
 
         self.mi_coef = mi_coef
-        self.entropy_coef = entropy_coef
-        self.adv_coef = adv_coef
         self.kl_coef = kl_coef
+        self.adv_coef = adv_coef
+        self.entropy_coef = entropy_coef
         self.forward_coef = forward_coef
         self.kl_epsilon = 1e-8
     

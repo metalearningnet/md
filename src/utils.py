@@ -191,6 +191,10 @@ class Cfg:
     @property
     def context_window(self):
         return self.model.get('context_window', 4)
+
+    @property
+    def update_memory(self):
+        return self.model.get('update_memory', False)
     
     @property
     def ckpt_path(self):
@@ -224,6 +228,15 @@ class Cfg:
     @property
     def max_hints(self):
         return self.hint.get('max_hints', -1)
+    
+    @property
+    def tune_special_token_embeddings(self):
+        if self.skill_integration_strategy == 'hint':
+            return self.hint.get('tune')
+        elif self.skill_integration_strategy == 'annotation':
+            return self.annotation.get('tune')
+        else:
+            return False
     
     @property
     def min_interval(self):

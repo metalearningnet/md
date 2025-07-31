@@ -46,7 +46,8 @@ class MD(nn.Module):
     def __init__(self,
                  config = cfg,
                  attn: str = None,
-                 dist: bool = False):
+                 dist: bool = False,
+                 update_memory: bool = True):
         super().__init__()
         self.dist = dist
         self.device = get_device()
@@ -66,8 +67,10 @@ class MD(nn.Module):
         self.num_special_words = config.num_special_words
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
+        self.update_memory = True if update_memory else config.update_memory
+        self.tune_special_token_embeddings = config.tune_special_token_embeddings
         self.dtype = torch.float16 if config.precision == '16-mixed' else torch.bfloat16
-
+        
         self.lm_path = config.lm_path
         self.lm_coef = config.lm_coef
         self.lm_freeze = config.lm_freeze
@@ -200,7 +203,8 @@ class MD(nn.Module):
             'action_dim': self.action_dim,
             'hidden_dim': self.skill_hidden_dim,
             'mem_config': self.mem_config,
-            'checkpoint': self.skill_checkpoint
+            'checkpoint': self.skill_checkpoint,
+            'update_memory': self.update_memory,
         })
         self.skill_memory = SkillMemory(**self.skill_config)
     
@@ -244,25 +248,26 @@ class MD(nn.Module):
         assert self.action_proj[-2].out_features == self.hidden_size
 
     def _make_special_token_embeddings_trainable(self, model):
-        embedding_layer = model.get_input_embeddings()
-        device = embedding_layer.weight.device
-        embedding_layer.weight.requires_grad_(True)
-        
-        self.register_buffer('_trainable_mask', torch.zeros_like(embedding_layer.weight, dtype=torch.bool, device=device))
-        
-        with torch.no_grad():
-            for token_id in self.token_extended_ids:
-                self._trainable_mask[token_id] = True
-        
-        def _hook(grad):
-            return grad * self._trainable_mask.to(grad.device)
-        
-        embedding_layer.weight.register_hook(_hook)
-        
-        with torch.no_grad():
-            for i, param in enumerate(embedding_layer.weight):
-                if i not in self.token_extended_ids:
-                    param.requires_grad_(False)
+        if self.tune_special_token_embeddings:
+            embedding_layer = model.get_input_embeddings()
+            device = embedding_layer.weight.device
+            embedding_layer.weight.requires_grad_(True)
+            
+            self.register_buffer('_trainable_mask', torch.zeros_like(embedding_layer.weight, dtype=torch.bool, device=device))
+            
+            with torch.no_grad():
+                for token_id in self.token_extended_ids:
+                    self._trainable_mask[token_id] = True
+            
+            def _hook(grad):
+                return grad * self._trainable_mask.to(grad.device)
+            
+            embedding_layer.weight.register_hook(_hook)
+            
+            with torch.no_grad():
+                for i, param in enumerate(embedding_layer.weight):
+                    if i not in self.token_extended_ids:
+                        param.requires_grad_(False)
     
     def _init_params(self):
         assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
@@ -918,13 +923,14 @@ class MD(nn.Module):
         config = cfg,
         attn: str = None,
         dist: bool = False,
+        update_memory: bool = False,
         checkpoint_path: str = cfg.ckpt_path,
         **kwargs
     ) -> 'MD':
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
 
-        model = cls(config=config, attn=attn, dist=dist, **kwargs)
+        model = cls(config=config, attn=attn, dist=dist, update_memory=update_memory, **kwargs)
 
         try:
             state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)

@@ -493,7 +493,7 @@ class MemoryAsContextTransformer(Module):
         use_flex_attn = False,
         sliding_window_attn = False,
         neural_mem_weight_residual = False,
-        token_emb: Module | None = None,
+        token_emb: Module | None = None
     ):
         super().__init__()
 
@@ -713,7 +713,6 @@ class MemoryAsContextTransformer(Module):
         self,
         x,
         return_loss = False,
-        return_loss_breakdown = False,
         disable_flex_attn = False,
         cache = None,
         return_cache = False,
