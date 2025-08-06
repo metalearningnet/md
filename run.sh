@@ -68,7 +68,7 @@ run_unittests() {
             local script_name="test_${category}.py"
             local script_path="${PROJECT_DIR}/scripts/${script_name}"
             
-            log_info "Running unit tests for category: ${category}"
+            log_info "Running unit tests (category: ${category})"
             validate_script "$script_path"
             
             if "$PYTHON" "$script_path" "$@"; then

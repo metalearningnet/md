@@ -39,7 +39,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from vocab import HINT_VOCAB
+from vocab import VOCAB
 from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT, MEMORY
 
 LOG = getattr(settings, 'LOG', False)
@@ -109,7 +109,6 @@ class Cfg:
     log_interval: int
     label_pad_token_id: int
     remove_unused_columns: bool
-    gradient_accumulation_steps: int
     
     @property
     def attn(self):
@@ -134,7 +133,7 @@ class Cfg:
     
     @property
     def lm_coef(self):
-        return self.model.get('lm_coef', 1.0)
+        return self.model.get('lm_coef', 0.8)
     
     @property
     def lm_freeze(self):
@@ -166,7 +165,7 @@ class Cfg:
     
     @property
     def skill_coef(self):
-        return self.model.get('skill_coef', 0.05)
+        return self.model.get('skill_coef', 0.2)
     
     @property
     def skill_checkpoint(self):
@@ -183,6 +182,11 @@ class Cfg:
             return f'{strategy}-{self.hint_category}'
         else:
             return strategy
+    
+    @property
+    def skill_vocab(self):
+        if self.skill_integration_strategy == 'hint':
+            return VOCAB['hint']
 
     @property
     def use_cache(self):
@@ -205,7 +209,7 @@ class Cfg:
         if self.skill_integration_strategy == 'annotation':
             return self.annotation.get('words', 8)
         elif self.skill_integration_strategy == 'hint':
-            return len(HINT_VOCAB[self.hint_category])
+            return len(VOCAB['hint'][self.hint_category])
         else:
             return 0
     
@@ -257,15 +261,19 @@ class Cfg:
     
     @property
     def lr(self):
-        return self.optimizer['gradient'].get('lr', 5e-5)
+        return self.optimizer['gradient'].get('lr', 3e-5)
+    
+    @property
+    def eps(self):
+        return self.optimizer['gradient'].get('eps', 1e-6)
     
     @property
     def betas(self):
-        return self.optimizer['gradient'].get('betas', (0.9, 0.98))
+        return self.optimizer['gradient'].get('betas', (0.9, 0.95))
     
     @property
     def weight_decay(self):
-        return self.optimizer['gradient'].get('weight_decay', 0.05)
+        return self.optimizer['gradient'].get('weight_decay', 0.1)
     
     @property
     def po_conf_file(self):
@@ -297,8 +305,7 @@ cfg = Cfg(
     annotation=ANNOTATION,
     log_interval=LOG_INTERVAL,
     label_pad_token_id=LABEL_PAD_TOKEN_ID,
-    remove_unused_columns=REMOVE_UNUSED_COLUMNS,
-    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS
+    remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
 
 if cfg.po == 'NCA':
@@ -442,22 +449,12 @@ def load_peft_config():
     with open(CONF_DIR / PEFT_FILE) as f:
         return yaml.safe_load(f)
 
-def add_dist_config(
+def set_dist_config(
         config: dict,
         main_addr: Optional[str] = None,
         main_port: Optional[int] = None,
-        num_nodes: Optional[int] = None,
-        betas: Optional[List[float]] = None,
-        weight_decay: float = 0.05,
-        eps: float = 1e-8,
-        lr: float = 5e-5
+        num_nodes: Optional[int] = None
     ):
- 
-    if betas is None:
-        betas = (0.9, 0.98)
-    else:
-        betas = tuple(float(b) for b in betas)
-
     dist_config = load_dist_config()
 
     if num_nodes != None:
@@ -486,25 +483,33 @@ def add_dist_config(
         os.environ['MASTER_PORT'] = str(dist_config['main_port'])
         config['fabric_config'].update({'num_nodes': dist_config['num_nodes']})
     
-    config['fabric_config']['strategy'] = dist_config['strategy']
+    strategy_name = dist_config['strategy'].lower()
+    valid_strategies = {'deepspeed', 'ddp', 'fsdp'}
+    if strategy_name not in valid_strategies:
+        raise ValueError(f"Unknown strategy '{strategy_name}'. Valid options: {valid_strategies}")
+    
+    strategy_config = dist_config.get(strategy_name, {})
+    if 'optimizer' not in strategy_config:
+        strategy_config.update({
+            'optimizer': {
+                'type': 'AdamW',
+                'params': {
+                    'lr': cfg.lr,
+                    'eps': cfg.eps,
+                    'betas': cfg.betas,
+                    'weight_decay': cfg.weight_decay
+                }
+            }
+        })
 
-    if dist_config['strategy'] == 'deepspeed':
+    if strategy_name == 'deepspeed':
         from lightning.fabric.strategies import DeepSpeedStrategy
+        strategy = DeepSpeedStrategy(config=strategy_config)
+    else:
+        from lightning.fabric.strategies import Strategy
+        strategy = Strategy.strategy_from_name(strategy_name)
 
-        if 'optimizer' in dist_config['deepspeed']:
-            lr = dist_config['deepspeed']['optimizer']['params'].get('lr', lr)
-            eps = dist_config['deepspeed']['optimizer']['params'].get('eps', eps)
-            betas = dist_config['deepspeed']['optimizer']['params'].get('betas', betas)
-            weight_decay = dist_config['deepspeed']['optimizer']['params'].get('weight_decay', weight_decay)
-            
-            dist_config['deepspeed']['optimizer']['params']['lr'] = float(lr)
-            dist_config['deepspeed']['optimizer']['params']['eps'] = float(eps)
-            dist_config['deepspeed']['optimizer']['params']['betas'] = betas
-            dist_config['deepspeed']['optimizer']['params']['weight_decay'] = float(weight_decay)
-        
-        cfg.gradient_accumulation_steps = int(dist_config.get('gradient_accumulation_steps', GRADIENT_ACCUMULATION_STEPS))
-        config['fabric_config']['strategy'] = DeepSpeedStrategy(config=dist_config['deepspeed'])
-        config['gradient_accumulation_steps'] = cfg.gradient_accumulation_steps
+    config['fabric_config']['strategy'] = strategy
 
 def calculate_lm_loss(outputs, batch, loss_fn):
     lm_logits = outputs['logits']
@@ -567,8 +572,7 @@ def md_train(
     fabric,
     num_samples=-1,
     log_dir=None,
-    log_interval=1,
-    gradient_accumulation_steps=1
+    log_interval=1
 ):
     model.train()
     po = get_po(model)
@@ -617,19 +621,13 @@ def md_train(
                 warn("NaN/Inf gradients detected, skipping update")
                 continue
         
-        if loss.requires_grad:
-            fabric.backward(loss)
-        else:
-            warn("Loss does not require grad, cannot backpropagate.")
-            continue
-
         if optimizer:
-            optimizer.step()
             optimizer.zero_grad()
+            fabric.backward(loss)
+            optimizer.step()
         else:
-            if (step + 1) % gradient_accumulation_steps == 0:
-                model._forward_module.step()
-
+            fabric.backward(loss)
+        
         metrics['steps'] += 1
         metrics['total_loss'] += loss.item()
         

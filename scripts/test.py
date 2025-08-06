@@ -9,7 +9,7 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, add_dist_config, default_dataset_path, clear_directory
+from utils import md_validate, cfg, set_dist_config, default_dataset_path, clear_directory
 
 def test(config: dict):
     """
@@ -124,7 +124,7 @@ def main():
     }
     
     if args.dist:
-        add_dist_config(
+        set_dist_config(
             fabric_config, 
             main_addr=args.addr, 
             main_port=args.port, 

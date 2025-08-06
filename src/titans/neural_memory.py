@@ -51,14 +51,40 @@ NeuralMemState = namedtuple('NeuralMemState', [
     'updates',
 ])
 
+from contextlib import contextmanager
+from collections import OrderedDict
+
+@contextmanager
+def disable_deepspeed_hooks(model):
+    hooks = {}
+    # Save original hooks
+    for name, module in model.named_modules():
+        hooks[name] = {
+            'pre': module._forward_pre_hooks,
+            'forward': module._forward_hooks,
+            'backward': module._backward_hooks,
+        }
+        # Clear hooks
+        module._forward_pre_hooks = OrderedDict()
+        module._forward_hooks = OrderedDict()
+        module._backward_hooks = OrderedDict()
+    
+    try:
+        yield
+    finally:
+        # Restore hooks safely
+        for name, module in model.named_modules():
+            if name in hooks:
+                module._forward_pre_hooks = hooks[name]['pre']
+                module._forward_hooks = hooks[name]['forward']
+                module._backward_hooks = hooks[name]['backward']
+
 def mem_state_detach(
     state: NeuralMemState
 ):
     assert isinstance(state, NeuralMemState)
     state = tree_map(lambda t: t.detach() if is_tensor(t) else t, tuple(state))
     return NeuralMemState(*state)
-
-# functions
 
 def exists(v):
     return v is not None
@@ -195,11 +221,11 @@ class MultiheadRMSNorm(Module):
         self.gamma = Parameter(torch.zeros(heads, 1, dim))
 
     def forward(self, x):
-        #############################################
+        #####################################
         # Original:
-        #############################################
+        #####################################
         # return self.rmsnorm(x) * (self.gamma + 1.)
-        #############################################
+        #####################################
         orig_shape = x.shape
         x = self.rmsnorm(x)
         
@@ -314,6 +340,7 @@ class NeuralMemory(Module):
         gated_transition = False,
         mem_model_norm_add_residual = True, # by default, layernorm output and add residual as proposed in TTT paper, but could be removed
         update_memory = True,
+        manual_per_sample_grads = True,
         default_model_kwargs: dict = dict(
             depth = 2,
             expansion_factor = 4.
@@ -324,6 +351,7 @@ class NeuralMemory(Module):
         assert not (heads == 1 and dim_head != dim)
 
         self.update_memory = update_memory
+        self.manual_per_sample_grads = manual_per_sample_grads
         self.retrieve_chunk_size, self.store_chunk_size = pair(chunk_size)
 
         # batch size
@@ -418,15 +446,18 @@ class NeuralMemory(Module):
 
         # prepare function for per sample gradients from model above, using torch.func
      
-        def forward_and_loss(params, inputs, loss_weights, target):
-            pred = functional_call(self.memory_model, params, inputs)
-            loss = self.store_memory_loss_fn(pred, target) # simple mse loss in paper - eq (12) - |M(k) - v|²
-            weighted_loss = loss * loss_weights
-            return weighted_loss.sum(), loss
-        
-        grad_fn = grad(forward_and_loss, has_aux = True)
-        
-        self.per_sample_grad_fn = vmap(grad_fn, in_dims = (0, 0, 0, 0))
+        if self.manual_per_sample_grads:
+            self.per_sample_grad_fn = None
+        else:
+            def forward_and_loss(params, inputs, loss_weights, target):
+                pred = functional_call(self.memory_model, params, inputs)
+                loss = self.store_memory_loss_fn(pred, target) # simple mse loss in paper - eq (12) - |M(k) - v|²
+                weighted_loss = loss * loss_weights
+                return weighted_loss.sum(), loss
+            
+            grad_fn = grad(forward_and_loss, has_aux = True)
+            
+            self.per_sample_grad_fn = vmap(grad_fn, in_dims = (0, 0, 0, 0))
 
         # queries for retrieving from the model
 
@@ -589,6 +620,72 @@ class NeuralMemory(Module):
 
         return zeros
 
+    def _compute_per_sample_grads(
+        self,
+        weights: dict[str, Tensor],
+        keys: Tensor,
+        adaptive_lr: Tensor,
+        values: Tensor
+    ) -> tuple[dict[str, Tensor], Tensor]:
+        if not self.manual_per_sample_grads:
+            return self.per_sample_grad_fn(weights, keys, adaptive_lr, values)
+        
+        batch_size = keys.shape[0]
+        if batch_size == 0:
+            example_param = next(iter(weights.values()))
+            device = example_param.device
+            dtype = example_param.dtype
+            
+            empty_grads = {
+                name: torch.empty((0,) + param.shape, device=device, dtype=dtype)
+                for name, param in weights.items()
+            }
+            empty_loss = torch.empty((0, 0), device=keys.device, dtype=keys.dtype)
+            return empty_grads, empty_loss
+            
+        grads = {name: [] for name in weights.keys()}
+        unweighted_losses = []
+        
+        for i in range(batch_size):
+            # Prepare sample data
+            sample_keys = keys[i:i+1]
+            sample_adaptive_lr = adaptive_lr[i:i+1]
+            sample_values = values[i:i+1]
+            sample_weights = {
+                name: p[i].detach().requires_grad_(True) 
+                for name, p in weights.items()
+            }
+            
+            # Forward pass with hook-disabling
+            with disable_deepspeed_hooks(self.memory_model):
+                pred = functional_call(
+                    self.memory_model, 
+                    sample_weights, 
+                    sample_keys
+                )
+            
+            loss = self.store_memory_loss_fn(pred, sample_values)
+            weighted_loss = (loss * sample_adaptive_lr).sum()
+            
+            # Backward pass - compute gradients
+            grad_sample = torch.autograd.grad(
+                weighted_loss,
+                sample_weights.values(),
+                retain_graph=False,
+                create_graph=False
+            )
+            
+            # Store results
+            for j, name in enumerate(weights.keys()):
+                grads[name].append(grad_sample[j])
+            unweighted_losses.append(loss.detach())
+        
+        # Stack results
+        grads = {name: torch.stack(grad_list, dim=0) for name, grad_list in grads.items()}
+        unweighted_loss = torch.cat(unweighted_losses, dim=0)
+        
+        return grads, unweighted_loss
+
     def store_memories(
         self,
         seq,
@@ -719,7 +816,15 @@ class NeuralMemory(Module):
         
         # get grads and extra auxiliary loss (for backwarding through qkv projection in base neural memory module)
 
-        grads, unweighted_mem_model_loss = self.per_sample_grad_fn(dict(weights_for_surprise), keys, adaptive_lr, values)
+        #####################################
+        # Original:
+        #####################################
+        # grads, unweighted_mem_model_loss = self.per_sample_grad_fn(dict(weights_for_surprise), keys, adaptive_lr, values)
+        #####################################
+        # Changed:
+        #####################################
+        grads, unweighted_mem_model_loss = self._compute_per_sample_grads(dict(weights_for_surprise), keys, adaptive_lr, values)
+        #####################################
 
         grads = TensorDict(grads)
 
@@ -753,7 +858,6 @@ class NeuralMemory(Module):
 
             minibatch_init_weight = weights
             init_momentum = self.init_momentum(batch)
-
             past_state = (minibatch_init_weight, init_momentum)
         
         if not self.update_memory:
@@ -834,7 +938,6 @@ class NeuralMemory(Module):
 
                 for one_adaptive_momentum, one_last_momentum in zip_longest(adaptive_momentum, last_momentum):
                     momentum = self.assoc_scan(one_adaptive_momentum, momentum, prev = one_last_momentum) # momentum is S / surprise in the paper
-
                     momentums.append(momentum)
 
                 momentums = stack(momentums)
@@ -874,6 +977,18 @@ class NeuralMemory(Module):
             return updates, next_store_state
 
         return updates, next_store_state, (unweighted_mem_model_loss, adaptive_lr)
+
+    def _forward_with_weights(
+        self,
+        model: nn.Module,
+        weights: dict[str, torch.Tensor],
+        inputs: torch.Tensor
+    ) -> torch.Tensor:
+        if not self.manual_per_sample_grads:
+            return functional_call(model, weights, inputs)
+        
+        with disable_deepspeed_hooks(model):
+            return functional_call(model, weights, inputs)
 
     def retrieve_memories(
         self,
@@ -949,9 +1064,19 @@ class NeuralMemory(Module):
         queries = rearrange(queries, 'b h (n c) d -> (b h n) c d', c = chunk_size)
 
         # forward functional call
-        values = functional_call(self.memory_model, functional_weights, queries)
+
+        #####################################
+        # Original:
+        #####################################
+        # values = functional_call(self.memory_model, functional_weights, queries)
+        #####################################
+        # Changed:
+        #####################################
+        values = self._forward_with_weights(self.memory_model, functional_weights, queries)
+        #####################################
 
         # reconstitute batch dimension
+
         values = rearrange(values, '(b h n) c d -> b h (n c) d', b = batch, h = self.heads)
         values = self.multihead_rmsnorm(values)
 

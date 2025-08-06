@@ -1,43 +1,46 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "path": "Qwen/Qwen3-0.6B",         # Identifier for the pretrained language model (from HuggingFace)
-        "temperature": 0.7,                # Controls randomness in token sampling (higher = more diverse outputs)
-        "freeze": True,                    # Whether to freeze the pretrained LM weights during training
-        "max_length": 384,                 # Maximum token length for input + output sequences
-        "max_target_length": 256,          # Maximum token length allowed for output sequences
-        "max_prompt_length": 128           # Max tokens allowed in prompt before truncation
+        "path": "Qwen/Qwen3-0.6B",         # Pretrained model identifier from HuggingFace Hub
+        "temperature": 0.7,                # Sampling temperature (0.0: deterministic, 1.0: creative)
+        "freeze": True,                    # Freeze base LM weights during training
+        "max_length": 384,                 # Maximum total sequence length
+        "max_target_length": 256,          # Maximum generated output length in tokens
+        "max_prompt_length": 128           # Maximum input prompt length
     },
 
     # Skill Memory Configuration
     "skill": {
-        "mem_type": "mac",                 # MAC (Memory as Context)
+        "mem_type": "mac",                 # Memory architecture type (Memory-as-Context)
 
         # Loss Balancing Coefficients
-        "mi_coef": 0.5,                    # Weight for mutual information maximization
-        "kl_coef": 0.01,                   # Controls KL divergence penalty for prior-policy alignment
-        "adv_coef": 0.1,                   # Scales adversarial loss component
-        "entropy_coef": 0.3,               # Encourages exploration via policy entropy regularization
-        "forward_coef": 0.2,               # Weight for forward prediction consistency loss
+        "mi_coef": 0.6,                    # Weight for state-memory mutual information
+        "kl_coef": 0.03,                   # Weight for memory consistency regularization
+        "adv_coef": 0.15,                  # Weight for action-memory disentanglement
+        "entropy_coef": 0.05,              # Weight for policy exploration incentive
 
-        # Action Space Configuration
-        "action_dim": 128                  # Dimensionality of action embeddings
+        # Dimensionality Settings
+        "state_dim": 256,                  # Dimension of state embeddings
+        "action_dim": 64,                  # Dimension of action space
+        "hidden_dim": 128,                 # Hidden layer dimension
+
+        "manual_per_sample_grads": False   # Use manual gradient computation
     },
     
     # Training Objective Weights
-    "lm_coef": 1.0,                        # Proportional weight for language modeling loss
-    "skill_coef": 0.05,                    # Proportional weight for skill learning objectives (0.0 = pure LM)
+    "lm_coef": 0.8,                        # Language modeling loss weight
+    "skill_coef": 0.2,                     # Skill learning loss weight
 
-    # Integration Strategy for Skill Output into the Language Model
-    "context_window": 4,                   # Lookahead window size for determining insertion position of skill output
-    "skill_integration_strategy": "hint",  # Options: 'fusion' | 'annotation' | 'hint'
+    # Skill Integration Configuration
+    "context_window": 4,                   # Token lookahead window for skill insertion
+    "skill_integration_strategy": "hint",  # Integration method: 'fusion' | 'annotation' | 'hint'
 
-    # Inference-Time Behavior
+    # Inference Settings
     "use_cache": False,                    # Enable KV caching for faster autoregressive decoding
     "update_memory": True                  # Allow memory updates during inference
 }
 
-# Memory Architecture
+# Memory Architecture Configuration
 MEMORY = {
     "mac": {
         "depth": 1,                                      # Number of stacked MAC blocks
@@ -66,63 +69,60 @@ MEMORY = {
     }
 }
 
-# Fusion Settings (used when skill_integration_strategy == 'fusion')
+# Fusion Settings (active when strategy='fusion')
 FUSION = {
-    # Skill-LM Adapter Configuration
     "adapter": {
-        "proj_scale": 2,                   # Expansion factor for intermediate adapter dimensions
-        "proj_dropout": 0.1,               # Dropout rate applied after adapter projections
-        "min_proj_dim": 32,                # Minimum hidden dimension size in adapter layers
-        "norm_position": "post"            # Position of LayerNorm: 'pre' (before) or 'post' (after) activation
+        "proj_scale": 2,                   # Hidden dimension expansion factor
+        "proj_dropout": 0.1,               # Dropout rate for adapter layers
+        "min_proj_dim": 32,                # Minimum hidden dimension size
+        "norm_position": "post"            # LayerNorm placement: 'pre' | 'post'
     }
 }
 
-# Annotation Generation Settings (used when skill_integration_strategy == 'annotation')
+# Annotation Settings (active when strategy='annotation')
 ANNOTATION = {
-    "words": 8,                            # Number of distinct word types allowed per annotation
-    "max_length": 2,                       # Max token length per annotation
-    "max_annotations": 4,                  # Max number of annotations per response (-1 for unlimited)
-    "min_interval": 128,                   # Minimum token distance between annotations
-    "tune": True                           # Whether annotation embeddings are fine-tuned during training
+    "words": 8,                            # Vocabulary size for annotations
+    "max_length": 2,                       # Maximum tokens per annotation
+    "max_annotations": 4,                  # Maximum annotations per response (-1 for unlimited)
+    "min_interval": 128,                   # Minimum tokens between annotations
+    "tune": True                           # Fine-tune annotation embeddings
 }
 
-# Hint Generation Settings (used when skill_integration_strategy == 'hint')
+# Hint Settings (active when strategy='hint')
 HINT = {
-    "category": "minimal",                 # Options: 'minimal' | 'standard' | 'enhanced' | 'advanced'
-    "max_hints": 16,                       # Max number of hints per response (-1 for unlimited)
-    "min_interval": 16,                    # Minimum token distance between hints
-    "tune": True                           # Whether hint token embeddings are trainable
+    "category": "standard",                # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
+    "max_hints": 16,                       # Maximum hints per response (-1 for unlimited)
+    "min_interval": 16,                    # Minimum tokens between hints
+    "tune": True                           # Fine-tune hint embeddings
 }
 
 # Checkpointing Configuration
 CKPT = {
-    # Enables gradient checkpointing to reduce GPU memory usage
     "gradient": {
-        "lm": False,                       # Gradient checkpointing for the Language Model
-        "skill": False                     # Skill Memory
+        "lm": False,                       # Gradient checkpointing for LM
+        "skill": False                     # Gradient checkpointing for skill memory
     }
 }
 
 # Optimization Configuration
 OPTIMIZER = {
-    # Preference optimization method
-    "preference": "SimPO",                 # Options: 'SimPO' | 'NCA'
+    "preference": "SimPO",                 # Preference optimization method: 'SimPO' | 'NCA'
 
-    # Gradient optimizer settings
     "gradient": {
         "lr": 3e-5,                        # Base learning rate
-        "betas": (0.9, 0.98),              # Betas for AdamW optimizer
-        "weight_decay": 0.05               # Regularization parameter to prevent overfitting
+        "eps": 1e-6,                       # Numerical stability term for AdamW optimizer
+        "betas": (0.9, 0.95),              # Betas for AdamW optimizer
+        "weight_decay": 0.1                # Regularization parameter to prevent overfitting
     }
 }
 
-# Data Processing Configuration
+# Data Loading Configuration
 LOADER = {
-    "truncation_mode": "keep_start"        # Truncation strategy; Options:  'keep_start' | 'keep_end'
+    "truncation_mode": "keep_start"        # Sequence truncation strategy: 'keep_start' | 'keep_end'
 }
 
-# Numerical Precision Setting
-PRECISION = "bf16-mixed"                   # Floating-point precision; Options: '16-mixed' | 'bf16-mixed'
+# Numerical Precision
+PRECISION = "bf16-mixed"                   # Mixed-precision training mode: '16-mixed' | 'bf16-mixed'
 
 # Logging Configuration
 LOG = True

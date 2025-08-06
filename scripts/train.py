@@ -11,7 +11,7 @@ sys.path.append(str(_src_dir))
 from md import MD
 from loader import MDLoader
 from utils import (
-    MD_TAG, md_train, md_validate, cfg, add_dist_config,
+    MD_TAG, md_train, md_validate, cfg, set_dist_config,
     default_dataset_path, get_strategy, clear_directory, info
 )
 
@@ -26,8 +26,8 @@ def train(config: dict):
         - epochs: Number of epochs.
         - samples: Number of samples.
         - batch_size: Training batch size.
-        - gradient_accumulation_steps: Number of steps to accumulate gradients before updating model weights.
         - lr: Learning rate.
+        - eps: Numerical stability term for AdamW optimizer.
         - betas: Betas for AdamW optimizer.
         - weight_decay: Weight decay.
         - ckpt_path: Checkpoint path.
@@ -48,10 +48,10 @@ def train(config: dict):
         num_epochs = config.get('epochs', 1)
         num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
-        gradient_accumulation_steps = config.get('gradient_accumulation_steps', 4)
-        lr = config.get('lr', 5e-5)
-        betas = config.get('betas', (0.9, 0.98))
-        weight_decay = config.get('weight_decay', 0.05)
+        lr = config.get('lr', 3e-5)
+        eps = config.get('eps', 1e-6)
+        betas = config.get('betas', (0.9, 0.95))
+        weight_decay = config.get('weight_decay', 0.1)
         ckpt_path = Path(config.get('ckpt_path', ''))
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
@@ -60,7 +60,7 @@ def train(config: dict):
         has_log = config.get('log', False)
         log_dir = Path(config.get('log_dir', ''))
         log_interval = config.get('log_interval', 1)
-
+        
         val_samples = max(int(num_samples * val_split), 1) if num_samples != -1 else -1
         
         if not dist:
@@ -85,6 +85,7 @@ def train(config: dict):
             optimizer = torch.optim.AdamW(
                 trainable_params,
                 lr=lr,
+                eps=eps,
                 betas=betas,
                 weight_decay=weight_decay
             )
@@ -142,8 +143,7 @@ def train(config: dict):
                 fabric=fabric,
                 num_samples=num_samples,
                 log_dir=log_dir,
-                log_interval=log_interval,
-                gradient_accumulation_steps=gradient_accumulation_steps
+                log_interval=log_interval
             )
             
             log_info = [
@@ -194,8 +194,6 @@ def main():
                         help="Number of training samples")
     parser.add_argument("--batch_size", type=int, default=1,
                         help="Training batch size")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
-                        help="Number of steps to accumulate gradients before updating model weights")
 
     # System configuration
     parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
@@ -233,9 +231,9 @@ def main():
         'epochs': args.epochs,
         'samples': args.samples,
         'batch_size': args.batch_size,
-        'gradient_accumulation_steps': args.gradient_accumulation_steps,
 
         'lr': cfg.lr,
+        'eps': cfg.eps,
         'betas': cfg.betas,
         'weight_decay': cfg.weight_decay,
 
@@ -256,14 +254,11 @@ def main():
     }
 
     if args.dist:
-        add_dist_config(
+        set_dist_config(
             config,
             main_addr=args.addr,
             main_port=args.port,
-            num_nodes=args.nodes,
-            weight_decay=cfg.weight_decay,
-            betas=cfg.betas,
-            lr=cfg.lr
+            num_nodes=args.nodes
         )
 
     train(config)

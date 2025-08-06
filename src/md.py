@@ -10,8 +10,18 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
     cfg, info, warn, get_device, load_peft_config, get_special_token_by_index,
-    LogitsDecoder, SEP_TOKEN, HINT_VOCAB, RESERVED_TOKENS
+    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS
 )
+
+class SafeEmbeddingWrapper(nn.Module):
+    def __init__(self, embedding_layer):
+        super().__init__()
+        self.embedding_layer = embedding_layer
+        
+    def forward(self, input):
+        # Ensure no in-place modifications
+        input = input.detach().clone()
+        return self.embedding_layer(input)
 
 class AdaptedEmbedding(nn.Module):
     def __init__(self, original_embedding, peft_config):
@@ -51,7 +61,6 @@ class MD(nn.Module):
         super().__init__()
         self.dist = dist
         self.device = get_device()
-
         self.use_cache = config.use_cache
         self.model_dir = config.model_dir
         self.max_hints = config.max_hints
@@ -77,6 +86,7 @@ class MD(nn.Module):
         self.lm_checkpoint = config.lm_checkpoint
 
         self.skill_coef = config.skill_coef
+        self.skill_vocab = config.skill_vocab
         self.skill_config = config.skill_config
         self.skill_checkpoint = config.skill_checkpoint
         self.skill_integration_strategy = config.skill_integration_strategy
@@ -102,7 +112,7 @@ class MD(nn.Module):
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
-        info(f"MD (hidden_size: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_words}, preference_optimizer: {config.po})")
+        info(f"MD (hidden_dim: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_words}, preference_optimizer: {config.po})")
 
     def set_max_steps(self, max_steps):
         self.max_steps = max_steps
@@ -193,20 +203,29 @@ class MD(nn.Module):
 
     def _init_skill(self) -> nn.Module:
         if self.skill_integration_strategy in ['hint', 'annotation']:
-            self.action_dim = self.num_special_words + 1
+            self.skill_action_dim = self.num_special_words + 1
+        elif self.skill_integration_strategy == 'fusion':
+            self.skill_action_dim = self.num_tokens
         else:
-            self.action_dim = self.skill_config.get('action_dim', self.num_tokens)
+             self.skill_action_dim = self.skill_config.get('action_dim', self.num_tokens)
+        self.skill_state_dim = self.skill_config.get('state_dim', self.hidden_size)
         self.skill_hidden_dim = self.skill_config.get('hidden_dim', self.hidden_size)
         self.skill_config.update({
             'num_tokens': self.num_tokens,
-            'state_dim': self.hidden_size,
-            'action_dim': self.action_dim,
-            'hidden_dim': self.skill_hidden_dim,
             'mem_config': self.mem_config,
+            'state_dim': self.skill_state_dim,
+            'action_dim': self.skill_action_dim,
+            'hidden_dim': self.skill_hidden_dim,
             'checkpoint': self.skill_checkpoint,
             'update_memory': self.update_memory,
         })
         self.skill_memory = SkillMemory(**self.skill_config)
+        self.skill_proj = nn.Sequential(
+            nn.Linear(self.hidden_size, self.skill_state_dim*2),
+            nn.GELU(),
+            nn.Linear(self.skill_state_dim*2, self.skill_state_dim),
+            nn.LayerNorm(self.skill_state_dim)
+        )
     
     def _init_adapter(self):
         self.fusion_gate = nn.Sequential(
@@ -238,8 +257,7 @@ class MD(nn.Module):
         
         self.action_proj = nn.Sequential(*layers)
         
-        gelu_gain = 1.5957696
-        nn.init.xavier_normal_(self.action_proj[0].weight, gain=gelu_gain)
+        nn.init.xavier_normal_(self.action_proj[0].weight, gain=1.5957696)
         nn.init.zeros_(self.action_proj[0].bias)
 
         nn.init.xavier_normal_(self.action_proj[-2].weight, gain=1.0)
@@ -250,24 +268,11 @@ class MD(nn.Module):
     def _make_special_token_embeddings_trainable(self, model):
         if self.tune_special_token_embeddings:
             embedding_layer = model.get_input_embeddings()
-            device = embedding_layer.weight.device
-            embedding_layer.weight.requires_grad_(True)
-            
-            self.register_buffer('_trainable_mask', torch.zeros_like(embedding_layer.weight, dtype=torch.bool, device=device))
+            embedding_layer.weight.requires_grad_(False)
             
             with torch.no_grad():
                 for token_id in self.token_extended_ids:
-                    self._trainable_mask[token_id] = True
-            
-            def _hook(grad):
-                return grad * self._trainable_mask.to(grad.device)
-            
-            embedding_layer.weight.register_hook(_hook)
-            
-            with torch.no_grad():
-                for i, param in enumerate(embedding_layer.weight):
-                    if i not in self.token_extended_ids:
-                        param.requires_grad_(False)
+                    embedding_layer.weight[token_id].requires_grad_(True)
     
     def _init_params(self):
         assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
@@ -283,14 +288,16 @@ class MD(nn.Module):
         trainable_params = self.get_trainable_parameters()
         for param in trainable_params:
             param.requires_grad = True
+        
+        self.embedding_layer = SafeEmbeddingWrapper(self.lm.get_input_embeddings())
     
     def _init_tokenizer(self, model):
         if self.enable_annotation:
             special_tokens = [get_special_token_by_index(i) for i in range(self.num_special_words)]
         elif self.enable_hint:
-            assert self.hint_category in HINT_VOCAB, \
-                f"Invalid hint category '{self.hint_category}'. Valid options: {list(HINT_VOCAB.keys())}"
-            special_tokens = HINT_VOCAB[self.hint_category]
+            assert self.hint_category in self.skill_vocab, \
+                f"Invalid hint category '{self.hint_category}'. Valid options: {list(self.skill_vocab.keys())}"
+            special_tokens = self.skill_vocab[self.hint_category]
         else:
             special_tokens = []
         
@@ -338,10 +345,11 @@ class MD(nn.Module):
             context_embeds = context_embeds * mask.unsqueeze(-1)
         
         with torch.autocast(self.device.type, enabled=False):
-            skill_output = self.skill_memory(context_embeds)
+            states = self.skill_proj(context_embeds)
+            skill_output = self.skill_memory(states)
 
         step_logits = skill_output['action_logits'][:, -1, :]
-        sep_index = self.action_dim - 1
+        sep_index = self.skill_memory.action_dim - 1
         batch_size, seq_len, _ = context_embeds.shape
 
         if pad_mask is None:
@@ -396,15 +404,17 @@ class MD(nn.Module):
         if self.enable_annotation:
             sep_count = torch.zeros(batch_size, dtype=torch.int, device=device)
         
-        embeding_layer = self.lm.get_input_embeddings()
         special_ids = self.token_special_ids_tensor
-        special_embeddings = embeding_layer(special_ids)
-        sep_embed = embeding_layer(self.token_sep_id_tensor) if self.enable_annotation else None
+
+        with torch.no_grad():
+            special_embeddings = self.embedding_layer(special_ids)
+            sep_embed = self.embedding_layer(self.token_sep_id_tensor) if self.enable_annotation else None
         
         max_length = self.anno_max_length + 1 if self.enable_annotation else 1
         for step_idx in range(max_length):
             with torch.autocast(self.device.type, enabled=False):
-                skill_output = self.skill_memory(current_embeds)
+                states = self.skill_proj(current_embeds)
+                skill_output = self.skill_memory(states)
             
             if return_loss:
                 skill_loss = self.skill_memory.compute_losses(skill_output)['total_loss']
@@ -414,7 +424,7 @@ class MD(nn.Module):
             # Prevent SEP token sampling in non-annotation mode
             if not self.enable_annotation:
                 step_logits = step_logits.clone()
-                step_logits[:, self.action_dim - 1] = -float('inf')
+                step_logits[:, self.skill_memory.action_dim - 1] = -float('inf')
             
             anno_indices = self._get_anno_next_token(step_logits)
             
@@ -422,11 +432,11 @@ class MD(nn.Module):
                 force_sep_mask = (sep_count == 0)
                 anno_indices = torch.where(
                     force_sep_mask,
-                    torch.tensor(self.action_dim - 1, device=device),
+                    torch.tensor(self.skill_memory.action_dim - 1, device=device),
                     anno_indices
                 )
             
-            is_sep = (anno_indices == self.action_dim - 1)
+            is_sep = (anno_indices == self.skill_memory.action_dim - 1)
             if self.enable_annotation:
                 sep_count += is_sep.int()
             
@@ -570,15 +580,16 @@ class MD(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         assert self.has_anno, "Annotation/Hint mode must be enabled"
         
-        device = input_ids.device
-        embedding_layer = self.lm.get_input_embeddings()
-        state_embeds = embedding_layer(input_ids)
-        batch_size, seq_len, hidden_size = state_embeds.shape
-        sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
+        with torch.no_grad():
+            state_embeds = self.embedding_layer(input_ids)
+            sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
         
+        device = input_ids.device
+        batch_size, seq_len, hidden_size = state_embeds.shape
+
+        loss_list = []
         all_embeds = []
         all_labels = []
-        loss_list = []
         batch_annotations = []
         
         for i in range(batch_size):
@@ -732,8 +743,7 @@ class MD(nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, device=device)
         
-        embedding_layer = self.lm.get_input_embeddings()
-        state_embeds = embedding_layer(input_ids)
+        state_embeds = self.embedding_layer(input_ids)
         batch_size, _, hidden_size = state_embeds.shape
         
         if self.has_anno:
@@ -742,7 +752,7 @@ class MD(nn.Module):
             new_embeds = []
             new_labels = []
             
-            sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, -1)
+            sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, -1)
 
             for i in range(batch_size):
                 seq_embeds = state_embeds[i]
@@ -806,15 +816,13 @@ class MD(nn.Module):
         device = input_ids.device
         batch_size = input_ids.shape[0]
         sequences = [input_ids[i].clone() for i in range(batch_size)]
-
-        embedding_layer = self.lm.get_input_embeddings()
-        current_embeds = [embedding_layer(seq).unsqueeze(0) for seq in sequences]
+        current_embeds = [self.embedding_layer(seq).unsqueeze(0) for seq in sequences]
         
         eos_flags = [False] * batch_size
         annotations_added = [0] * batch_size
         active_indices = list(range(batch_size))
         
-        sep_embed = embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
+        sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
         pad_masks = [torch.zeros(seq.size(0), dtype=torch.bool, device=device) for seq in sequences]
         
         for _ in range(self.max_length - input_ids.shape[1]):
@@ -889,7 +897,7 @@ class MD(nn.Module):
                 if hasattr(self, 'token_extended_ids'):
                     logits[:, self.token_extended_ids] = -float('inf')
                 next_token = self._get_next_token(logits)
-                next_token_embed = embedding_layer(next_token).view(1, 1, -1)
+                next_token_embed = self.embedding_layer(next_token).view(1, 1, -1)
                 
                 sequences[idx] = torch.cat([sequences[idx], next_token.view(1)])
                 current_embeds[idx] = torch.cat([current_embeds[idx], next_token_embed], dim=1)

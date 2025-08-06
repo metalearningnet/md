@@ -1,24 +1,23 @@
-strategy: "deepspeed" # Options: 'ddp' | 'fsdp' | 'deepspeed'
+# Distributed Training Strategy
+strategy: "deepspeed"       # Options: 
+                            # - 'ddp': PyTorch's DistributedDataParallel
+                            # - 'fsdp': Fully Sharded Data Parallel
+                            # - 'deepspeed': Supports ZeRO optimization
 
-num_nodes: 1 # Number of nodes used in distributed training
+# Cluster Configuration
+num_nodes: 1                # Machines in cluster
+main_address: ""            # Leave empty for single-node
+main_port: 1112             # Network port for communication
 
-main_address: "" # Leave empty for single-node training
-
-main_port: 1112 # Communication port for distributed training
-
+# DeepSpeed Configuration
 deepspeed:
-  optimizer:
-    type: "AdamW"
-    params:
-      lr: 1e-4
-      betas: [ 0.9, 0.95 ]
-      eps: 1e-8
-      weight_decay: 0.01
-
   zero_optimization:
-    stage: 2
-    contiguous_gradients: true
-
+    stage: 0                # ZeRO stages:
+                            # - 0: No optimization
+                            # - 1: Optimizer state partitioning
+                            # - 2: Gradient partitioning
+                            # - 3: Parameter partitioning
+  
   activation_checkpointing:
-    enable: true
-    use_reentrant: false
+    enable: true            # Recomputation for memory savings
+    use_reentrant: true     # false=memory-optimized, true=stable

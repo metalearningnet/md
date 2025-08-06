@@ -146,7 +146,7 @@ class TestMD(unittest.TestCase):
             from torch.distributions import Categorical
             skill = self.model.skill_memory
             
-            states = torch.randn(5, 10, self.model.hidden_size)
+            states = torch.randn(5, 10, skill.state_dim).to(self.device)
             
             with torch.no_grad():
                 outputs = skill(states)
@@ -155,7 +155,7 @@ class TestMD(unittest.TestCase):
             entropy = Categorical(logits=logits).entropy()
             self.assertGreater(entropy.mean(), 1.0, "Low entropy in SkillMemory outputs")
             
-            diff_states = torch.randn_like(states)
+            diff_states = torch.randn_like(states).to(self.device)
             diff_outputs = skill(diff_states)
             diff_logits = diff_outputs['action_logits']
             
@@ -228,7 +228,7 @@ class TestMD(unittest.TestCase):
                     self.assertIsNotNone(end_idx, "SEP tokens must be paired")
     
     def test_sample_generation(self):
-        input_ids = torch.randint(0, self.model.config.vocab_size, (self.batch_size, self.seq_len))
+        input_ids = torch.randint(0, self.model.config.vocab_size, (self.batch_size, self.seq_len)).to(self.device)
         outputs = self.model(input_ids)
         
         if self.model.has_anno:
@@ -274,7 +274,7 @@ class TestMD(unittest.TestCase):
         if self.fast_test:
             return
         
-        inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt")
+        inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt").to(self.device)
         outputs = self.model.generate(input_ids=inputs['input_ids'])
         self.assertEqual(outputs.shape[0], 1)
 

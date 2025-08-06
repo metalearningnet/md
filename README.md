@@ -5,7 +5,7 @@
 
 ## Overview
 
-Memory Disentangling (MD) is a modular framework that enhances large language models (LLMs) by decoupling skill memory from knowledge memory, enabling distinct treatment of task-specific adaptation and general reasoning. The MD module serves as a complementary component integrated upstream of a downstream LLM, delivering disentangled memory representations that inform context-aware generation. Through a meta-learning approach, the skill memory is adaptively updated, facilitating rapid acquisition and refinement of new skills while maintaining stable access to foundational knowledge.
+Memory Disentangling (MD) enhances large language models (LLMs) through a specialized architecture that separates skill memory (for task-specific capabilities) from knowledge memory (for general world knowledge). This modular framework operates as an upstream processor that feeds disentangled memory representations to the main LLM, enabling more focused context-aware generation. The system employs adaptive training techniques to continuously update skill memory while preserving stable knowledge access, allowing for efficient acquisition of new competencies without compromising foundational understanding. By maintaining this clear memory separation, MD provides fine-grained control over how different types of information influence model outputs.
 
 ## Quick Start
 

@@ -1,6 +1,8 @@
-HINT_VOCAB = {
-    'minimal' : ['<diversify>', '<continue>'],
-    'standard': ['<diversify>', '<continue>', '<verify>'],
-    'enhanced': ['<diversify>', '<continue>', '<verify>', '<recall>'],
-    'advanced': ['<diversify>', '<continue>', '<verify>', '<recall>', '<renew>'],
+VOCAB = {
+    'hint': {
+        'minimal' : ['<recall>', '<critique>'],
+        'standard': ['<recall>', '<critique>', '<decompose>'],
+        'enhanced': ['<recall>', '<critique>', '<decompose>', '<reflect>'],
+        'advanced': ['<recall>', '<critique>', '<decompose>', '<reflect>', '<diversify>']
+    }
 }

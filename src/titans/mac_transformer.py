@@ -493,7 +493,8 @@ class MemoryAsContextTransformer(Module):
         use_flex_attn = False,
         sliding_window_attn = False,
         neural_mem_weight_residual = False,
-        token_emb: Module | None = None
+        token_emb: Module | None = None,
+        return_logits = False
     ):
         super().__init__()
 
@@ -712,10 +713,11 @@ class MemoryAsContextTransformer(Module):
     def forward(
         self,
         x,
-        return_loss = False,
-        disable_flex_attn = False,
         cache = None,
+        return_loss = False,
         return_cache = False,
+        return_embeddings = True,
+        disable_flex_attn = False,
         factorized_pos_emb = None
     ):
 
@@ -940,12 +942,15 @@ class MemoryAsContextTransformer(Module):
 
         x = self.norm(x)
 
+        if return_embeddings:
+            return x
+        
         logits = self.to_logits(x)
 
         if not return_loss:
             if not return_cache:
                 return logits
-
+            
             return logits, next_cache
 
         return F.cross_entropy(rearrange(logits, 'b n l -> b l n'), labels)
