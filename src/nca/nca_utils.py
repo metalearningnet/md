@@ -375,10 +375,16 @@ def apply_chat_template(
             if not prompt_messages:
                 raise ValueError("No user message found in 'A0' messages")
             
+            from utils import get_initial_prompt
+            initial_prompt = get_initial_prompt()
+
             if example["A0"][0]["role"] == "system":
                 prompt_messages.insert(0, example["A0"][0])
-            else:
+            elif not initial_prompt:
                 prompt_messages.insert(0, {"role": "system", "content": ""})
+            
+            if initial_prompt:
+                prompt_messages = initial_prompt + prompt_messages
             
             # Process each response
             for key in ["A0", "A1", "A2", "A3"]:

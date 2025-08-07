@@ -4,9 +4,9 @@ MODEL = {
         "path": "Qwen/Qwen3-0.6B",         # Pretrained model identifier from HuggingFace Hub
         "temperature": 0.7,                # Sampling temperature (0.0: deterministic, 1.0: creative)
         "freeze": True,                    # Freeze base LM weights during training
-        "max_length": 384,                 # Maximum total sequence length
-        "max_target_length": 256,          # Maximum generated output length in tokens
-        "max_prompt_length": 128           # Maximum input prompt length
+        "max_length": 1280,                # Maximum total sequence length
+        "max_target_length": 1024,         # Maximum generated output length in tokens
+        "max_prompt_length": 512           # Maximum input prompt length
     },
 
     # Skill Memory Configuration
@@ -34,6 +34,9 @@ MODEL = {
     # Skill Integration Configuration
     "context_window": 4,                   # Token lookahead window for skill insertion
     "skill_integration_strategy": "hint",  # Integration method: 'fusion' | 'annotation' | 'hint'
+    
+    # Prompt Engineering Settings
+    "use_initial_prompt": True,            # Whether to prepend an initial prompt to inputs
 
     # Inference Settings
     "use_cache": False,                    # Enable KV caching for faster autoregressive decoding
@@ -53,7 +56,6 @@ MEMORY = {
 
         "neural_mem_heads": 4,                           # Number of attention heads in neural memory
         "neural_mem_head_dim": 64,                       # Dimension per head in neural memory
-        "neural_mem_batch_size": 64,                     # set smaller to update the neural memory weights more often as it traverses the sequence
         "neural_mem_momentum_order": 1,                  # Highest order of momentum to calculate
         "neural_mem_step_transform_max_lr": 1e-1,        # Upper limit for the effective learning rate used in memory updates
 
@@ -91,8 +93,8 @@ ANNOTATION = {
 # Hint Settings (active when strategy='hint')
 HINT = {
     "category": "standard",                # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
-    "max_hints": 16,                       # Maximum hints per response (-1 for unlimited)
-    "min_interval": 16,                    # Minimum tokens between hints
+    "max_hints": 12,                       # Maximum hints per response (-1 for unlimited)
+    "min_interval": 24,                    # Minimum tokens between hints
     "tune": True                           # Fine-tune hint embeddings
 }
 

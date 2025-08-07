@@ -12,7 +12,7 @@ from md import MD
 from loader import MDLoader
 from utils import (
     MD_TAG, md_train, md_validate, cfg, set_dist_config,
-    default_dataset_path, get_strategy, clear_directory, info
+    default_dataset_path, get_strategy, get_trainer, clear_directory, info
 )
 
 def train(config: dict):
@@ -133,7 +133,7 @@ def train(config: dict):
             steps = len(train_loader)
         total_steps = num_epochs * steps
         model.set_max_steps(total_steps)
-        
+        trainer = get_trainer(model)
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1}/{num_epochs}")
             train_metrics = md_train(
@@ -143,7 +143,8 @@ def train(config: dict):
                 fabric=fabric,
                 num_samples=num_samples,
                 log_dir=log_dir,
-                log_interval=log_interval
+                log_interval=log_interval,
+                trainer=trainer
             )
             
             log_info = [
@@ -155,7 +156,7 @@ def train(config: dict):
                     torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
                     print(f"Saved epoch {epoch+1} checkpoint")
             
-            val_metrics = md_validate(model, val_loader, fabric, num_samples=val_samples)
+            val_metrics = md_validate(model, val_loader, fabric, num_samples=val_samples, trainer=trainer)
             
             if fabric.is_global_zero:
                 log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")

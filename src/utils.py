@@ -40,6 +40,7 @@ sys.path.append(str(_conf_dir))
 
 import settings
 from vocab import VOCAB
+from chat import TEMPLATE
 from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT, MEMORY
 
 LOG = getattr(settings, 'LOG', False)
@@ -72,7 +73,13 @@ SEP_TOKEN = '<separator>'
 RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
 
-SYLLABLES = ['li', 'mo', 'ra', 'ba', 'ti', 'xo', 'ne', 'zu', 'ky', 'ka', 'vi', 'tho']
+SYLLABLES = [
+    'xo', 'zu', 'ky', 'vle', 'nz', 'mra', 'xy',
+    'stu', 'vya', 'plo', 'ske', 'blu', 'twy',
+    'jho', 'tsu', 'vlu', 'bya',
+    'ghy', 'klo', 'zhi', 'fli', 'spu', 'dwe',
+    'fyo', 'twu', 'pyo', 'nyo', 'kwe', 'psu', 'vri'
+]
 
 BOLD = '\033[1m'
 RESET = '\033[0m'
@@ -193,6 +200,10 @@ class Cfg:
         return self.model['use_cache']
     
     @property
+    def use_initial_prompt(self):
+        return self.model['use_initial_prompt']
+    
+    @property
     def context_window(self):
         return self.model.get('context_window', 4)
 
@@ -205,7 +216,7 @@ class Cfg:
         return self.ckpt_dir / MD_FILE
     
     @property
-    def num_special_words(self):
+    def num_special_tokens(self):
         if self.skill_integration_strategy == 'annotation':
             return self.annotation.get('words', 8)
         elif self.skill_integration_strategy == 'hint':
@@ -370,7 +381,7 @@ def clear_directory(directory, include_subdirectories=True):
             elif os.path.isdir(item_path) and include_subdirectories:
                 shutil.rmtree(item_path)
 
-def generate_special_token_vocab(min_syl=1, max_syl=3):
+def generate_special_token_vocab(min_syl=2, max_syl=2):
     def shuffled_word_list(words, seed=SEED):
         rng = random.Random(seed)
         word_list = words[:]
@@ -535,7 +546,7 @@ def calculate_lm_loss(outputs, batch, loss_fn):
         labels.reshape(-1)[mask]
     )
 
-def get_po(model):
+def get_trainer(model):
     if cfg.po == 'SimPO':
         from simpo.simpo_config import SimPOConfig as config
         from simpo.simpo_trainer import SimPOTrainer as trainer
@@ -565,6 +576,29 @@ def get_po(model):
             processing_class=model.tokenizer
         )
 
+def generate_messages(category, vocab):
+    messages = []
+    for entry in TEMPLATE[category]['messages']:
+        role = entry['role']
+        assert role in ['user', 'system', 'assistant']
+        head = entry['content'].get('head', '').strip()
+        body = entry['content'].get('body', {})
+        if head or body:
+            content = [head] if head else []
+            for i in body:
+                if i in vocab:
+                    content.append(f'{i}: {body[i].strip()}')
+            messages.append({
+                'role': role,
+                'content': '\n'.join(content)
+            })
+    return messages
+
+def get_initial_prompt():
+    if cfg.use_initial_prompt:
+        if cfg.skill_integration_strategy == 'hint':
+            return generate_messages('hint', cfg.skill_vocab[cfg.hint_category])
+
 def md_train(
     model,
     loader,
@@ -572,10 +606,13 @@ def md_train(
     fabric,
     num_samples=-1,
     log_dir=None,
-    log_interval=1
+    log_interval=1,
+    trainer=None
 ):
     model.train()
-    po = get_po(model)
+    
+    if trainer is None:
+        trainer = get_trainer(model)
     
     metrics = {
         'steps': 0,
@@ -602,9 +639,9 @@ def md_train(
     
     for step, batch in enumerate(pbar):
         model.step()
-        if po:
-            loss, train_metrics = po.get_batch_loss_metrics(model, batch, train_eval='train')
-            po.store_metrics(metrics=train_metrics, train_eval='train')
+        if trainer:
+            loss, train_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='train')
+            trainer.store_metrics(metrics=train_metrics, train_eval='train')
         else:
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
@@ -638,11 +675,11 @@ def md_train(
     
     pbar.close()
 
-    if po is None:
+    if trainer is None:
         if metrics['steps'] > 0:
             metrics['total_loss'] /= metrics['steps']
     else:
-        train_metrics = po.get_metrics()['train']
+        train_metrics = trainer.get_metrics()['train']
         for key, val in train_metrics.items():
             metrics[key] = torch.tensor(val).mean().item()
 
@@ -657,13 +694,16 @@ def md_validate(
     fabric,
     num_samples=-1,
     log_dir=None,
-    log_interval=1
+    log_interval=1,
+    trainer=None
 ) -> dict:
-    if loader == None:
+    if loader is None:
         return {}
     
     model.eval()
-    po = get_po(model)
+
+    if trainer is None:
+        trainer = get_trainer(model)
 
     metrics = {
         'steps': 0,
@@ -690,9 +730,9 @@ def md_validate(
 
     with torch.no_grad():
         for batch in pbar:
-            if po:
-                loss, eval_metrics = po.get_batch_loss_metrics(model, batch, train_eval='eval')
-                po.store_metrics(metrics=eval_metrics, train_eval='eval')
+            if trainer:
+                loss, eval_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='eval')
+                trainer.store_metrics(metrics=eval_metrics, train_eval='eval')
             else:
                 input_ids = batch['input_ids']
                 attention_mask = batch['attention_mask']
@@ -721,7 +761,7 @@ def md_validate(
                 if sample_progress % log_interval == 0:
                     writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
 
-    if po is None:
+    if trainer is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
         gathered_samples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
         if fabric.is_global_zero and gathered_samples > 0:
@@ -732,7 +772,7 @@ def md_validate(
         if metrics['steps'] > 0:
             metrics['total_loss'] /= metrics['steps']
     else:
-        eval_metrics = po.get_metrics()['eval']
+        eval_metrics = trainer.get_metrics()['eval']
         for key, val in eval_metrics.items():
             metrics[key] = torch.tensor(val).mean().item()
             gathered_vals = fabric.all_gather(torch.tensor(val))

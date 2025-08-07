@@ -5,7 +5,7 @@ from utils import info, get_device
 from titans import MemoryAsContextTransformer
 from torch.utils.checkpoint import checkpoint
 from torch.distributions import Normal, kl_divergence
-    
+
 class GradientReversal(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
@@ -75,7 +75,7 @@ class SkillMemory(nn.Module):
             mac_sliding_window_attn = mac_kwargs.get('sliding_window_attn', False)
             mac_neural_mem_heads = mac_kwargs.get('neural_mem_heads', 2)
             mac_neural_mem_head_dim = mac_kwargs.get('neural_mem_head_dim', 64)
-            mac_neural_mem_batch_size = mac_kwargs.get('neural_mem_batch_size', 64)
+            mac_neural_mem_batch_size = mac_kwargs.get('neural_mem_batch_size')
             mac_neural_mem_momentum = mac_kwargs.get('neural_mem_momentum', True)
             mac_neural_mem_momentum_order = mac_kwargs.get('neural_mem_momentum_order', 1)
             mac_neural_mem_qk_rmsnorm = mac_kwargs.get('neural_mem_qk_rmsnorm', False)
@@ -175,9 +175,13 @@ class SkillMemory(nn.Module):
         return action_logits, entropy
 
     def get_prior(self, m):
-        if m.size(1) <= 1:
-            prior_out = torch.zeros_like(m)
-            return prior_out, prior_out
+        batch, seq_len, hidden_dim = m.shape
+        fixed_prior_mean = torch.zeros(1, hidden_dim, device=m.device)
+        fixed_prior_std = torch.ones(1, hidden_dim, device=m.device)
+        fixed_prior_mean = fixed_prior_mean.expand(batch, 1, -1)
+        fixed_prior_std = fixed_prior_std.expand(batch, 1, -1)
+        if seq_len == 1:
+            return fixed_prior_mean, fixed_prior_std
         prior_out, _ = self.prior_net(m[:, :-1])
         prior_mean = self.prior_mean(prior_out)
         prior_std = F.softplus(self.prior_std(prior_out)) + 1e-4
@@ -189,7 +193,7 @@ class SkillMemory(nn.Module):
     
     def forward(self, states):
         if self.checkpoint:
-            m, mem_output = checkpoint(self.get_mem, states, use_reentrant=False)
+            m, mem_output = checkpoint(self.get_mem, states, use_reentrant=True)
             prior_mean, prior_std = checkpoint(self.get_prior, m, use_reentrant=True)
         else:
             m, mem_output = self.get_mem(states)

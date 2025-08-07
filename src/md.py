@@ -73,9 +73,9 @@ class MD(nn.Module):
         self.context_window = config.context_window
         self.max_annotations = config.max_annotations
         self.anno_max_length = config.anno_max_length
-        self.num_special_words = config.num_special_words
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
+        self.num_special_tokens = config.num_special_tokens
         self.update_memory = True if update_memory else config.update_memory
         self.tune_special_token_embeddings = config.tune_special_token_embeddings
         self.dtype = torch.float16 if config.precision == '16-mixed' else torch.bfloat16
@@ -99,20 +99,20 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
-        self.sep_temperature = 0.7
-        self.sep_noise_scale = 0.1
-        self.anno_temperature = 0.7
-        self.anno_noise_scale = 0.1
-        self.density_strength = 1.0
-        self.diversity_strength = 1.0
-        self.sep_lookback_window = 16
+        self.sep_temperature = 1.0
+        self.anno_temperature = 1.0
+        self.sep_noise_scale = 0.03
+        self.anno_noise_scale = 0.05
+        self.density_strength = 1.8
+        self.diversity_strength = 0.7
 
         self.max_steps = 0
         self.current_step = 0
+        self.sep_lookback_window = self.min_interval
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
-        info(f"MD (hidden_dim: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_words}, preference_optimizer: {config.po})")
+        info(f"MD (hidden_dim: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_tokens}, preference_optimizer: {config.po})")
 
     def set_max_steps(self, max_steps):
         self.max_steps = max_steps
@@ -120,6 +120,8 @@ class MD(nn.Module):
     def step(self):
         if self.current_step < self.max_steps:
             self.current_step += 1
+            progress = self.current_step / self.max_steps
+            self.sep_noise_scale = max(0.01, self.sep_noise_scale - 0.02 * progress)
     
     def _init_peft(self, model):
         embedding_layer = model.model.embed_tokens
@@ -203,7 +205,7 @@ class MD(nn.Module):
 
     def _init_skill(self) -> nn.Module:
         if self.skill_integration_strategy in ['hint', 'annotation']:
-            self.skill_action_dim = self.num_special_words + 1
+            self.skill_action_dim = self.num_special_tokens + 1
         elif self.skill_integration_strategy == 'fusion':
             self.skill_action_dim = self.num_tokens
         else:
@@ -293,7 +295,7 @@ class MD(nn.Module):
     
     def _init_tokenizer(self, model):
         if self.enable_annotation:
-            special_tokens = [get_special_token_by_index(i) for i in range(self.num_special_words)]
+            special_tokens = [get_special_token_by_index(i) for i in range(self.num_special_tokens)]
         elif self.enable_hint:
             assert self.hint_category in self.skill_vocab, \
                 f"Invalid hint category '{self.hint_category}'. Valid options: {list(self.skill_vocab.keys())}"
@@ -330,8 +332,8 @@ class MD(nn.Module):
             assert len(set(self.token_special_ids)) == len(self.token_special_ids), \
                 f"Duplicate special token IDs detected: {self.token_special_ids}"
             
-            assert len(self.token_special_ids) == self.num_special_words, \
-                f"Expected {self.num_special_words} special tokens, got {len(self.token_special_ids)}"
+            assert len(self.token_special_ids) == self.num_special_tokens, \
+                f"Expected {self.num_special_tokens} special tokens, got {len(self.token_special_ids)}"
 
     def _has_sep(
             self,
@@ -368,7 +370,7 @@ class MD(nn.Module):
             if self.max_steps:
                 tau = initial_tau - (initial_tau - final_tau) * (self.current_step / self.max_steps)
             else:
-                tau = self.sep_temperature
+                tau = initial_tau
         
             noise_mask = torch.ones_like(step_logits, dtype=torch.bool)
             noise_mask[:, sep_index] = False
@@ -491,7 +493,7 @@ class MD(nn.Module):
             if self.max_steps:
                 tau = initial_tau - (initial_tau - final_tau) * (self.current_step / self.max_steps)
             else:
-                tau = self.anno_temperature
+                tau = initial_tau
 
             noise_mask = torch.ones_like(logits)
             noise_mask[..., -1] = 0  # Do not perturb SEP token selection

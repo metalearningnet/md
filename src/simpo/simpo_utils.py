@@ -28,6 +28,7 @@ def validate_and_fix_roles(messages):
             fixed_messages.append(fixed_msg)
         else:
             fixed_messages.append(msg)
+    
     return fixed_messages
 
 def apply_chat_template(
@@ -57,6 +58,11 @@ def apply_chat_template(
 
     if not (prompt_messages and chosen_messages and rejected_messages):
         raise ValueError("Prompt, chosen, and rejected must be non-empty.")
+    
+    from utils import get_initial_prompt
+    initial_prompt = get_initial_prompt()
+    if initial_prompt:
+         prompt_messages = initial_prompt + prompt_messages
     
     if auto_insert_empty_system_msg:
         maybe_insert_system_message(prompt_messages, tokenizer)
@@ -272,6 +278,7 @@ class DatasetMap(object):
             fn_kwargs={'tokenizer': self.tokenizer},
             num_proc=num_proc,
             remove_columns=column_names,
+            load_from_cache_file=False,
             desc="Formatting comparisons with prompt template",
         )
         generated_columns = set(dataset.features.keys())
