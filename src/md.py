@@ -76,6 +76,7 @@ class MD(nn.Module):
         self.attn = config.attn if attn is None else attn
         self.label_pad_token_id = config.label_pad_token_id
         self.num_special_tokens = config.num_special_tokens
+        self.sentence_alignment = config.sentence_alignment
         self.update_memory = True if update_memory else config.update_memory
         self.tune_special_token_embeddings = config.tune_special_token_embeddings
         self.dtype = torch.float16 if config.precision == '16-mixed' else torch.bfloat16
@@ -99,16 +100,16 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
-        self.sep_temperature = 1.0
-        self.anno_temperature = 1.0
-        self.sep_noise_scale = 0.03
+        self.sep_temperature = 0.7
+        self.sep_noise_scale = 0.08
+        self.anno_temperature = 0.9
         self.anno_noise_scale = 0.05
-        self.density_strength = 1.8
-        self.diversity_strength = 0.7
+        self.density_strength = 2.0
+        self.diversity_strength = 0.8
 
         self.max_steps = 0
         self.current_step = 0
-        self.sep_lookback_window = self.min_interval
+        self._sep_noise_scale = self.sep_noise_scale
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
@@ -121,7 +122,7 @@ class MD(nn.Module):
         if self.current_step < self.max_steps:
             self.current_step += 1
             progress = self.current_step / self.max_steps
-            self.sep_noise_scale = max(0.01, self.sep_noise_scale - 0.02 * progress)
+            self.sep_noise_scale = max(0.02, (1 - progress)**0.5 * self._sep_noise_scale)
     
     def _init_peft(self, model):
         embedding_layer = model.model.embed_tokens
@@ -316,9 +317,15 @@ class MD(nn.Module):
             device = next(model.parameters()).device
             token_sep_id_tensor = torch.tensor([self.token_sep_id], device=device)
             token_special_ids_tensor = torch.tensor(self.token_special_ids, device=device)
+            sentence_boundary_ids_tensor = torch.tensor([
+                self.tokenizer.convert_tokens_to_ids(t) 
+                for t in ['\n', '.', '!', '?', '。', '．', '！', '？']
+                if self.tokenizer.convert_tokens_to_ids(t) != self.tokenizer.unk_token_id
+            ], device=device)
             
             self.register_buffer('token_sep_id_tensor', token_sep_id_tensor)
             self.register_buffer('token_special_ids_tensor', token_special_ids_tensor)
+            self.register_buffer('sentence_boundary_ids_tensor', sentence_boundary_ids_tensor)
             
             model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
@@ -339,7 +346,8 @@ class MD(nn.Module):
             self,
             context_embeds: torch.Tensor,
             mask: Optional[torch.Tensor] = None,
-            pad_mask: Optional[torch.Tensor] = None
+            pad_mask: Optional[torch.Tensor] = None,
+            input_ids: Optional[torch.Tensor] = None
         ) -> torch.Tensor:
         assert context_embeds.dim() == 3
 
@@ -353,16 +361,46 @@ class MD(nn.Module):
         step_logits = skill_output['action_logits'][:, -1, :]
         sep_index = self.skill_memory.action_dim - 1
         batch_size, seq_len, _ = context_embeds.shape
-
-        if pad_mask is None:
-            pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=context_embeds.device)
-
-        has_content = torch.zeros(batch_size, dtype=torch.bool, device=context_embeds.device)
+        device = context_embeds.device
         
-        if seq_len > 0:
-            window_size = min(seq_len, self.sep_lookback_window)
+        has_content = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        if self.sentence_alignment:
+            has_boundary = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        
+        if pad_mask is None:
+            pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
+
+        window_size = min(seq_len, self.min_interval) if seq_len > 0 else 0
+        if window_size > 0:
             window_pad_mask = pad_mask[:, -window_size:]
             has_content = ~window_pad_mask.any(dim=1)
+        
+        if input_ids is not None and window_size > 0 and self.sentence_alignment:
+            recent_tokens = input_ids[:, -window_size:]
+            recent_pad_mask = pad_mask[:, -window_size:]
+
+            # Find last non-padded token in window
+            col_indices = torch.arange(window_size-1, -1, -1, device=device).expand(batch_size, window_size)
+            non_pad_mask = ~recent_pad_mask
+            col_indices = col_indices.masked_fill(~non_pad_mask, -1)
+            last_token_index = col_indices.max(dim=1)[0]
+            
+            # Get the actual last token position
+            valid_mask = (last_token_index >= 0)
+            last_tokens = torch.full((batch_size,), self.tokenizer.pad_token_id, device=device)
+            last_tokens[valid_mask] = recent_tokens[
+                torch.arange(batch_size, device=device)[valid_mask],
+                last_token_index[valid_mask].clamp(min=0)
+            ]
+            
+            # Check if last token is a sentence boundary
+            has_boundary = torch.isin(last_tokens, self.sentence_boundary_ids_tensor)
+            if self.enable_hint and has_boundary.any():
+                special_token_mask = torch.isin(input_ids, self.token_special_ids_tensor)
+                last_special_pos = special_token_mask.long().argmax(dim=1)
+                token_counts = input_ids.size(1) - last_special_pos
+                has_sufficient_distance = token_counts >= self.min_interval
+                has_boundary &= has_sufficient_distance
 
         if self.training:
             final_tau = 0.5
@@ -383,11 +421,13 @@ class MD(nn.Module):
                 dim=-1
             )
             
-            return (gumbel_samples[:, sep_index] > 0.5) & has_content
+            has_sep = (gumbel_samples[:, sep_index] > 0.5) & has_content
         else:
             probs = F.softmax(step_logits / self.sep_temperature, dim=-1)
             sep_pred = torch.multinomial(probs, num_samples=1).squeeze(-1) == sep_index
-            return sep_pred & has_content
+            has_sep = sep_pred & has_content
+        
+        return has_sep if not self.sentence_alignment else has_sep & has_boundary
     
     def _get_annotation(self,
                         context_embeds: torch.Tensor,
@@ -621,6 +661,9 @@ class MD(nn.Module):
                     padded_contexts = torch.zeros(window_size, max_length, hidden_size, device=device)
                     mask = torch.zeros(window_size, max_length, dtype=torch.bool, device=device)
                     pad_mask = torch.zeros(window_size, max_length, dtype=torch.bool, device=device)
+                    input_ids_tensor = torch.full((window_size, max_length), 
+                        self.tokenizer.pad_token_id, 
+                        device=device)
 
                     for j in range(window_size):
                         context_length = current_context.size(1) + j + 1
@@ -634,8 +677,9 @@ class MD(nn.Module):
                             token_labels[pos:pos+j+1]
                         ])
                         pad_mask[j, :context_length] = (context_labels == self.label_pad_token_id)
+                        input_ids_tensor[j, :context_length] = context_labels
                     
-                    sep_flags = self._has_sep(padded_contexts, mask=mask, pad_mask=pad_mask)
+                    sep_flags = self._has_sep(padded_contexts, mask=mask, pad_mask=pad_mask, input_ids=input_ids_tensor)
                     sep_positions = (sep_flags == 1).nonzero(as_tuple=True)[0]
 
                     if sep_positions.numel() > 0:
@@ -749,7 +793,12 @@ class MD(nn.Module):
         batch_size, _, hidden_size = state_embeds.shape
         
         if self.has_anno:
-            sep_detected = self._has_sep(state_embeds)
+            pad_mask = (attention_mask == 0)
+            sep_detected = self._has_sep(
+                state_embeds, 
+                pad_mask=pad_mask,
+                input_ids=input_ids
+            )
             
             new_embeds = []
             new_labels = []
@@ -840,7 +889,8 @@ class MD(nn.Module):
                 current_pad_mask = pad_masks[idx].unsqueeze(0)
                 has_sep = self._has_sep(
                     current_embeds[idx],
-                    pad_mask=current_pad_mask
+                    pad_mask=current_pad_mask,
+                    input_ids=sequences[idx].unsqueeze(0)
                 ).item()
 
                 if self.has_anno and has_sep and self._need_anno(annotations_added[idx]):

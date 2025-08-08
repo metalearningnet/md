@@ -93,9 +93,10 @@ ANNOTATION = {
 # Hint Settings (active when strategy='hint')
 HINT = {
     "category": "standard",                # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
-    "max_hints": 12,                       # Maximum hints per response (-1 for unlimited)
-    "min_interval": 24,                    # Minimum tokens between hints
-    "tune": True                           # Fine-tune hint embeddings
+    "max_hints": 64,                       # Maximum hints per response (-1 for unlimited)
+    "min_interval": 16,                    # Minimum tokens between hints
+    "tune": True,                          # Fine-tune hint embeddings
+    "sentence_alignment": True             # Trigger special token generation at sentence boundaries.
 }
 
 # Checkpointing Configuration

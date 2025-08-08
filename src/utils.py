@@ -39,8 +39,7 @@ _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
 
 import settings
-from vocab import VOCAB
-from chat import TEMPLATE
+from chat import VOCAB, TEMPLATE
 from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT, MEMORY
 
 LOG = getattr(settings, 'LOG', False)
@@ -252,6 +251,11 @@ class Cfg:
             return self.annotation.get('tune')
         else:
             return False
+        
+    @property
+    def sentence_alignment(self):
+        if self.skill_integration_strategy == 'hint':
+            return self.hint.get('sentence_alignment')
     
     @property
     def min_interval(self):
