@@ -80,6 +80,8 @@ SYLLABLES = [
     'fyo', 'twu', 'pyo', 'nyo', 'kwe', 'psu', 'vri'
 ]
 
+BOUNDARY_TOKENS = ['\n']
+
 BOLD = '\033[1m'
 RESET = '\033[0m'
 BLUE = '\033[1;34m'
@@ -265,6 +267,20 @@ class Cfg:
             return self.annotation.get('min_interval', 1)
         else:
             return 1
+    
+    @property
+    def sep_logit_bias(self):
+        if self.skill_integration_strategy == 'hint':
+            return self.hint.get('sep_logit_bias', 0.0)
+        else:
+            return 0.0
+    
+    @property
+    def sep_temperature(self):
+        if self.skill_integration_strategy == 'hint':
+            return self.hint.get('sep_temperature', 1.0)
+        else:
+            return 1.0
     
     @property
     def truncation_mode(self):

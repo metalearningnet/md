@@ -94,9 +94,11 @@ ANNOTATION = {
 HINT = {
     "category": "standard",                # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
     "max_hints": 64,                       # Maximum hints per response (-1 for unlimited)
-    "min_interval": 16,                    # Minimum tokens between hints
+    "min_interval": 8,                     # Minimum tokens between hints
     "tune": True,                          # Fine-tune hint embeddings
-    "sentence_alignment": True             # Trigger special token generation at sentence boundaries.
+    "sentence_alignment": True,            # Trigger special token generation at sentence boundaries.
+    "sep_logit_bias": 3.0,                 # Controls hint insertion frequency by biasing the [SEP] token logits that trigger hint generation
+    "sep_temperature": 0.7                 # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
 }
 
 # Checkpointing Configuration

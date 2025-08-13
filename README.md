@@ -3,37 +3,40 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+A modular framework for enhancing LLMs through memory separation
+
 ## Overview
 
-Memory Disentangling (MD) enhances large language models (LLMs) through a specialized architecture that separates skill memory (for task-specific capabilities) from knowledge memory (for general world knowledge). This modular framework operates as an upstream processor that feeds disentangled memory representations to the main LLM, enabling more focused context-aware generation. The system employs adaptive training techniques to continuously update skill memory while preserving stable knowledge access, allowing for efficient acquisition of new competencies without compromising foundational understanding. By maintaining this clear memory separation, MD provides fine-grained control over how different types of information influence model outputs.
+Memory Disentangling (MD) enhances large language models (LLMs) by introducing an isolated skill memory component that operates alongside the model's inherent knowledge base. As an upstream processor, MD generates specialized memory representations that combine with the original input to enable context-sensitive generation. The approach preserves the base LLM's architecture, maintaining its general knowledge and requiring only minimal parameter adjustments. This architectural separation provides adaptable skill capabilities without compromising foundational model performance.
+
+## Architecture
+
+MD operates as an upstream processor that concatenates with existing LLMs:
+
+```
+[Input] → [MD] → [LLM] → [Output]
+           │
+           └─ Skill Memory
+```
 
 ## Quick Start
 
 ### Installation
 
-To install dependencies:
-
 ```bash
+git clone https://github.com/metalearningnet/md.git
+cd md
 ./install.sh
 ```
 
-### Usage
+### Basic Operations
 
-Run the following commands using the `run.sh` script:
-
-```bash
-# Train the model
-./run.sh --train
-
-# Test the model
-./run.sh --test
-
-# Prepare data
-./run.sh --prepare
-
-# Generate evaluation results
-./run.sh --generate
-```
+| Command | Flags | Description |
+|---------|-------|-------------|
+| `./run.sh` | `--train` | Train with specified skills |
+| | `--test` | Run benchmark evaluation |
+| | `--prepare` | Preprocess dataset |
+| | `--generate` | Interactive generation |
 
 ## License
 

@@ -10,7 +10,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
     cfg, info, warn, get_device, load_peft_config, get_special_token_by_index,
-    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS
+    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS
 )
 
 class SafeEmbeddingWrapper(nn.Module):
@@ -69,8 +69,10 @@ class MD(nn.Module):
         self.adapter_config = config.adapter
         self.temperature = config.temperature
         self.min_interval = config.min_interval
+        self.max_sep_bias = config.sep_logit_bias
         self.hint_category = config.hint_category
         self.context_window = config.context_window
+        self.sep_temperature = config.sep_temperature
         self.max_annotations = config.max_annotations
         self.anno_max_length = config.anno_max_length
         self.attn = config.attn if attn is None else attn
@@ -100,16 +102,21 @@ class MD(nn.Module):
         self._init_skill()
         self._init_params()
 
-        self.sep_temperature = 0.7
-        self.sep_noise_scale = 0.08
+        self.noise_scale = 0.15
+        self.noise_floor = 0.05
+        self.min_sep_bias = 1.0
         self.anno_temperature = 0.9
         self.anno_noise_scale = 0.05
         self.density_strength = 2.0
         self.diversity_strength = 0.8
-
+        self.bias_growth_power = 1.2
+        self.noise_decay_power = 0.8
+        
         self.max_steps = 0
         self.current_step = 0
-        self._sep_noise_scale = self.sep_noise_scale
+        self.sep_logit_bias = self.min_sep_bias
+        self.sep_noise_scale = self.noise_scale
+        self.non_sep_temp = self.sep_temperature * 1.5
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
@@ -122,7 +129,14 @@ class MD(nn.Module):
         if self.current_step < self.max_steps:
             self.current_step += 1
             progress = self.current_step / self.max_steps
-            self.sep_noise_scale = max(0.02, (1 - progress)**0.5 * self._sep_noise_scale)
+            self.sep_noise_scale = max(
+                self.noise_floor,
+                self.noise_scale * (1 - progress)**self.noise_decay_power
+            )
+            self.sep_logit_bias = min(
+                self.max_sep_bias,
+                self.min_sep_bias + (self.max_sep_bias - self.min_sep_bias) * progress**self.bias_growth_power
+            )
     
     def _init_peft(self, model):
         embedding_layer = model.model.embed_tokens
@@ -314,12 +328,13 @@ class MD(nn.Module):
             self.token_special_ids = self.tokenizer.convert_tokens_to_ids(special_tokens)
             self.token_extended_ids =  self.token_special_ids + [self.token_sep_id]
 
+            self.boundary_tokens = [self.tokenizer.tokenize(t) for t in BOUNDARY_TOKENS]
             device = next(model.parameters()).device
             token_sep_id_tensor = torch.tensor([self.token_sep_id], device=device)
             token_special_ids_tensor = torch.tensor(self.token_special_ids, device=device)
             sentence_boundary_ids_tensor = torch.tensor([
-                self.tokenizer.convert_tokens_to_ids(t) 
-                for t in ['\n', '.', '!', '?', '。', '．', '！', '？']
+                self.tokenizer.convert_tokens_to_ids(t)
+                for t in self.boundary_tokens
                 if self.tokenizer.convert_tokens_to_ids(t) != self.tokenizer.unk_token_id
             ], device=device)
             
@@ -358,8 +373,16 @@ class MD(nn.Module):
             states = self.skill_proj(context_embeds)
             skill_output = self.skill_memory(states)
 
-        step_logits = skill_output['action_logits'][:, -1, :]
         sep_index = self.skill_memory.action_dim - 1
+        step_logits = skill_output['action_logits'][:, -1, :]
+        if self.sep_logit_bias:
+            step_logits = step_logits.clone()
+            step_logits[:, sep_index] += self.sep_logit_bias
+
+        temp_scaling = torch.full_like(step_logits, self.non_sep_temp).clamp(min=1e-7)
+        temp_scaling[:, sep_index] = self.sep_temperature
+        step_logits = step_logits / temp_scaling
+        
         batch_size, seq_len, _ = context_embeds.shape
         device = context_embeds.device
         
@@ -423,7 +446,7 @@ class MD(nn.Module):
             
             has_sep = (gumbel_samples[:, sep_index] > 0.5) & has_content
         else:
-            probs = F.softmax(step_logits / self.sep_temperature, dim=-1)
+            probs = F.softmax(step_logits, dim=-1)
             sep_pred = torch.multinomial(probs, num_samples=1).squeeze(-1) == sep_index
             has_sep = sep_pred & has_content
         
@@ -615,7 +638,7 @@ class MD(nn.Module):
         return total_loss
     
     def annotate(
-        self, 
+        self,
         input_ids: torch.Tensor,
         input_labels: torch.Tensor,
         return_loss: bool = False
@@ -661,8 +684,8 @@ class MD(nn.Module):
                     padded_contexts = torch.zeros(window_size, max_length, hidden_size, device=device)
                     mask = torch.zeros(window_size, max_length, dtype=torch.bool, device=device)
                     pad_mask = torch.zeros(window_size, max_length, dtype=torch.bool, device=device)
-                    input_ids_tensor = torch.full((window_size, max_length), 
-                        self.tokenizer.pad_token_id, 
+                    input_ids_tensor = torch.full((window_size, max_length),
+                        self.tokenizer.pad_token_id,
                         device=device)
 
                     for j in range(window_size):
@@ -698,7 +721,7 @@ class MD(nn.Module):
                     if has_sep:
                         current_context = torch.cat(seq_embeds, dim=1)
                         context_with_sep = torch.cat([
-                            current_context, 
+                            current_context,
                             sep_embed
                         ], dim=1)
 
@@ -714,7 +737,7 @@ class MD(nn.Module):
                             annotation_embeds = annotation_embeds.squeeze(0)
                             if self.enable_annotation:
                                 annotation_embeds = torch.cat([
-                                    sep_embed.squeeze(0), 
+                                    sep_embed.squeeze(0),
                                     annotation_embeds
                                 ])
                             
@@ -738,9 +761,9 @@ class MD(nn.Module):
         max_len = max(e.size(0) for e in all_embeds)
         full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=device)
         full_labels = torch.full(
-            (batch_size, max_len), 
-            self.label_pad_token_id, 
-            dtype=torch.long, 
+            (batch_size, max_len),
+            self.label_pad_token_id,
+            dtype=torch.long,
             device=device
         )
         
@@ -778,7 +801,7 @@ class MD(nn.Module):
             return False
 
     def forward(
-        self, 
+        self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
