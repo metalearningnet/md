@@ -16,12 +16,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from packaging import version
 from pydantic import BaseModel
+from typing import Dict, Optional
 from dataclasses import dataclass
 from threading import Thread, Lock
 from itertools import product, islice
-from typing import Dict, Optional, List
 from torch.utils.tensorboard import SummaryWriter
-from lightning.fabric.strategies import DDPStrategy
 from lightning.fabric.accelerators import CUDAAccelerator
 from transformers import (
     modeling_utils,
@@ -86,6 +85,8 @@ BOLD = '\033[1m'
 RESET = '\033[0m'
 BLUE = '\033[1;34m'
 YELLOW = '\033[1;33m'
+
+STRATEGY = 'deepspeed' # Options: 'deepspeed' | 'ddp'
 
 def info(s):
     if VERBOSE:
@@ -480,6 +481,15 @@ def load_peft_config():
     with open(CONF_DIR / PEFT_FILE) as f:
         return yaml.safe_load(f)
 
+def get_fabric_config(dist=False, precision=cfg.precision):
+    if dist or get_num_devices() > 1:
+        return {'devices': 'auto'}
+    else:
+        return {
+            'devices': 'auto',
+            'precision': precision
+        }
+
 def set_dist_config(
         config: dict,
         main_addr: Optional[str] = None,
@@ -519,22 +529,9 @@ def set_dist_config(
     if strategy_name not in valid_strategies:
         raise ValueError(f"Unknown strategy '{strategy_name}'. Valid options: {valid_strategies}")
     
-    strategy_config = dist_config.get(strategy_name, {})
-    if 'optimizer' not in strategy_config:
-        strategy_config.update({
-            'optimizer': {
-                'type': 'AdamW',
-                'params': {
-                    'lr': cfg.lr,
-                    'eps': cfg.eps,
-                    'betas': cfg.betas,
-                    'weight_decay': cfg.weight_decay
-                }
-            }
-        })
-
     if strategy_name == 'deepspeed':
         from lightning.fabric.strategies import DeepSpeedStrategy
+        strategy_config = dist_config.get('deepspeed', {})
         strategy = DeepSpeedStrategy(config=strategy_config)
     else:
         from lightning.fabric.strategies import Strategy
@@ -864,5 +861,20 @@ def get_num_devices():
     else:
         return 1
 
-def get_strategy():
-    return DDPStrategy(find_unused_parameters=True) if get_num_devices() > 1 else None
+def get_strategy(precision):
+    if get_num_devices() > 1:
+        if STRATEGY == 'ddp':
+            from lightning.fabric.strategies import DDPStrategy
+            return DDPStrategy(find_unused_parameters=True)
+        elif STRATEGY == 'deepspeed':
+            from lightning.fabric.strategies import DeepSpeedStrategy
+            strategy_config = {
+                'zero_optimization': {
+                    'stage': 0
+                },
+                'activation_checkpointing': {
+                    'enable': True,
+                    'use_reentrant': True
+                }
+            }
+            return DeepSpeedStrategy(config=strategy_config)

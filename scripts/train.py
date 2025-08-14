@@ -12,7 +12,8 @@ from md import MD
 from loader import MDLoader
 from utils import (
     MD_TAG, md_train, md_validate, cfg, set_dist_config,
-    default_dataset_path, get_strategy, get_trainer, clear_directory, info
+    get_strategy, get_trainer, get_fabric_config, get_num_devices,
+    default_dataset_path, clear_directory, info
 )
 
 def train(config: dict):
@@ -24,12 +25,13 @@ def train(config: dict):
         - val_split: Proportion of the training set to be used for validation.
         - seed: Random seed.
         - epochs: Number of epochs.
-        - samples: Number of samples.
         - batch_size: Training batch size.
+        - samples: Number of samples.
         - lr: Learning rate.
         - eps: Numerical stability term for AdamW optimizer.
         - betas: Betas for AdamW optimizer.
         - weight_decay: Weight decay.
+        - precision: Numerical Precision.
         - ckpt_path: Checkpoint path.
         - save_interval: Checkpoint frequency.
         - dist: Whether to enable distributed training.
@@ -46,12 +48,13 @@ def train(config: dict):
         val_split = config.get('val_split', 0.1)
         seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
-        num_samples = config.get('samples', -1)
         batch_size = config.get('batch_size', 1)
+        num_samples = config.get('samples', -1)
         lr = config.get('lr', 3e-5)
         eps = config.get('eps', 1e-6)
         betas = config.get('betas', (0.9, 0.95))
         weight_decay = config.get('weight_decay', 0.1)
+        precision = config.get('precision', 'bf16-mixed')
         ckpt_path = Path(config.get('ckpt_path', ''))
         save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
@@ -63,10 +66,13 @@ def train(config: dict):
         
         val_samples = max(int(num_samples * val_split), 1) if num_samples != -1 else -1
         
-        if not dist:
-            strategy = get_strategy()
+        if 'strategy' not in fabric_config:
+            strategy = get_strategy(precision)
             if strategy:
                 fabric_config.update({'strategy': strategy})
+        
+        if get_num_devices() > 1:
+            dist = True
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -81,18 +87,14 @@ def train(config: dict):
 
         trainable_params = [p for p in model.get_trainable_parameters() if p.requires_grad]
 
-        if not dist:
-            optimizer = torch.optim.AdamW(
-                trainable_params,
-                lr=lr,
-                eps=eps,
-                betas=betas,
-                weight_decay=weight_decay
-            )
-            model, optimizer = fabric.setup(model, optimizer)
-        else:
-            model = fabric.setup(model)
-            optimizer = None
+        optimizer = torch.optim.AdamW(
+            trainable_params,
+            lr=lr,
+            eps=eps,
+            betas=betas,
+            weight_decay=weight_decay
+        )
+        model, optimizer = fabric.setup(model, optimizer)
         
         if model.has_anno:
             model.mark_forward_method('annotate')
@@ -230,13 +232,14 @@ def main():
         'val_split': args.val_split,
         
         'epochs': args.epochs,
-        'samples': args.samples,
         'batch_size': args.batch_size,
+        'samples': args.samples,
 
         'lr': cfg.lr,
         'eps': cfg.eps,
         'betas': cfg.betas,
         'weight_decay': cfg.weight_decay,
+        'precision': cfg.precision,
 
         'ckpt_path': args.ckpt_path,
         'save_interval': args.save_interval,
@@ -246,12 +249,8 @@ def main():
         'log_interval': args.log_interval,
 
         'dist': args.dist,
-        'fabric_config': {
-            'devices': 'auto',
-            'precision': cfg.precision if not args.dist else '32-true'
-        },
-
-        'restore': args.restore
+        'restore': args.restore,
+        'fabric_config': get_fabric_config(dist=args.dist)
     }
 
     if args.dist:

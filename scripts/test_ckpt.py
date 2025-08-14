@@ -10,7 +10,7 @@ from test import test
 _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
 
-from utils import cfg, default_dataset_path
+from utils import cfg, default_dataset_path, get_fabric_config
 
 NR_EPOCHS = 1
 NR_SAMPLES = 1
@@ -24,9 +24,7 @@ class TestCkpt(unittest.TestCase):
             'samples': NR_SAMPLES,
             'ckpt_path': cfg.ckpt_path,
             'batch_size': 1,
-            'fabric_config': {
-                'precision': cfg.precision
-            }
+            'fabric_config': get_fabric_config()
         }
 
         self.test_args = {
@@ -35,9 +33,7 @@ class TestCkpt(unittest.TestCase):
             'model_path': cfg.ckpt_path,
             'samples': 1,
             'batch_size': 1,
-            'fabric_config': {
-                'precision': cfg.precision
-            }
+            'fabric_config': get_fabric_config()
         }
 
     def test_evaluation(self):

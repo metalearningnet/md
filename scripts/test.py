@@ -9,7 +9,10 @@ sys.path.append(str(_src_dir))
 
 from md import MD
 from loader import MDLoader
-from utils import md_validate, cfg, set_dist_config, default_dataset_path, clear_directory
+from utils import (
+  md_validate, get_fabric_config, get_strategy, get_num_devices,
+  default_dataset_path, set_dist_config, clear_directory, cfg
+)
 
 def test(config: dict):
     """
@@ -19,7 +22,9 @@ def test(config: dict):
         - split: Dataset split name (e.g., "test").
         - batch_size: Testing batch size.
         - samples: Number of samples.
+        - precision: Numerical Precision.
         - ckpt_path: Checkpoint path.
+        - dist: Whether to enable distributed testing.
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - log: Whether to enable logging.
         - log_dir: Directory where logs should be saved.
@@ -31,19 +36,29 @@ def test(config: dict):
         split = config.get('split', 'test')
         batch_size = config.get('batch_size', 1)
         num_samples = config.get('samples', -1)
+        precision = config.get('precision', 'bf16-mixed')
         ckpt_path = config.get('ckpt_path')
+        dist = config.get('dist', False)
         fabric_config = config['fabric_config']
         has_log = config.get('log', False)
         log_dir = Path(config.get('log_dir', ''))
         log_interval = config.get('log_interval', 1)
         
+        if 'strategy' not in fabric_config:
+            strategy = get_strategy(precision)
+            if strategy:
+                fabric_config.update({'strategy': strategy})
+
+        if get_num_devices() > 1:
+            dist = True
+        
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
 
         if ckpt_path:
-            model = MD.from_pretrained(checkpoint_path=ckpt_path)
+            model = MD.from_pretrained(checkpoint_path=ckpt_path, dist=dist)
         else:
-            model = MD.from_pretrained()
+            model = MD.from_pretrained(dist=dist)
         
         model = fabric.setup(model)
         model.eval()
@@ -105,7 +120,7 @@ def main():
 
     # System configuration
     parser.add_argument("--dist", action="store_true", default=False,
-                        help="Enable distributed training")
+                        help="Enable distributed testing")
     parser.add_argument("--log", action="store_true", default=cfg.log,
                         help="Whether to enable logging")
     parser.add_argument("--log_dir", type=str, default=cfg.test_log,
@@ -118,31 +133,28 @@ def main():
     if not Path(args.ckpt_path).exists():
         raise FileNotFoundError(f"Checkpointn file not found: {args.ckpt_path}")
     
-    fabric_config = {
-        'accelerator': 'auto',
-        'precision': cfg.precision
-    }
-    
-    if args.dist:
-        set_dist_config(
-            fabric_config, 
-            main_addr=args.addr, 
-            main_port=args.port, 
-            num_nodes=args.nodes
-        )
-    
     config = {
         'path': args.path,
         'name': args.name,
         'split': args.split,
         'batch_size': args.batch_size,
         'samples': args.samples,
+        'precision': cfg.precision,
         'ckpt_path': args.ckpt_path,
-        'fabric_config': fabric_config,
+        'dist': args.dist,
+        'fabric_config': get_fabric_config(dist=args.dist),
         'log': args.log,
         'log_dir': args.log_dir,
         'log_interval': args.log_interval
     }
+
+    if args.dist:
+        set_dist_config(
+            config,
+            main_addr=args.addr,
+            main_port=args.port,
+            num_nodes=args.nodes
+        )
 
     test(config)
     
