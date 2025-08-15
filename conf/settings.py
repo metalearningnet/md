@@ -4,7 +4,7 @@ MODEL = {
         "path": "Qwen/Qwen3-0.6B",         # Pretrained model identifier from HuggingFace Hub
         "temperature": 0.7,                # Sampling temperature (0.0: deterministic, 1.0: creative)
         "freeze": True,                    # Freeze base LM weights during training
-        "max_length": 1280,                # Maximum total sequence length
+        "max_length": 1280,                # Maximum total sequence length (prompt + response)
         "max_target_length": 1024,         # Maximum generated output length in tokens
         "max_prompt_length": 512           # Maximum input prompt length
     },
@@ -27,7 +27,7 @@ MODEL = {
         "manual_per_sample_grads": False   # Use manual gradient computation
     },
     
-    # Training Objective Weights
+    # Training Objective Balancing
     "lm_coef": 0.8,                        # Language modeling loss weight
     "skill_coef": 0.2,                     # Skill learning loss weight
 
@@ -35,8 +35,11 @@ MODEL = {
     "context_window": 4,                   # Token lookahead window for skill insertion
     "skill_integration_strategy": "hint",  # Integration method: 'fusion' | 'annotation' | 'hint'
     
-    # Prompt Engineering Settings
+    # Prompt Configuration
     "use_initial_prompt": True,            # Whether to prepend an initial prompt to inputs
+
+    # Training Mode
+    "sft": False,                          # Supervised fine-tuning mode
 
     # Inference Settings
     "use_cache": False,                    # Enable KV caching for faster autoregressive decoding
@@ -74,9 +77,9 @@ MEMORY = {
 # Fusion Settings (active when strategy='fusion')
 FUSION = {
     "adapter": {
-        "proj_scale": 2,                   # Hidden dimension expansion factor
+        "proj_scale": -1,                  # Hidden dimension expansion factor (-1 for auto)
         "proj_dropout": 0.1,               # Dropout rate for adapter layers
-        "min_proj_dim": 32,                # Minimum hidden dimension size
+        "min_proj_dim": -1,                # Minimum hidden dimension size (-1 for auto)
         "norm_position": "post"            # LayerNorm placement: 'pre' | 'post'
     }
 }

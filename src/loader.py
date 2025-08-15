@@ -1,11 +1,10 @@
 import os
 import torch
-from datasets.features import Value
+from utils import DatasetMap
 from transformers import AutoTokenizer
-from utils import cfg, info, get_device
-from torch.nn.utils.rnn import pad_sequence
+from datasets import Dataset, DatasetDict
 from typing import Optional, Union, Tuple, Dict, Any
-from datasets import load_dataset, Dataset, DatasetDict
+from utils import cfg, info, get_device, collate, warn
 from torch.utils.data import DataLoader, Dataset, random_split
 
 LOADER_CPU_MAX = 8
@@ -19,7 +18,8 @@ class MDLoader(Dataset):
                  min_length: int = cfg.min_length,
                  max_prompt_length: int = cfg.max_prompt_length,
                  max_target_length: int = cfg.max_target_length,
-                 label_pad_token_id: int = cfg.label_pad_token_id,
+                 label_pad_token_id: int = -100,
+                 is_encoder_decoder: bool = False,
                  split: str = 'train',
                  truncation_mode: str = cfg.truncation_mode,
                  dataset: Optional[Union[Dataset, DatasetDict]] = None):
@@ -33,15 +33,16 @@ class MDLoader(Dataset):
             max_prompt_length: Maximum allowed length for the prompt portion.
             max_target_length: Maximum allowed length for the target sequence.
             label_pad_token_id: Token ID used for padding labels.
+            is_encoder_decoder: Whether the model uses separate encoder-decoder architecture
             split: Predefined dataset split to load (e.g., 'train', 'test').
             truncation_mode: Mode for truncating prompts.
             dataset: Preloaded dataset to use instead of loading from dataset_name.
         """
         super().__init__()
 
-        self.is_encoder_decoder = None
         self.truncation_mode = truncation_mode
         self.label_pad_token_id = label_pad_token_id
+        self.is_encoder_decoder = is_encoder_decoder
         
         self.min_length = min_length
         self.max_length = max_length
@@ -71,49 +72,43 @@ class MDLoader(Dataset):
         else:
             self._load_dataset(path, name, split)
         
-        fields = [
-            field for field, feature in self.dataset.features.items()
-            if isinstance(feature, Value) and feature.dtype == 'string'
-        ]
-        
-        if fields and 'text' not in fields:
-            from utils import DatasetMap
-            dataset_map = DatasetMap(
-                self.tokenizer,
-                self.truncation_mode,
-                self.max_prompt_length,
-                self.max_length,
-                self.max_target_length,
-                self.label_pad_token_id
-            )
-            self.dataset = dataset_map.generate(self.dataset)
-        else:
-            num_proc = self.get_cpu_count()
-            self.dataset = self.dataset.filter(
-                lambda x: all(
-                    len(self.tokenizer.encode(x[field])) >= self.min_length
-                    for field in fields
-                ),
-                num_proc=num_proc
-            )
+        dataset_map = DatasetMap(
+            self.tokenizer,
+            self.truncation_mode,
+            self.max_prompt_length,
+            self.max_length,
+            self.max_target_length,
+            self.label_pad_token_id
+        )
+        self.dataset = dataset_map.generate(self.dataset)
 
     def _load_dataset(
         self,
         path: str,
-        name: str,
-        split: str
+        name: Optional[str] = None,
+        split: Optional[str] = None,
+        fallback_split: str = 'train'
     ):
         try:
-            from datasets import get_dataset_split_names
+            from datasets import get_dataset_split_names, load_dataset
             split_names = get_dataset_split_names(path, config_name=name)
-            if split and split_names and split not in split_names:
-                new_split = split + '_prefs'
-                if new_split not in split_names:
-                    raise RuntimeError(f"Invalid split: {split}")
-                split = new_split
+            
+            if not split_names:
+                raise RuntimeError(f"No splits found for dataset: {path}")
+            
+            if split is None or split not in split_names:
+                original_split = split
+                split = fallback_split if fallback_split in split_names else split_names[0]
+                if original_split is not None:
+                    warn(f"Split '{original_split}' not available. Using '{split}' instead.")
+            
             self.dataset = load_dataset(path, name, split=split)
+        
         except Exception as e:
-            raise RuntimeError(f"Dataset loading failed: {str(e)}")
+            raise RuntimeError(
+                f"Failed to load dataset {path} (config: {name}, split: {split}). "
+                f"Original error: {str(e)}"
+            ) from e
     
     def __len__(self) -> int:
         return len(self.dataset)
@@ -141,40 +136,6 @@ class MDLoader(Dataset):
                 return example
         except Exception as e:
             raise RuntimeError(f"Failed processing example {idx}: {str(e)}")
-    
-    def collate_fn(self, batch: Dict[str, Any]) -> Dict[str, torch.Tensor]:
-        if all('input_ids' in item for item in batch):
-            input_ids = [item['input_ids'] for item in batch]
-            padded_inputs = pad_sequence(
-                input_ids,
-                batch_first=True,
-                padding_value=self.tokenizer.pad_token_id
-            )
-
-            attention_mask = (padded_inputs != self.tokenizer.pad_token_id).long()
-
-            labels = pad_sequence(
-                [item['labels'] for item in batch],
-                batch_first=True,
-                padding_value=-100
-            )
-            
-            return {
-                'input_ids': padded_inputs,
-                'attention_mask': attention_mask,
-                'labels': labels
-            }
-        else:
-           from utils import collate
-           return collate(
-               batch=batch,
-               tokenizer=self.tokenizer,
-               max_length=self.max_length,
-               max_prompt_length=self.max_prompt_length,
-               label_pad_token_id=self.label_pad_token_id,
-               truncation_mode=self.truncation_mode,
-               is_encoder_decoder=self.is_encoder_decoder
-            )
 
     def get_cpu_count(self):
         return min(LOADER_CPU_MAX, os.cpu_count())
@@ -182,6 +143,17 @@ class MDLoader(Dataset):
     def get_workers(self):
         return 0 if get_device().type == 'mps' else self.get_cpu_count()
 
+    def collate_fn(self, batch):
+        return collate(
+            batch=batch,
+            tokenizer=self.tokenizer,
+            max_length=self.max_length,
+            max_prompt_length=self.max_prompt_length,
+            label_pad_token_id=self.label_pad_token_id,
+            truncation_mode=self.truncation_mode,
+            is_encoder_decoder=self.is_encoder_decoder
+        )
+    
     def get_dataloader(
         self, 
         batch_size: int,

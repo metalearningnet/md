@@ -16,10 +16,12 @@ from pathlib import Path
 from fastapi import FastAPI
 from packaging import version
 from pydantic import BaseModel
-from typing import Dict, Optional
+import torch.nn.functional as F
 from dataclasses import dataclass
 from threading import Thread, Lock
 from itertools import product, islice
+from torch.nn.utils.rnn import pad_sequence
+from typing import Dict, Optional, List, Union
 from torch.utils.tensorboard import SummaryWriter
 from lightning.fabric.accelerators import CUDAAccelerator
 from transformers import (
@@ -44,6 +46,10 @@ from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATI
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
 VERBOSE = getattr(settings, 'VERBOSE', True)
+
+SHOW_INPUT = False
+SHOW_OUTPUT = False
+SHOW_LABELS = False
 
 REMOVE_UNUSED_COLUMNS = False
 GRADIENT_ACCUMULATION_STEPS = 1
@@ -96,6 +102,18 @@ def warn(s):
     if WARN:
         print(f"{YELLOW}{BOLD}[WARNING]{RESET} {s}", file=sys.stderr)
 
+def show_input(s):
+    if VERBOSE:
+        print(f'> [input] {s}')
+
+def show_labels(s):
+    if VERBOSE:
+        print(f'\n[lables] {s}\n')
+
+def show_output(s):
+    if VERBOSE:
+        print(f'< [output] {s}')
+
 @dataclass
 class Cfg:
     log: bool
@@ -116,7 +134,6 @@ class Cfg:
     annotation: dict
     mem_config: dict
     log_interval: int
-    label_pad_token_id: int
     remove_unused_columns: bool
     
     @property
@@ -154,19 +171,19 @@ class Cfg:
     
     @property
     def min_length(self):
-        return self.model['lm'].get('min_length', 16)
+        return self.model['lm'].get('min_length', 64)
     
     @property
     def max_length(self):
-        return self.model['lm'].get('max_length', 384)
+        return self.model['lm'].get('max_length', 1280)
 
     @property
     def max_prompt_length(self):
-        return self.model['lm'].get('max_prompt_length', 128)
+        return self.model['lm'].get('max_prompt_length', 512)
     
     @property
     def max_target_length(self):
-        return self.model['lm'].get('max_target_length', 256)
+        return self.model['lm'].get('max_target_length', 1024)
 
     @property
     def skill_config(self):
@@ -212,6 +229,10 @@ class Cfg:
     @property
     def update_memory(self):
         return self.model.get('update_memory', False)
+    
+    @property
+    def sft(self):
+        return self.model.get('sft', False)
     
     @property
     def ckpt_path(self):
@@ -336,28 +357,143 @@ cfg = Cfg(
     optimizer=OPTIMIZER,
     annotation=ANNOTATION,
     log_interval=LOG_INTERVAL,
-    label_pad_token_id=LABEL_PAD_TOKEN_ID,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
 
-if cfg.po == 'NCA':
+if not cfg.sft and cfg.po == 'NCA':
     from nca.nca_utils import DatasetMap
     from nca.nca_utils import nca_collate as collate
     default_dataset_path = "ChenDRAG/ultrafeedback_reward"
-elif cfg.po == 'SimPO':
+elif not cfg.sft and cfg.po == 'SimPO':
     from simpo.simpo_utils import DatasetMap
     from simpo.simpo_utils import simpo_collate as collate
     default_dataset_path = "princeton-nlp/gemma2-ultrafeedback-armorm"
 else:
-    default_dataset_path = "ag_news"
+    default_dataset_path = "databricks/databricks-dolly-15k"
+    from transformers import PreTrainedTokenizer
+
+    @dataclass
+    class DatasetMap:
+        tokenizer: PreTrainedTokenizer
+        truncation_mode: str
+        max_prompt_length: int
+        max_length: int
+        max_target_length: int
+        label_pad_token_id: int = -100
+        
+        def __call__(self, examples: dict) -> dict:
+            prompts = []
+            responses = []
+            
+            for instruction, response in zip(examples['instruction'], examples['response']):
+                prompt = f"Instruction: {instruction}\n\nResponse:"
+                prompts.append(prompt)
+                responses.append(response)
+
+            prompt_encodings = self.tokenizer(
+                prompts,
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding=False,
+                add_special_tokens=False
+            )
+
+            response_encodings = self.tokenizer(
+                responses,
+                truncation=True,
+                max_length=self.max_target_length,
+                padding=False,
+                add_special_tokens=False
+            )
+
+            input_ids = []
+            labels = []
+            for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
+                combined_ids = prompt_ids + response_ids
+                
+                if len(combined_ids) > self.max_length:
+                    if self.truncation_mode == 'keep_start':
+                        combined_ids = combined_ids[:self.max_length]
+                    else:
+                        combined_ids = combined_ids[-self.max_length:]
+                
+                # Create labels (-100 for prompt, response tokens for response)
+                label_ids = [self.label_pad_token_id] * len(prompt_ids) + response_ids
+                label_ids = label_ids[:len(combined_ids)]
+                
+                input_ids.append(combined_ids)
+                labels.append(label_ids)
+
+            return {
+                'input_ids': input_ids,
+                'attention_mask': [[1] * len(ids) for ids in input_ids],
+                'labels': labels
+            }
+
+        def generate(self, dataset):
+            return dataset.map(
+                self.__call__,
+                batched=True,
+                remove_columns=dataset.column_names,
+                num_proc=os.cpu_count()
+            )
+
+    def collate(
+        batch: List[Dict[str, Union[List[int], torch.Tensor]]],
+        tokenizer: PreTrainedTokenizer,
+        max_length: Optional[int] = None,
+        max_prompt_length: Optional[int] = None,
+        label_pad_token_id: int = -100,
+        truncation_mode: str = 'keep_start',
+        is_encoder_decoder: bool = False
+    ) -> Dict[str, torch.Tensor]:
+        input_ids = [torch.as_tensor(item['input_ids']) for item in batch]
+        labels = [torch.as_tensor(item['labels']) for item in batch]
+        
+        seq_lengths = torch.tensor([len(seq) for seq in input_ids])
+        max_len = seq_lengths.max().item()
+        
+        if max_length is not None:
+            max_len = min(max_len, max_length)
+            seq_lengths = torch.clamp(seq_lengths, max=max_len)
+        
+        input_ids_padded = torch.full(
+            (len(batch), max_len),
+            fill_value=tokenizer.pad_token_id,
+            dtype=input_ids[0].dtype
+        )
+        labels_padded = torch.full(
+            (len(batch), max_len),
+            fill_value=label_pad_token_id,
+            dtype=labels[0].dtype
+        )
+        
+        for i, (seq, length) in enumerate(zip(input_ids, seq_lengths)):
+            input_ids_padded[i, :length] = seq[:length]
+            labels_padded[i, :length] = labels[i][:length]
+        
+        attention_mask = (input_ids_padded != tokenizer.pad_token_id).long()
+        
+        if not is_encoder_decoder:
+            return {
+                'input_ids': input_ids_padded[:, :-1],
+                'attention_mask': attention_mask[:, :-1],
+                'labels': labels_padded[:, 1:]
+            }
+        
+        return {
+            'input_ids': input_ids_padded,
+            'attention_mask': attention_mask,
+            'labels': labels_padded
+        }
 
 class LogitsDecoder:
-    def __init__(self, config, tokenizer, temperature):
+    def __init__(self, config, tokenizer, temperature=1.0):
         self.config = config
         self.tokenizer = tokenizer
-        self.default_temp = temperature
-        self.default_top_k = getattr(self.config, 'top_k', None)
-        self.default_top_p = getattr(self.config, 'top_p', None)
+        self.default_temp = max(temperature, 1e-5)
+        self.default_top_k = getattr(config, 'top_k', 0)
+        self.default_top_p = getattr(config, 'top_p', 1.0)
 
     def decode_logits(
         self,
@@ -368,30 +504,33 @@ class LogitsDecoder:
         repetition_penalty: float = 1.0,
         do_sample: bool = True
     ) -> torch.Tensor:
-        temperature = temperature if temperature is not None else self.default_temp
+        temperature = max(temperature if temperature is not None
+                            else self.default_temp, 1e-5)
         top_k = top_k if top_k is not None else self.default_top_k
         top_p = top_p if top_p is not None else self.default_top_p
 
-        processors = LogitsProcessorList()
+        logits = logits.float()
         
+        processors = []
         if repetition_penalty != 1.0:
             processors.append(RepetitionPenaltyLogitsProcessor(repetition_penalty))
         
         if do_sample:
             if temperature != 1.0:
                 processors.append(TemperatureLogitsWarper(temperature))
-            if top_k is not None and top_k > 0:
+            if top_k > 0:
                 processors.append(TopKLogitsWarper(top_k))
-            if top_p is not None and top_p < 1.0:
+            if top_p < 1.0:
                 processors.append(TopPLogitsWarper(top_p))
-        
+
         if processors:
-            logits = processors(None, logits)
+            logits = LogitsProcessorList(processors)(None, logits)
+
+        if not do_sample:
+            return torch.argmax(logits, dim=-1)
         
-        return torch.argmax(logits, dim=-1) if not do_sample else torch.multinomial(
-            torch.softmax(logits, dim=-1), 
-            num_samples=1
-        ).squeeze(-1)
+        probs = torch.softmax(logits, dim=-1)
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 def clear_directory(directory, include_subdirectories=True):
     if os.path.exists(directory):
@@ -460,7 +599,6 @@ class NodeRankCoordinator:
                 return {'node_rank': assigned_rank}
 
     def graceful_shutdown(self):
-        """Give clients time to receive responses before shutting down"""
         time.sleep(2)
         os._exit(0)
 
@@ -539,35 +677,37 @@ def set_dist_config(
 
     config['fabric_config']['strategy'] = strategy
 
-def calculate_lm_loss(outputs, batch, loss_fn):
-    lm_logits = outputs['logits']
-    input_ids = batch['input_ids']
-    _, logits_seq_len = lm_logits.size(0), lm_logits.size(1)
-    input_len = input_ids.size(1)
+def get_lm_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    is_encoder_decoder: bool = False,
+    shift_labels: bool = True,
+    ignore_index: int = -100
+) -> torch.Tensor:
+    if is_encoder_decoder:
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1),
+            ignore_index=ignore_index
+        )
+    else:
+        if shift_labels:
+            logits = logits[..., :-1, :].contiguous()
+            labels = labels[..., 1:].contiguous()
+        
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1),
+            ignore_index=ignore_index
+        )
     
-    M = logits_seq_len - input_len
-    
-    logits = lm_logits[:, M:M+input_len-1, :]
-    
-    labels = input_ids[:, 1:]
-    
-    mask = (batch['attention_mask'][:, 1:] != 0).flatten()
-    
-    assert logits.size(1) == input_len-1, \
-        f"Logits seq {logits.size(1)} != labels seq {input_len-1}"
-    assert mask.shape[0] == logits.size(0)*logits.size(1), \
-        f"Mask {mask.shape} vs logits {logits.shape}"
-    
-    return loss_fn(
-        logits.reshape(-1, logits.size(-1))[mask],
-        labels.reshape(-1)[mask]
-    )
+    return loss
 
 def get_trainer(model):
-    if cfg.po == 'SimPO':
+    if not cfg.sft and cfg.po == 'SimPO':
         from simpo.simpo_config import SimPOConfig as config
         from simpo.simpo_trainer import SimPOTrainer as trainer
-    elif cfg.po == 'NCA':
+    elif not cfg.sft and cfg.po == 'NCA':
         from nca.nca_config import NCAConfig as config
         from nca.nca_trainer import NCATrainer as trainer
     else:
@@ -624,7 +764,8 @@ def md_train(
     num_samples=-1,
     log_dir=None,
     log_interval=1,
-    trainer=None
+    trainer=None,
+    label_pad_token_id=LABEL_PAD_TOKEN_ID
 ):
     model.train()
     
@@ -637,7 +778,6 @@ def md_train(
     }
 
     writer = SummaryWriter(log_dir) if log_dir else None
-    lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id)
     
     if num_samples > 0:
         max_steps = min(num_samples, len(loader))
@@ -654,27 +794,64 @@ def md_train(
         total=max_steps
     )
     
-    for step, batch in enumerate(pbar):
+    is_encoder_decoder = model.config.is_encoder_decoder
+
+    if SHOW_OUTPUT:
+        logits_decoder = LogitsDecoder(model.config, model.tokenizer, model.temperature)
+    
+    for batch in pbar:
         model.step()
         if trainer:
             loss, train_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='train')
             trainer.store_metrics(metrics=train_metrics, train_eval='train')
         else:
+            labels = batch['labels']
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = calculate_lm_loss(outputs, batch, lm_loss_fn)
 
-            if torch.isnan(loss).any() or torch.isinf(loss).any():
-                warn("NaN/Inf loss detected, skipping batch")
-                continue
+            if SHOW_INPUT and fabric.is_global_zero:
+                for i in range(min(2, len(input_ids))):
+                    show_input(f"Batch {i}: {model.tokenizer.decode(input_ids[i])}")
 
-            has_nan = any(torch.isnan(p.grad).any() for p in model.parameters() if p.grad is not None)
-            has_inf = any(torch.isinf(p.grad).any() for p in model.parameters() if p.grad is not None)
-            if has_nan or has_inf:
-                warn("NaN/Inf gradients detected, skipping update")
-                continue
-        
+            if SHOW_LABELS and fabric.is_global_zero:
+                for i in range(min(2, len(labels))):
+                    valid_ids = [tid for tid in labels[i] if tid != label_pad_token_id]
+                    show_labels(f"Batch {i}: {model.tokenizer.decode(valid_ids)}")
+            
+            if model.has_anno:
+                outputs = model.annotate(input_ids=input_ids, input_labels=labels, return_loss=True)
+            else:
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            
+            output_logits = outputs['logits']
+            
+            if SHOW_OUTPUT and fabric.is_global_zero:
+                for i in range(min(2, len(output_logits))):
+                    output_ids = logits_decoder.decode_logits(output_logits[i])
+                    show_output(f"Batch {i}: {model.tokenizer.decode(output_ids)}")
+            
+            if not output_logits.requires_grad:
+                raise RuntimeError("Model outputs are not tracking gradients")
+    
+            lm_loss = get_lm_loss(
+                logits=output_logits,
+                labels=labels,
+                ignore_index=label_pad_token_id,
+                is_encoder_decoder=is_encoder_decoder
+            )
+
+            if model.skill_coef:
+                if model.has_anno:
+                    skill_loss = outputs['losses']
+                else:
+                    skill_loss = model.skill_memory.compute_losses(outputs)['total_loss']
+                loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+            else:
+                loss = lm_loss
+
+            if not loss.requires_grad:
+                raise RuntimeError("Loss tensor has no gradient connection")
+
         if optimizer:
             optimizer.zero_grad()
             fabric.backward(loss)
@@ -712,7 +889,8 @@ def md_validate(
     num_samples=-1,
     log_dir=None,
     log_interval=1,
-    trainer=None
+    trainer=None,
+    label_pad_token_id=LABEL_PAD_TOKEN_ID
 ) -> dict:
     if loader is None:
         return {}
@@ -728,8 +906,7 @@ def md_validate(
     }
 
     writer = SummaryWriter(log_dir) if log_dir else None
-    lm_loss_fn = torch.nn.CrossEntropyLoss(ignore_index=model.tokenizer.pad_token_id, reduction='sum')
-
+    
     if num_samples > 0:
         max_steps = min(num_samples, len(loader))
         loader_iter = iter(islice(loader, max_steps))
@@ -745,30 +922,57 @@ def md_validate(
         total=max_steps
     )
 
+    is_encoder_decoder = model.config.is_encoder_decoder
+
+    if SHOW_OUTPUT:
+        logits_decoder = LogitsDecoder(model.config, model.tokenizer, model.temperature)
+
     with torch.no_grad():
         for batch in pbar:
             if trainer:
                 loss, eval_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='eval')
                 trainer.store_metrics(metrics=eval_metrics, train_eval='eval')
             else:
+                labels = batch['labels']
                 input_ids = batch['input_ids']
                 attention_mask = batch['attention_mask']
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
                 
-                lm_logits = outputs['logits']
-                input_len = input_ids.size(1)
-                M = lm_logits.size(1) - input_len
-                
-                sliced_lm_logits = lm_logits[:, M:M+input_len-1, :]
-                lm_labels = input_ids[:, 1:]
-                
-                lm_mask = (attention_mask[:, 1:] != 0).flatten()
-                assert sliced_lm_logits.size(1) == lm_labels.size(1), "LM dimension mismatch"
+                if SHOW_INPUT and fabric.is_global_zero:
+                    for i in range(min(2, len(input_ids))):
+                        show_input(f"Batch {i}: {model.tokenizer.decode(input_ids[i])}")
 
-                loss = lm_loss_fn(
-                    sliced_lm_logits.reshape(-1, sliced_lm_logits.size(-1))[lm_mask],
-                    lm_labels.flatten()[lm_mask]
-                ) if lm_mask.any() else 0.0
+                if SHOW_LABELS and fabric.is_global_zero:
+                    for i in range(min(2, len(labels))):
+                        valid_ids = [tid for tid in labels[i] if tid != label_pad_token_id]
+                        show_labels(f"Batch {i}: {model.tokenizer.decode(valid_ids)}")
+                
+                if model.has_anno:
+                    outputs = model.annotate(input_ids=input_ids, input_labels=labels, return_loss=True)
+                else:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+            
+                output_logits = outputs['logits']
+                
+                if SHOW_OUTPUT and fabric.is_global_zero:
+                    for i in range(min(2, len(output_logits))):
+                        output_ids = logits_decoder.decode_logits(output_logits[i])
+                        show_output(f"Batch {i}: {model.tokenizer.decode(output_ids)}")
+                
+                lm_loss = get_lm_loss(
+                    logits=output_logits,
+                    labels=labels,
+                    ignore_index=label_pad_token_id,
+                    is_encoder_decoder=is_encoder_decoder
+                )
+
+                if model.skill_coef:
+                    if model.has_anno:
+                        skill_loss = outputs['losses']
+                    else:
+                        skill_loss = model.skill_memory.compute_losses(outputs)['total_loss']
+                    loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+                else:
+                    loss = lm_loss
             
             metrics['steps'] += 1
             metrics['total_loss'] += loss.item()

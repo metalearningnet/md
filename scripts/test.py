@@ -10,16 +10,16 @@ sys.path.append(str(_src_dir))
 from md import MD
 from loader import MDLoader
 from utils import (
-  md_validate, get_fabric_config, get_strategy, get_num_devices,
-  default_dataset_path, set_dist_config, clear_directory, cfg
+  LABEL_PAD_TOKEN_ID, md_validate, get_fabric_config, get_strategy, get_num_devices,
+  default_dataset_path, clear_directory, set_dist_config, cfg
 )
 
 def test(config: dict):
     """
     config:
         - path: Dataset path.
-        - name: Dataset name.
-        - split: Dataset split name (e.g., "test").
+        - name: Config name.
+        - split: Dataset split name (e.g., 'test').
         - batch_size: Testing batch size.
         - samples: Number of samples.
         - precision: Numerical Precision.
@@ -32,7 +32,7 @@ def test(config: dict):
     """
     try:
         dataset_path = config['path']
-        dataset_name = config.get('name')
+        config_name = config.get('name')
         split = config.get('split', 'test')
         batch_size = config.get('batch_size', 1)
         num_samples = config.get('samples', -1)
@@ -68,8 +68,10 @@ def test(config: dict):
         
         loader = MDLoader(
             path=dataset_path,
-            name=dataset_name,
-            split=split
+            name=config_name,
+            split=split,
+            is_encoder_decoder=model.config.is_encoder_decoder,
+            label_pad_token_id=LABEL_PAD_TOKEN_ID
         )
 
         if has_log:

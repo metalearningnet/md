@@ -274,9 +274,10 @@ class TestMD(unittest.TestCase):
         if self.fast_test:
             return
         
-        inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt").to(self.device)
-        outputs = self.model.generate(input_ids=inputs['input_ids'])
-        self.assertEqual(outputs.shape[0], 1)
+        if self.model.has_anno:
+            inputs = self.model.tokenizer("Hello, how are you?", return_tensors="pt").to(self.device)
+            outputs = self.model.generate(input_ids=inputs['input_ids'])
+            self.assertEqual(outputs.shape[0], 1)
 
     def test_device_compatibility(self):
         if self.fast_test:

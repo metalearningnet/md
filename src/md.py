@@ -10,7 +10,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
     cfg, info, warn, get_device, load_peft_config, get_special_token_by_index,
-    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS
+    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID
 )
 
 class SafeEmbeddingWrapper(nn.Module):
@@ -36,7 +36,7 @@ class AdaptedEmbedding(nn.Module):
             torch.empty(embedding_dim, peft_config.r)
         )
         
-        if getattr(peft_config, "init_lora_weights", "gaussian") == "gaussian":
+        if getattr(peft_config, 'init_lora_weights', 'gaussian') == 'gaussian':
             nn.init.normal_(self.lora_A, std=1/peft_config.r)
             nn.init.zeros_(self.lora_B)
         else:
@@ -76,7 +76,7 @@ class MD(nn.Module):
         self.max_annotations = config.max_annotations
         self.anno_max_length = config.anno_max_length
         self.attn = config.attn if attn is None else attn
-        self.label_pad_token_id = config.label_pad_token_id
+        
         self.num_special_tokens = config.num_special_tokens
         self.sentence_alignment = config.sentence_alignment
         self.update_memory = True if update_memory else config.update_memory
@@ -116,6 +116,7 @@ class MD(nn.Module):
         self.current_step = 0
         self.sep_logit_bias = self.min_sep_bias
         self.sep_noise_scale = self.noise_scale
+        self.label_pad_token_id = LABEL_PAD_TOKEN_ID
         self.non_sep_temp = self.sep_temperature * 1.5
         self.has_anno = self.enable_hint or self.enable_annotation
         self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
@@ -225,8 +226,14 @@ class MD(nn.Module):
             self.skill_action_dim = self.num_tokens
         else:
              self.skill_action_dim = self.skill_config.get('action_dim', self.num_tokens)
-        self.skill_state_dim = self.skill_config.get('state_dim', self.hidden_size)
+        
+        if self.skill_integration_strategy == 'fusion':
+            self.skill_state_dim = self.hidden_size
+        else:
+            self.skill_state_dim = self.skill_config.get('state_dim', self.hidden_size)
+        
         self.skill_hidden_dim = self.skill_config.get('hidden_dim', self.hidden_size)
+
         self.skill_config.update({
             'num_tokens': self.num_tokens,
             'mem_config': self.mem_config,
@@ -236,7 +243,9 @@ class MD(nn.Module):
             'checkpoint': self.skill_checkpoint,
             'update_memory': self.update_memory,
         })
+
         self.skill_memory = SkillMemory(**self.skill_config)
+        
         self.skill_proj = nn.Sequential(
             nn.Linear(self.hidden_size, self.skill_state_dim*2),
             nn.GELU(),
@@ -251,9 +260,9 @@ class MD(nn.Module):
         )
         self.state_norm = nn.LayerNorm(self.hidden_size)
         self.action_norm = nn.LayerNorm(self.hidden_size)
-        proj_scale = self.adapter_config.get('proj_scale', 2)
-        min_dim = self.adapter_config.get('min_proj_dim', self.hidden_size)
-        proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim)
+        min_dim = self.adapter_config.get('min_proj_dim', -1)
+        proj_scale = self.adapter_config.get('proj_scale', -1)
+        proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim, self.hidden_size)
 
         norm_pos = self.adapter_config.get('norm_position', 'post')
         assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
@@ -346,7 +355,7 @@ class MD(nn.Module):
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
             self.config.vocab_size = self.num_tokens
 
-            info(f'LM (model_type: {self.config.model_type}, vocab_size: {self.num_tokens})')
+            info(f"LM (model_type: {self.config.model_type}, vocab_size: {self.num_tokens})")
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -356,6 +365,8 @@ class MD(nn.Module):
             
             assert len(self.token_special_ids) == self.num_special_tokens, \
                 f"Expected {self.num_special_tokens} special tokens, got {len(self.token_special_ids)}"
+        else:
+            self.num_tokens = model.get_output_embeddings().weight.shape[0]
 
     def _has_sep(
             self,

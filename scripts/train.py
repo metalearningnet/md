@@ -11,17 +11,17 @@ sys.path.append(str(_src_dir))
 from md import MD
 from loader import MDLoader
 from utils import (
-    MD_TAG, md_train, md_validate, cfg, set_dist_config,
+    MD_TAG, LABEL_PAD_TOKEN_ID, md_train, md_validate,
     get_strategy, get_trainer, get_fabric_config, get_num_devices,
-    default_dataset_path, clear_directory, info
+    default_dataset_path, clear_directory, info, set_dist_config, cfg
 )
 
 def train(config: dict):
     """
     config:
         - path: Dataset path.
-        - name: Dataset name.
-        - split: Dataset split name (e.g., "train").
+        - name: Config name.
+        - split: Dataset split name (e.g., 'train').
         - val_split: Proportion of the training set to be used for validation.
         - seed: Random seed.
         - epochs: Number of epochs.
@@ -42,8 +42,8 @@ def train(config: dict):
         - log_interval: Interval at which to update and write logs.
     """
     try:
-        path = config['path']
-        name = config.get('name')
+        dataset_path = config['path']
+        config_name = config.get('name')
         split = config.get('split', 'train')
         val_split = config.get('val_split', 0.1)
         seed = config.get('seed', 42)
@@ -99,13 +99,18 @@ def train(config: dict):
         if model.has_anno:
             model.mark_forward_method('annotate')
         
-        loader_args = {
-            'path': path,
-            'name': name,
-            'split': split
-        }
+        if cfg.sft:
+            info(f"Training process (dataset: {dataset_path}, sft: enabled)")
+        else:
+            info(f"Training process (dataset: {dataset_path})")
         
-        loader = MDLoader(**loader_args)
+        loader = MDLoader(
+            path=dataset_path,
+            name=config_name,
+            split=split,
+            is_encoder_decoder=model.config.is_encoder_decoder,
+            label_pad_token_id=LABEL_PAD_TOKEN_ID
+        )
         train_loader, val_loader = loader.get_dataloaders(
             batch_size=batch_size,
             val_split=val_split,
