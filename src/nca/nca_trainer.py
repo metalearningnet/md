@@ -547,7 +547,7 @@ class NCATrainer(Trainer):
         policy_outputs = self.get_logps(model, batch)
         policy_A0_logps, policy_A1_logps, policy_A2_logps, policy_A3_logps = policy_outputs[:4]
 
-        skill_loss = policy_outputs[-1] if policy_outputs[-1] is not None else torch.tensor(0.0, device=model.device, requires_grad=True)
+        mem_loss = policy_outputs[-1] if policy_outputs[-1] is not None else torch.tensor(0.0, device=model.device, requires_grad=True)
 
         losses, A0_rewards, A1_rewards, A2_rewards, A3_rewards = self.nca_loss(
             batch,
@@ -578,7 +578,7 @@ class NCATrainer(Trainer):
         metrics[f"{prefix}logps/A3"] = policy_A3_logps.detach().cpu().mean()
 
         lm_loss = losses.mean()
-        total_loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+        total_loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
 
         if torch.is_grad_enabled():
             assert total_loss.requires_grad, "Total loss doesn't require gradients!"

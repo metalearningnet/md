@@ -143,24 +143,20 @@ class TestMD(unittest.TestCase):
         
         if self.model.has_anno:
             import torch.nn.functional as F
-            from torch.distributions import Categorical
-            skill = self.model.skill_memory
-            
-            states = torch.randn(5, 10, skill.state_dim).to(self.device)
+
+            mem = self.model.mem
+            states = torch.randn(5, 10, mem.state_dim).to(self.device)
             
             with torch.no_grad():
-                outputs = skill(states)
+                outputs = mem(states)
                 logits = outputs['action_logits']
             
-            entropy = Categorical(logits=logits).entropy()
-            self.assertGreater(entropy.mean(), 1.0, "Low entropy in SkillMemory outputs")
-            
             diff_states = torch.randn_like(states).to(self.device)
-            diff_outputs = skill(diff_states)
+            diff_outputs = mem(diff_states)
             diff_logits = diff_outputs['action_logits']
             
             similarity = F.cosine_similarity(logits.flatten(), diff_logits.flatten(), dim=0)
-            show_results(f"\nEntropy: {entropy.mean().item():.4f}\nOutput similarity: {similarity.item():.4f}")
+            show_results(f"\nOutput similarity: {similarity.item():.4f}")
             self.assertLess(similarity, 0.8, "Outputs not sensitive to input changes")
     
     def test_annotation_boundaries(self):

@@ -17,7 +17,7 @@ class SafeEmbeddingWrapper(nn.Module):
     def __init__(self, embedding_layer):
         super().__init__()
         self.embedding_layer = embedding_layer
-        
+    
     def forward(self, input):
         # Ensure no in-place modifications
         input = input.detach().clone()
@@ -45,7 +45,7 @@ class AdaptedEmbedding(nn.Module):
         
         self.peft_config = peft_config
         self.scaling = peft_config.lora_alpha / peft_config.r
-        
+    
     def forward(self, input):
         orig_out = self.original(input)
         one_hot = F.one_hot(input, num_classes=self.original.num_embeddings).float()
@@ -56,52 +56,9 @@ class MD(nn.Module):
     def __init__(self,
                  config = cfg,
                  attn: str = None,
-                 dist: bool = False,
-                 update_memory: bool = True):
+                 dist: bool = False):
         super().__init__()
-        self.dist = dist
-        self.device = get_device()
-        self.use_cache = config.use_cache
-        self.model_dir = config.model_dir
-        self.max_hints = config.max_hints
-        self.max_length = config.max_length
-        self.mem_config = config.mem_config
-        self.adapter_config = config.adapter
-        self.temperature = config.temperature
-        self.min_interval = config.min_interval
-        self.max_sep_bias = config.sep_logit_bias
-        self.hint_category = config.hint_category
-        self.context_window = config.context_window
-        self.sep_temperature = config.sep_temperature
-        self.max_annotations = config.max_annotations
-        self.anno_max_length = config.anno_max_length
-        self.attn = config.attn if attn is None else attn
         
-        self.num_special_tokens = config.num_special_tokens
-        self.sentence_alignment = config.sentence_alignment
-        self.update_memory = True if update_memory else config.update_memory
-        self.tune_special_token_embeddings = config.tune_special_token_embeddings
-        self.dtype = torch.float16 if config.precision == '16-mixed' else torch.bfloat16
-        
-        self.lm_path = config.lm_path
-        self.lm_coef = config.lm_coef
-        self.lm_freeze = config.lm_freeze
-        self.lm_checkpoint = config.lm_checkpoint
-
-        self.skill_coef = config.skill_coef
-        self.skill_vocab = config.skill_vocab
-        self.skill_config = config.skill_config
-        self.skill_checkpoint = config.skill_checkpoint
-        self.skill_integration_strategy = config.skill_integration_strategy
-
-        self.enable_hint = self.skill_coef and self.skill_integration_strategy == 'hint'
-        self.enable_fusion = self.skill_coef and self.skill_integration_strategy == 'fusion'
-        self.enable_annotation = self.skill_coef and self.skill_integration_strategy == 'annotation'
-
-        self._init_lm()
-        self._init_skill()
-        self._init_params()
-
         self.noise_scale = 0.15
         self.noise_floor = 0.05
         self.min_sep_bias = 1.0
@@ -111,34 +68,134 @@ class MD(nn.Module):
         self.diversity_strength = 0.8
         self.bias_growth_power = 1.2
         self.noise_decay_power = 0.8
-        
+
         self.max_steps = 0
         self.current_step = 0
-        self.sep_logit_bias = self.min_sep_bias
-        self.sep_noise_scale = self.noise_scale
         self.label_pad_token_id = LABEL_PAD_TOKEN_ID
-        self.non_sep_temp = self.sep_temperature * 1.5
-        self.has_anno = self.enable_hint or self.enable_annotation
-        self.max_annos = self.max_annotations if self.enable_annotation else self.max_hints
 
-        info(f"MD (hidden_dim: {self.hidden_size}, skill: {config.skill_info}, special_tokens: {self.num_special_tokens}, preference_optimizer: {config.po})")
+        self.dist = dist
+        self.device = get_device()
+        self.use_cache = config.use_cache
+        self.model_dir = config.model_dir
+        self.max_length = config.max_length
+        self.has_mem = config.mem_coef != 0.0
+        self.has_frontend = config.has_frontend
+        self.attn = config.attn if attn is None else attn
+        self.dtype = torch.float16 if config.precision == '16-mixed' else torch.bfloat16
+        
+        self._init_lm(config)
+        self._init_mem(config)
+        self._init_params()
 
-    def set_max_steps(self, max_steps):
-        self.max_steps = max_steps
+        info(f"MD (hidden_dim: {self.hidden_size}, mem: {config.mem_info}, special_tokens: {self.num_special_tokens}, preference_optimizer: {config.po})")
+
+    def _init_backend_fusion_adapter(self):
+        self.backend_fusion_gate = nn.Sequential(
+            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Sigmoid()
+        )
+        self.backend_state_norm = nn.LayerNorm(self.hidden_size)
+        self.backend_action_norm = nn.LayerNorm(self.hidden_size)
+        min_dim = self.backend_fusion_adapter_config.get('min_proj_dim', -1)
+        proj_scale = self.backend_fusion_adapter_config.get('proj_scale', -1)
+        proj_dim = max(self.mem_backend.action_dim * proj_scale, min_dim, self.hidden_size)
+
+        norm_pos = self.backend_fusion_adapter_config.get('norm_position', 'post')
+        assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
+        
+        layers = [
+            nn.Linear(self.mem_backend.action_dim, proj_dim)
+        ]
+        
+        if norm_pos == 'pre':
+            layers += [nn.LayerNorm(proj_dim), nn.GELU()]
+        else:
+            layers += [nn.GELU(), nn.LayerNorm(proj_dim)]
+        
+        layers += [
+            nn.Linear(proj_dim, self.hidden_size),
+            nn.Dropout(self.backend_fusion_adapter_config.get('proj_dropout', 0.1))
+        ]
+        
+        self.backend_action_proj = nn.Sequential(*layers)
+        
+        nn.init.xavier_normal_(self.backend_action_proj[0].weight, gain=1.5957696)
+        nn.init.zeros_(self.backend_action_proj[0].bias)
+
+        nn.init.xavier_normal_(self.backend_action_proj[-2].weight, gain=1.0)
+        nn.init.zeros_(self.backend_action_proj[-2].bias)
+        
+        assert self.backend_action_proj[-2].out_features == self.hidden_size
     
-    def step(self):
-        if self.current_step < self.max_steps:
-            self.current_step += 1
-            progress = self.current_step / self.max_steps
-            self.sep_noise_scale = max(
-                self.noise_floor,
-                self.noise_scale * (1 - progress)**self.noise_decay_power
-            )
-            self.sep_logit_bias = min(
-                self.max_sep_bias,
-                self.min_sep_bias + (self.max_sep_bias - self.min_sep_bias) * progress**self.bias_growth_power
-            )
+    def _init_mem_backend(self, config):
+        self.mem_backend_coef = config.mem_backend_coef
+        self.backend_sep_logit_bias = self.min_sep_bias
+        self.backend_sep_noise_scale = self.noise_scale
+        self.backend_mem_type = config.backend_mem_type
+        self.backend_max_hints = config.backend_max_hints
+        self.backend_checkpoint = config.backend_checkpoint
+        self.backend_mem_config = config.backend_mem_config
+        self.backend_min_interval = config.backend_min_interval
+        self.backend_skill_config = config.backend_skill_config
+        self.backend_max_sep_bias = config.backend_sep_logit_bias
+        self.backend_update_memory = config.backend_update_memory
+        self.backend_context_window = config.backend_context_window
+        self.backend_sep_temperature = config.backend_sep_temperature
+        self.backend_max_annotations = config.backend_max_annotations
+        self.backend_anno_max_length = config.backend_anno_max_length
+        self.backend_non_sep_temp = self.backend_sep_temperature * 1.5
+        self.backend_fusion_adapter_config = config.backend_fusion_adapter
+        self.backend_sentence_alignment = config.backend_sentence_alignment
+        self.backend_anno = self.backend_enable_hint or self.backend_enable_annotation
+        self.backend_tune_special_token_embeddings = config.backend_tune_special_token_embeddings
+        self.backend_max_annos = self.backend_max_annotations if self.backend_enable_annotation else self.backend_max_hints
+
+        assert self.backend_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.backend_strategy}"
+        
+        if self.backend_strategy in ['hint', 'annotation']:
+            self.backend_action_dim = self.backend_special_tokens + 1
+        else:
+            self.backend_action_dim = self.num_tokens
+        
+        if self.backend_strategy == 'fusion':
+            self.backend_state_dim = self.hidden_size
+        else:
+            self.backend_state_dim = self.backend_skill_config.get('state_dim', self.hidden_size)
+        
+        self.backend_hidden_dim = self.backend_skill_config.get('hidden_dim', self.hidden_size)
+
+        self.backend_proj = nn.Sequential(
+            nn.Linear(self.hidden_size, self.backend_state_dim*2),
+            nn.GELU(),
+            nn.Linear(self.backend_state_dim*2, self.backend_state_dim),
+            nn.LayerNorm(self.backend_state_dim)
+        )
+
+        self.backend_skill_config.update({
+            'num_tokens': self.num_tokens,
+            'mem_type': self.backend_mem_type,
+            'state_dim': self.backend_state_dim,
+            'action_dim': self.backend_action_dim,
+            'hidden_dim': self.backend_hidden_dim,
+            'checkpoint': self.backend_checkpoint,
+            'mem_config': self.backend_mem_config,
+            'update_memory': self.backend_update_memory,
+        })
+
+        self.mem_backend = SkillMemory(**self.backend_skill_config)
+
+        if self.backend_strategy == 'fusion':
+            self._init_backend_fusion_adapter()
     
+    def _init_mem_frontend(self, config):
+        self.mem_frontend_coef = config.mem_frontend_coef
+
+    def _init_mem(self, config):
+        self.mem_coef = config.mem_coef
+        self._init_mem_backend(config)
+        if self.has_frontend:
+            self._init_mem_frontend(config)
+
     def _init_peft(self, model):
         embedding_layer = model.model.embed_tokens
         base_config = load_peft_config()
@@ -176,23 +233,30 @@ class MD(nn.Module):
                 self._make_special_token_embeddings_trainable(model)
                 return model
 
-    def _init_lm(self):
-        config = AutoConfig.from_pretrained(self.model_dir)
-        config.use_cache = self.use_cache
+    def _init_lm(self, config):
+        self.lm_path = config.lm_path
+        self.lm_coef = config.lm_coef
+        self.lm_freeze = config.lm_freeze
+        self.lm_checkpoint = config.lm_checkpoint
+        self.lm_temperature = config.lm_temperature
+    
+        lm_config = AutoConfig.from_pretrained(self.model_dir)
+        lm_config.use_cache = self.use_cache
 
         info = model_info(self.lm_path)
         model_type = info.config['model_type']
-        if config.model_type != model_type:
-            raise ValueError(f"Expected model type {model_type}, got {config.model_type}")
+        if lm_config.model_type != model_type:
+            raise ValueError(f"Expected model type {model_type}, got {lm_config.model_type}")
         
         model = AutoModelForCausalLM.from_pretrained(
             self.model_dir,
-            config=config,
+            config=lm_config,
             trust_remote_code=True,
             attn_implementation=self.attn
         )
-        self.config = config
-        self._init_tokenizer(model)
+        
+        self.lm_config = lm_config
+        self._init_tokenizer(model, config)
         
         if self.lm_checkpoint:
             model.gradient_checkpointing_enable()
@@ -202,10 +266,10 @@ class MD(nn.Module):
         
         self.lm = model
         self.hidden_size = getattr(
-            self.config,
+            self.lm_config,
             'hidden_size',
             getattr(
-                getattr(self.config, 'text_config', None),
+                getattr(self.lm_config, 'text_config', None),
                 'hidden_size',
                 None
             )
@@ -214,85 +278,10 @@ class MD(nn.Module):
         if self.hidden_size is None:
             raise ValueError("Could not find hidden_size")
         
-        if self.temperature is None:
-            self.temperature = getattr(self.config, 'temperature', 1.0)
-        
-        self.logits_decoder = LogitsDecoder(self.config, self.tokenizer, self.temperature)
-
-    def _init_skill(self) -> nn.Module:
-        if self.skill_integration_strategy in ['hint', 'annotation']:
-            self.skill_action_dim = self.num_special_tokens + 1
-        elif self.skill_integration_strategy == 'fusion':
-            self.skill_action_dim = self.num_tokens
-        else:
-             self.skill_action_dim = self.skill_config.get('action_dim', self.num_tokens)
-        
-        if self.skill_integration_strategy == 'fusion':
-            self.skill_state_dim = self.hidden_size
-        else:
-            self.skill_state_dim = self.skill_config.get('state_dim', self.hidden_size)
-        
-        self.skill_hidden_dim = self.skill_config.get('hidden_dim', self.hidden_size)
-
-        self.skill_config.update({
-            'num_tokens': self.num_tokens,
-            'mem_config': self.mem_config,
-            'state_dim': self.skill_state_dim,
-            'action_dim': self.skill_action_dim,
-            'hidden_dim': self.skill_hidden_dim,
-            'checkpoint': self.skill_checkpoint,
-            'update_memory': self.update_memory,
-        })
-
-        self.skill_memory = SkillMemory(**self.skill_config)
-        
-        self.skill_proj = nn.Sequential(
-            nn.Linear(self.hidden_size, self.skill_state_dim*2),
-            nn.GELU(),
-            nn.Linear(self.skill_state_dim*2, self.skill_state_dim),
-            nn.LayerNorm(self.skill_state_dim)
-        )
+        self.logits_decoder = LogitsDecoder(self.lm_config, self.tokenizer, self.lm_temperature)
     
-    def _init_adapter(self):
-        self.fusion_gate = nn.Sequential(
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
-            nn.Sigmoid()
-        )
-        self.state_norm = nn.LayerNorm(self.hidden_size)
-        self.action_norm = nn.LayerNorm(self.hidden_size)
-        min_dim = self.adapter_config.get('min_proj_dim', -1)
-        proj_scale = self.adapter_config.get('proj_scale', -1)
-        proj_dim = max(self.skill_memory.action_dim * proj_scale, min_dim, self.hidden_size)
-
-        norm_pos = self.adapter_config.get('norm_position', 'post')
-        assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
-        
-        layers = [
-            nn.Linear(self.skill_memory.action_dim, proj_dim)
-        ]
-        
-        if norm_pos == 'pre':
-            layers += [nn.LayerNorm(proj_dim), nn.GELU()]
-        else:
-            layers += [nn.GELU(), nn.LayerNorm(proj_dim)]
-        
-        layers += [
-            nn.Linear(proj_dim, self.hidden_size),
-            nn.Dropout(self.adapter_config.get('proj_dropout', 0.1))
-        ]
-        
-        self.action_proj = nn.Sequential(*layers)
-        
-        nn.init.xavier_normal_(self.action_proj[0].weight, gain=1.5957696)
-        nn.init.zeros_(self.action_proj[0].bias)
-
-        nn.init.xavier_normal_(self.action_proj[-2].weight, gain=1.0)
-        nn.init.zeros_(self.action_proj[-2].bias)
-        
-        assert self.action_proj[-2].out_features == self.hidden_size
-
     def _make_special_token_embeddings_trainable(self, model):
-        if self.tune_special_token_embeddings:
+        if self.backend_tune_special_token_embeddings:
             embedding_layer = model.get_input_embeddings()
             embedding_layer.weight.requires_grad_(False)
             
@@ -300,30 +289,24 @@ class MD(nn.Module):
                 for token_id in self.token_extended_ids:
                     embedding_layer.weight[token_id].requires_grad_(True)
     
-    def _init_params(self):
-        assert self.skill_integration_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.skill_integration_strategy}"
-       
-        if self.skill_integration_strategy == 'fusion':
-            self._init_adapter()
-        
-        if self.lm_freeze:
-            for param in self.lm.parameters():
-                param.requires_grad = False
-            self._make_special_token_embeddings_trainable(self.lm)
-        
-        trainable_params = self.get_trainable_parameters()
-        for param in trainable_params:
-            param.requires_grad = True
-        
-        self.embedding_layer = SafeEmbeddingWrapper(self.lm.get_input_embeddings())
+    def _init_vocab(self, config):
+        self.backend_vocab = config.backend_vocab
+        self.backend_strategy = config.backend_strategy
+        self.backend_hint_category = config.backend_hint_category
+        self.backend_special_tokens = config.backend_special_tokens
+        self.backend_enable_hint = self.has_mem and self.backend_strategy == 'hint'
+        self.backend_enable_fusion = self.has_mem and self.backend_strategy == 'fusion'
+        self.backend_enable_annotation = self.has_mem and self.backend_strategy == 'annotation'
     
-    def _init_tokenizer(self, model):
-        if self.enable_annotation:
-            special_tokens = [get_special_token_by_index(i) for i in range(self.num_special_tokens)]
-        elif self.enable_hint:
-            assert self.hint_category in self.skill_vocab, \
-                f"Invalid hint category '{self.hint_category}'. Valid options: {list(self.skill_vocab.keys())}"
-            special_tokens = self.skill_vocab[self.hint_category]
+    def _init_tokenizer(self, model, config):
+        self._init_vocab(config)
+
+        if self.backend_enable_annotation:
+            special_tokens = [get_special_token_by_index(i) for i in range(self.backend_special_tokens)]
+        elif self.backend_enable_hint:
+            assert self.backend_hint_category in self.backend_vocab, \
+                f"Invalid hint category '{self.backend_hint_category}'. Valid options: {list(self.backend_vocab.keys())}"
+            special_tokens = self.backend_vocab[self.backend_hint_category]
         else:
             special_tokens = []
         
@@ -353,9 +336,9 @@ class MD(nn.Module):
             
             model.resize_token_embeddings(len(self.tokenizer), pad_to_multiple_of=8)
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
-            self.config.vocab_size = self.num_tokens
+            self.lm_config.vocab_size = self.num_tokens
 
-            info(f"LM (model_type: {self.config.model_type}, vocab_size: {self.num_tokens})")
+            info(f"LM (model_type: {self.lm_config.model_type}, vocab_size: {self.num_tokens})")
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -363,11 +346,23 @@ class MD(nn.Module):
             assert len(set(self.token_special_ids)) == len(self.token_special_ids), \
                 f"Duplicate special token IDs detected: {self.token_special_ids}"
             
-            assert len(self.token_special_ids) == self.num_special_tokens, \
-                f"Expected {self.num_special_tokens} special tokens, got {len(self.token_special_ids)}"
+            assert len(self.token_special_ids) == self.backend_special_tokens, \
+                f"Expected {self.backend_special_tokens} special tokens, got {len(self.token_special_ids)}"
         else:
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
 
+    def _init_params(self):
+        if self.lm_freeze:
+            for param in self.lm.parameters():
+                param.requires_grad = False
+            self._make_special_token_embeddings_trainable(self.lm)
+        
+        trainable_params = self.get_trainable_parameters()
+        for param in trainable_params:
+            param.requires_grad = True
+        
+        self.embedding_layer = SafeEmbeddingWrapper(self.lm.get_input_embeddings())
+    
     def _has_sep(
             self,
             context_embeds: torch.Tensor,
@@ -381,35 +376,35 @@ class MD(nn.Module):
             context_embeds = context_embeds * mask.unsqueeze(-1)
         
         with torch.autocast(self.device.type, enabled=False):
-            states = self.skill_proj(context_embeds)
-            skill_output = self.skill_memory(states)
+            states = self.backend_proj(context_embeds)
+            skill_output = self.mem_backend(states)
 
-        sep_index = self.skill_memory.action_dim - 1
+        sep_index = self.mem_backend.action_dim - 1
         step_logits = skill_output['action_logits'][:, -1, :]
-        if self.sep_logit_bias:
+        if self.backend_sep_logit_bias:
             step_logits = step_logits.clone()
-            step_logits[:, sep_index] += self.sep_logit_bias
+            step_logits[:, sep_index] += self.backend_sep_logit_bias
 
-        temp_scaling = torch.full_like(step_logits, self.non_sep_temp).clamp(min=1e-7)
-        temp_scaling[:, sep_index] = self.sep_temperature
+        temp_scaling = torch.full_like(step_logits, self.backend_non_sep_temp).clamp(min=1e-7)
+        temp_scaling[:, sep_index] = self.backend_sep_temperature
         step_logits = step_logits / temp_scaling
         
         batch_size, seq_len, _ = context_embeds.shape
         device = context_embeds.device
         
         has_content = torch.zeros(batch_size, dtype=torch.bool, device=device)
-        if self.sentence_alignment:
+        if self.backend_sentence_alignment:
             has_boundary = torch.zeros(batch_size, dtype=torch.bool, device=device)
         
         if pad_mask is None:
             pad_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=device)
 
-        window_size = min(seq_len, self.min_interval) if seq_len > 0 else 0
+        window_size = min(seq_len, self.backend_min_interval) if seq_len > 0 else 0
         if window_size > 0:
             window_pad_mask = pad_mask[:, -window_size:]
             has_content = ~window_pad_mask.any(dim=1)
         
-        if input_ids is not None and window_size > 0 and self.sentence_alignment:
+        if input_ids is not None and window_size > 0 and self.backend_sentence_alignment:
             recent_tokens = input_ids[:, -window_size:]
             recent_pad_mask = pad_mask[:, -window_size:]
 
@@ -429,11 +424,11 @@ class MD(nn.Module):
             
             # Check if last token is a sentence boundary
             has_boundary = torch.isin(last_tokens, self.sentence_boundary_ids_tensor)
-            if self.enable_hint and has_boundary.any():
+            if self.backend_enable_hint and has_boundary.any():
                 special_token_mask = torch.isin(input_ids, self.token_special_ids_tensor)
                 last_special_pos = special_token_mask.long().argmax(dim=1)
                 token_counts = input_ids.size(1) - last_special_pos
-                has_sufficient_distance = token_counts >= self.min_interval
+                has_sufficient_distance = token_counts >= self.backend_min_interval
                 has_boundary &= has_sufficient_distance
 
         if self.training:
@@ -446,7 +441,7 @@ class MD(nn.Module):
         
             noise_mask = torch.ones_like(step_logits, dtype=torch.bool)
             noise_mask[:, sep_index] = False
-            noisy_logits = step_logits + (torch.randn_like(step_logits) * self.sep_noise_scale * noise_mask)
+            noisy_logits = step_logits + (torch.randn_like(step_logits) * self.backend_sep_noise_scale * noise_mask)
             
             gumbel_samples = F.gumbel_softmax(
                 noisy_logits,
@@ -461,7 +456,7 @@ class MD(nn.Module):
             sep_pred = torch.multinomial(probs, num_samples=1).squeeze(-1) == sep_index
             has_sep = sep_pred & has_content
         
-        return has_sep if not self.sentence_alignment else has_sep & has_boundary
+        return has_sep if not self.backend_sentence_alignment else has_sep & has_boundary
     
     def _get_annotation(self,
                         context_embeds: torch.Tensor,
@@ -477,49 +472,49 @@ class MD(nn.Module):
         annotation_ids = [] if return_ids else None
         
         current_embeds = context_embeds
-        if self.enable_annotation:
+        if self.backend_enable_annotation:
             sep_count = torch.zeros(batch_size, dtype=torch.int, device=device)
         
         special_ids = self.token_special_ids_tensor
 
         with torch.no_grad():
             special_embeddings = self.embedding_layer(special_ids)
-            sep_embed = self.embedding_layer(self.token_sep_id_tensor) if self.enable_annotation else None
+            sep_embed = self.embedding_layer(self.token_sep_id_tensor) if self.backend_enable_annotation else None
         
-        max_length = self.anno_max_length + 1 if self.enable_annotation else 1
+        max_length = self.backend_anno_max_length + 1 if self.backend_enable_annotation else 1
         for step_idx in range(max_length):
             with torch.autocast(self.device.type, enabled=False):
-                states = self.skill_proj(current_embeds)
-                skill_output = self.skill_memory(states)
+                states = self.backend_proj(current_embeds)
+                skill_output = self.mem_backend(states)
             
             if return_loss:
-                skill_loss = self.skill_memory.compute_losses(skill_output)['total_loss']
-                loss_list.append(skill_loss)
+                mem_loss = self.mem_backend.compute_losses(skill_output)['total_loss']
+                loss_list.append(mem_loss)
             step_logits = skill_output['action_logits'][:, -1, :]
 
             # Prevent SEP token sampling in non-annotation mode
-            if not self.enable_annotation:
+            if not self.backend_enable_annotation:
                 step_logits = step_logits.clone()
-                step_logits[:, self.skill_memory.action_dim - 1] = -float('inf')
+                step_logits[:, self.mem_backend.action_dim - 1] = -float('inf')
             
             anno_indices = self._get_anno_next_token(step_logits)
             
-            if step_idx == max_length - 1 and self.enable_annotation:
+            if step_idx == max_length - 1 and self.backend_enable_annotation:
                 force_sep_mask = (sep_count == 0)
                 anno_indices = torch.where(
                     force_sep_mask,
-                    torch.tensor(self.skill_memory.action_dim - 1, device=device),
+                    torch.tensor(self.mem_backend.action_dim - 1, device=device),
                     anno_indices
                 )
             
-            is_sep = (anno_indices == self.skill_memory.action_dim - 1)
-            if self.enable_annotation:
+            is_sep = (anno_indices == self.mem_backend.action_dim - 1)
+            if self.backend_enable_annotation:
                 sep_count += is_sep.int()
             
             safe_indices = anno_indices.masked_fill(is_sep, 0)
             non_sep_embeds = special_embeddings[safe_indices]
 
-            if self.enable_annotation:
+            if self.backend_enable_annotation:
                 next_embeds = torch.where(
                     is_sep.unsqueeze(-1),
                     sep_embed,
@@ -529,7 +524,7 @@ class MD(nn.Module):
                 next_embeds = non_sep_embeds
             
             if return_ids:
-                if self.enable_annotation:
+                if self.backend_enable_annotation:
                     non_sep_ids = special_ids[safe_indices]
                     next_ids = torch.where(
                         is_sep,
@@ -542,7 +537,7 @@ class MD(nn.Module):
             
             annotation_embeds.append(next_embeds.unsqueeze(1))
             
-            if self.enable_annotation and (sep_count >= 1).all():
+            if self.backend_enable_annotation and (sep_count >= 1).all():
                 break
             
             current_embeds = torch.cat([current_embeds, next_embeds.unsqueeze(1)], dim=1)
@@ -586,23 +581,59 @@ class MD(nn.Module):
     def _get_next_token(self, logits):
         return self.logits_decoder.decode_logits(logits)
 
-    def _fuse_features(self, state_embeds, action_embeds):
+    def _backend_fuse_features(self, state_embeds, action_embeds):
         state_embeds = state_embeds.to(self.dtype)
         action_embeds = action_embeds.to(self.dtype)
         
-        state_norm = self.state_norm(state_embeds.float()).to(self.dtype)
-        action_norm = self.action_norm(action_embeds.float()).to(self.dtype)
+        state_norm = self.backend_state_norm(state_embeds.float()).to(self.dtype)
+        action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
 
         combined = torch.cat([state_norm, action_norm], dim=-1)
-        gate = self.fusion_gate(combined.to(self.fusion_gate[0].weight.dtype))
+        gate = self.backend_fusion_gate(combined.to(self.backend_fusion_gate[0].weight.dtype))
         return gate * state_norm + (1 - gate) * action_norm
     
     def _need_anno(self, count):
         return (
-            (self.enable_hint and (self.max_hints < 0 or count < self.max_hints)) or
-            (self.enable_annotation and (self.max_annotations < 0 or count < self.max_annotations))
+            (self.backend_enable_hint and (self.backend_max_hints < 0 or count < self.backend_max_hints)) or
+            (self.backend_enable_annotation and (self.backend_max_annotations < 0 or count < self.backend_max_annotations))
         )
 
+    @property
+    def has_anno(self):
+        return self.backend_anno
+    
+    @property
+    def anno_max_length(self):
+        return self.backend_anno_max_length
+    
+    @property
+    def num_special_tokens(self):
+        return self.backend_special_tokens
+    
+    @property
+    def mem(self):
+        return self.mem_backend
+    
+    @property
+    def config(self):
+        return self.lm_config
+    
+    def set_max_steps(self, max_steps):
+        self.max_steps = max_steps
+    
+    def step(self):
+        if self.current_step < self.max_steps:
+            self.current_step += 1
+            progress = self.current_step / self.max_steps
+            self.backend_sep_noise_scale = max(
+                self.noise_floor,
+                self.noise_scale * (1 - progress)**self.noise_decay_power
+            )
+            self.backend_sep_logit_bias = min(
+                self.backend_max_sep_bias,
+                self.min_sep_bias + (self.backend_max_sep_bias - self.min_sep_bias) * progress**self.bias_growth_power
+            )
+    
     def calculate_adaptive_loss(self, annotations_added, seq_len, loss_list, device):
         if loss_list:
             insertion_loss = torch.stack(loss_list).mean()
@@ -619,7 +650,7 @@ class MD(nn.Module):
                                 device=device,
                                 requires_grad=True)
         
-        max_annos = min(self.max_annotations, seq_len // max(1, self.min_interval))
+        max_annos = min(self.backend_max_annos, seq_len // max(1, self.backend_min_interval))
         max_annos_f = torch.tensor(float(max_annos),
                                 dtype=torch.float32,
                                 device=device,
@@ -654,7 +685,7 @@ class MD(nn.Module):
         input_labels: torch.Tensor,
         return_loss: bool = False
     ) -> Dict[str, torch.Tensor]:
-        assert self.has_anno, "Annotation/Hint mode must be enabled"
+        assert self.backend_anno, "Annotation/Hint mode must be enabled"
         
         with torch.no_grad():
             state_embeds = self.embedding_layer(input_ids)
@@ -680,7 +711,7 @@ class MD(nn.Module):
             while pos < seq_len:
                 if self._need_anno(annotations_added):
                     remaining_tokens = seq_len - pos
-                    window_size = min(remaining_tokens, self.context_window)
+                    window_size = min(remaining_tokens, self.backend_context_window)
                     
                     if window_size == 0:
                         seq_embeds.append(token_embeds[pos].view(1, 1, -1))
@@ -736,17 +767,17 @@ class MD(nn.Module):
                             sep_embed
                         ], dim=1)
 
-                        annotation_embeds, _, skill_loss = self._get_annotation(
+                        annotation_embeds, _, mem_loss = self._get_annotation(
                             context_with_sep,
                             return_loss=return_loss
                         )
                         
-                        if skill_loss is not None:
-                            loss_list.append(skill_loss)
+                        if mem_loss is not None:
+                            loss_list.append(mem_loss)
                         
                         if self.is_valid_anno(annotation_embeds):
                             annotation_embeds = annotation_embeds.squeeze(0)
-                            if self.enable_annotation:
+                            if self.backend_enable_annotation:
                                 annotation_embeds = torch.cat([
                                     sep_embed.squeeze(0),
                                     annotation_embeds
@@ -804,9 +835,9 @@ class MD(nn.Module):
 
     def is_valid_anno(self, annotation_embeds):
         seq_len = annotation_embeds.size(-2)
-        if self.enable_annotation:
+        if self.backend_enable_annotation:
             return seq_len > 1
-        elif self.enable_hint:
+        elif self.backend_enable_hint:
             return seq_len > 0
         else:
             return False
@@ -826,7 +857,7 @@ class MD(nn.Module):
         state_embeds = self.embedding_layer(input_ids)
         batch_size, _, hidden_size = state_embeds.shape
         
-        if self.has_anno:
+        if self.backend_anno:
             pad_mask = (attention_mask == 0)
             sep_detected = self._has_sep(
                 state_embeds, 
@@ -851,7 +882,7 @@ class MD(nn.Module):
                     
                     if self.is_valid_anno(annotation_embeds):
                         annotation_embeds = annotation_embeds.squeeze(0)
-                        if self.enable_annotation:
+                        if self.backend_enable_annotation:
                             annotation_embeds = torch.cat([sep_embed, annotation_embeds])
                         anno_len = annotation_embeds.size(0)
                         new_embeds_list.append(annotation_embeds)
@@ -875,12 +906,12 @@ class MD(nn.Module):
                 'states': state_embeds
             }
         else:
-            if self.enable_fusion:
+            if self.backend_enable_fusion:
                 with torch.autocast(self.device.type, enabled=False):
-                    skill_output = self.skill_memory(state_embeds)
+                    skill_output = self.mem_backend(state_embeds)
                 action_logits = skill_output['action_logits']
-                action_embeds = self.action_proj(action_logits)
-                state_embeds = self._fuse_features(state_embeds, action_embeds)
+                action_embeds = self.backend_action_proj(action_logits)
+                state_embeds = self._backend_fuse_features(state_embeds, action_embeds)
             
             with torch.autocast(self.device.type, dtype=self.dtype):
                 lm_out = self.lm(inputs_embeds=state_embeds)
@@ -927,7 +958,7 @@ class MD(nn.Module):
                     input_ids=sequences[idx].unsqueeze(0)
                 ).item()
 
-                if self.has_anno and has_sep and self._need_anno(annotations_added[idx]):
+                if self.backend_anno and has_sep and self._need_anno(annotations_added[idx]):
                     context_with_sep = torch.cat([
                         current_embeds[idx],
                         sep_embed
@@ -939,7 +970,7 @@ class MD(nn.Module):
                     )
                     
                     if self.is_valid_anno(annotation_embeds):
-                        if self.enable_annotation:
+                        if self.backend_enable_annotation:
                             sequences[idx] = torch.cat([
                                 sequences[idx],
                                 self.token_sep_id_tensor.view(1),
@@ -969,12 +1000,12 @@ class MD(nn.Module):
                     continue
 
                 context_embeds = current_embeds[idx]
-                if self.enable_fusion:
+                if self.backend_enable_fusion:
                     with torch.no_grad():
-                        skill_output = self.skill_memory(context_embeds)
+                        skill_output = self.mem_backend(context_embeds)
                         action_logits = skill_output['action_logits']
-                        action_embeds = self.action_proj(action_logits)
-                        context_embeds = self._fuse_features(context_embeds, action_embeds)
+                        action_embeds = self.backend_action_proj(action_logits)
+                        context_embeds = self._backend_fuse_features(context_embeds, action_embeds)
                 
                 with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                     lm_out = self.lm(inputs_embeds=context_embeds)
@@ -1006,7 +1037,7 @@ class MD(nn.Module):
         self,
         input_ids: torch.Tensor
     ) -> torch.Tensor:
-        if self.skill_coef:
+        if self.has_mem:
             return self._generate(input_ids)
         else:
             return self.lm.generate(input_ids=input_ids)
@@ -1017,14 +1048,13 @@ class MD(nn.Module):
         config = cfg,
         attn: str = None,
         dist: bool = False,
-        update_memory: bool = False,
         checkpoint_path: str = cfg.ckpt_path,
         **kwargs
     ) -> 'MD':
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
 
-        model = cls(config=config, attn=attn, dist=dist, update_memory=update_memory, **kwargs)
+        model = cls(config=config, attn=attn, dist=dist, **kwargs)
 
         try:
             state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
@@ -1049,15 +1079,18 @@ class MD(nn.Module):
     def get_trainable_parameters(self):
         trainable_params = []
 
-        if self.enable_fusion:
+        if self.backend_enable_fusion:
             trainable_params.extend([
-                *self.action_proj.parameters(),
-                *self.fusion_gate.parameters(),
-                *self.state_norm.parameters(),
-                *self.action_norm.parameters()
+                *self.backend_action_proj.parameters(),
+                *self.backend_fusion_gate.parameters(),
+                *self.backend_state_norm.parameters(),
+                *self.backend_action_norm.parameters()
             ])
         
-        trainable_params.extend(self.skill_memory.parameters())
+        trainable_params.extend(self.mem_backend.parameters())
+
+        if self.has_frontend:
+            pass
 
         for param in self.lm.parameters():
             if param.requires_grad:

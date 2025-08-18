@@ -44,7 +44,7 @@ class SkillMemory(nn.Module):
     def __init__(self,
                  mem_type: str = 'mac',
                  state_dim: int = 256,
-                 num_tokens: int = 151680,
+                 num_tokens: int = 151672,
                  action_dim: int = 64,
                  hidden_dim: int = 128,
                  mi_coef: float = 0.5,
@@ -53,8 +53,8 @@ class SkillMemory(nn.Module):
                  entropy_coef: float = 0.3,
                  checkpoint: bool = False,
                  update_memory: bool = True,
-                 manual_per_sample_grads: bool = True,
-                 mem_config: dict = dict(mac=dict())):
+                 manual_per_sample_grads: bool = False,
+                 mem_config: dict = dict()):
         super().__init__()
 
         info(f"Skill memory (mem_type: {mem_type}, state_dim: {state_dim}, action_dim: {action_dim}, hidden_dim: {hidden_dim})")
@@ -66,7 +66,7 @@ class SkillMemory(nn.Module):
         self.checkpoint = checkpoint
         
         if 'mac' == mem_type:
-            mac_kwargs = mem_config[mem_type]
+            mac_kwargs = mem_config
             mac_depth = mac_kwargs.get('depth', 1)
             mac_segment_len = mac_kwargs.get('segment_len', 32)
             mac_use_flex_attn = mac_kwargs.get('use_flex_attn', False)

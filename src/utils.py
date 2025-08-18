@@ -20,7 +20,6 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from threading import Thread, Lock
 from itertools import product, islice
-from torch.nn.utils.rnn import pad_sequence
 from typing import Dict, Optional, List, Union
 from torch.utils.tensorboard import SummaryWriter
 from lightning.fabric.accelerators import CUDAAccelerator
@@ -41,7 +40,7 @@ sys.path.append(str(_conf_dir))
 
 import settings
 from chat import VOCAB, TEMPLATE
-from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, FUSION, ANNOTATION, HINT, MEMORY
+from settings import MODEL, LOADER, PRECISION, OPTIMIZER, CKPT, MEMORY
 
 LOG = getattr(settings, 'LOG', False)
 WARN = getattr(settings, 'WARN', True)
@@ -118,10 +117,9 @@ def show_output(s):
 class Cfg:
     log: bool
     ckpt: dict
-    hint: dict
     model: dict
     loader: dict
-    fusion: dict
+    memory: dict
     md_file: str
     log_dir: Path
     test_log: str
@@ -131,8 +129,6 @@ class Cfg:
     ckpt_dir: Path
     model_dir: Path
     optimizer: dict
-    annotation: dict
-    mem_config: dict
     log_interval: int
     remove_unused_columns: bool
     
@@ -166,7 +162,7 @@ class Cfg:
         return self.model['lm'].get('freeze', False)
     
     @property
-    def temperature(self):
+    def lm_temperature(self):
         return self.model['lm'].get('temperature')
     
     @property
@@ -184,35 +180,36 @@ class Cfg:
     @property
     def max_target_length(self):
         return self.model['lm'].get('max_target_length', 1024)
-
-    @property
-    def skill_config(self):
-        return self.model['skill'].copy()
     
     @property
-    def skill_coef(self):
-        return self.model.get('skill_coef', 0.2)
+    def mem_frontend_coef(self):
+        return self.model['mem'].get('frontend_coef', 0.5)
     
     @property
-    def skill_checkpoint(self):
-        return self.ckpt['gradient'].get('skill', {})
+    def mem_backend_coef(self):
+        return self.model['mem'].get('backend_coef', 0.5)
     
     @property
-    def skill_integration_strategy(self):
-        return self.model.get('skill_integration_strategy', 'hint')
-
+    def mem_coef(self):
+        return self.model.get('mem_coef', 0.2)
+    
     @property
-    def skill_info(self):
-        strategy = self.skill_integration_strategy
-        if strategy == 'hint':
-            return f'{strategy}-{self.hint_category}'
+    def mem_info(self):
+        if self.has_frontend:
+            frontend_strategy = self.frontend_strategy
+            backend_strategy = self.backend_strategy
+            if backend_strategy == 'hint':
+                backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
+            return '{' + f'frontend: {frontend_strategy}, backend: {backend_strategy}' + '}'
         else:
-            return strategy
+            backend_strategy = self.backend_strategy
+            if backend_strategy == 'hint':
+                backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
+            return backend_strategy
     
     @property
-    def skill_vocab(self):
-        if self.skill_integration_strategy == 'hint':
-            return VOCAB['hint']
+    def has_frontend(self):
+        return self.model['mem']['frontend']
 
     @property
     def use_cache(self):
@@ -223,14 +220,6 @@ class Cfg:
         return self.model['use_initial_prompt']
     
     @property
-    def context_window(self):
-        return self.model.get('context_window', 4)
-
-    @property
-    def update_memory(self):
-        return self.model.get('update_memory', False)
-    
-    @property
     def sft(self):
         return self.model.get('sft', False)
     
@@ -239,70 +228,131 @@ class Cfg:
         return self.ckpt_dir / MD_FILE
     
     @property
-    def num_special_tokens(self):
-        if self.skill_integration_strategy == 'annotation':
-            return self.annotation.get('words', 8)
-        elif self.skill_integration_strategy == 'hint':
-            return len(VOCAB['hint'][self.hint_category])
+    def frontend_skill_config(self):
+        return self.memory['frontend']['skill']
+    
+    @property
+    def frontend_mem_type(self):
+        return self.memory['frontend']['mem_type']
+    
+    @property
+    def frontend_mem_config(self):
+        return self.memory['frontend'][self.frontend_mem_type]
+    
+    @property
+    def frontend_strategy(self):
+        return self.memory['frontend'].get('strategy', 'fusion')
+    
+    @property
+    def frontend_fusion_adapter(self):
+        return self.memory['frontend']['fusion']['adapter']
+    
+    @property
+    def frontend_update_memory(self):
+        return self.memory['frontend'].get('update_memory', True)
+    
+    @property
+    def frontend_checkpoint(self):
+        return self.ckpt['gradient']['mem']['frontend']
+    
+    @property
+    def backend_vocab(self):
+        if self.backend_strategy == 'hint':
+            return VOCAB['hint']
+    
+    @property
+    def backend_skill_config(self):
+        return self.memory['backend']['skill']
+    
+    @property
+    def backend_mem_type(self):
+        return self.memory['backend']['mem_type']
+    
+    @property
+    def backend_mem_config(self):
+        return self.memory['backend'][self.backend_mem_type]
+    
+    @property
+    def backend_fusion_adapter(self):
+        return self.memory['backend']['fusion']['adapter']
+    
+    @property
+    def backend_anno_max_length(self):
+        return self.memory['backend']['annotation'].get('max_length', 3)
+    
+    @property
+    def backend_max_annotations(self):
+        return self.memory['backend']['annotation'].get('max_annotations', -1)
+    
+    @property
+    def backend_strategy(self):
+        return self.memory['backend'].get('strategy', 'hint')
+    
+    @property
+    def backend_hint_category(self):
+        return self.memory['backend']['hint']['category']
+    
+    @property
+    def backend_max_hints(self):
+        return self.memory['backend']['hint'].get('max_hints', -1)
+    
+    @property
+    def backend_special_tokens(self):
+        if self.backend_strategy == 'annotation':
+            return self.memory['backend']['annotation'].get('words', 8)
+        elif self.backend_strategy == 'hint':
+            return len(VOCAB['hint'][self.backend_hint_category])
         else:
             return 0
     
     @property
-    def adapter(self):
-        return self.fusion['adapter']
+    def backend_context_window(self):
+        return self.memory['backend'].get('context_window', 4)
     
     @property
-    def anno_max_length(self):
-        return self.annotation.get('max_length', 3)
+    def backend_update_memory(self):
+        return self.memory['backend'].get('update_memory', True)
     
     @property
-    def max_annotations(self):
-        return self.annotation.get('max_annotations', -1)
-    
-    @property
-    def hint_category(self):
-        return self.hint['category']
-    
-    @property
-    def max_hints(self):
-        return self.hint.get('max_hints', -1)
-    
-    @property
-    def tune_special_token_embeddings(self):
-        if self.skill_integration_strategy == 'hint':
-            return self.hint.get('tune')
-        elif self.skill_integration_strategy == 'annotation':
-            return self.annotation.get('tune')
+    def backend_tune_special_token_embeddings(self):
+        if self.backend_strategy == 'hint':
+            return self.memory['backend']['hint'].get('tune', False)
+        elif self.backend_strategy == 'annotation':
+            return self.memory['backend']['annotation'].get('tune', False)
         else:
             return False
         
     @property
-    def sentence_alignment(self):
-        if self.skill_integration_strategy == 'hint':
-            return self.hint.get('sentence_alignment')
+    def backend_sentence_alignment(self):
+        if self.backend_strategy == 'hint':
+            return self.memory['backend']['hint'].get('sentence_alignment')
     
     @property
-    def min_interval(self):
-        if self.skill_integration_strategy == 'hint':
-            return self.hint.get('min_interval', 1)
-        elif self.skill_integration_strategy == 'annotation':
-            return self.annotation.get('min_interval', 1)
+    def backend_min_interval(self):
+        if self.backend_strategy == 'hint':
+            return self.memory['backend']['hint'].get('min_interval', 8)
+        elif self.backend_strategy == 'annotation':
+            return self.memory['backend']['annotation'].get('min_interval', 8)
         else:
             return 1
     
     @property
-    def sep_logit_bias(self):
-        if self.skill_integration_strategy == 'hint':
-            return self.hint.get('sep_logit_bias', 0.0)
+    def backend_sep_logit_bias(self):
+        if self.backend_strategy == 'hint':
+            return self.memory['backend']['hint'].get('sep_logit_bias', 0.0)
         else:
             return 0.0
     
     @property
-    def sep_temperature(self):
-        if self.skill_integration_strategy == 'hint':
-            return self.hint.get('sep_temperature', 1.0)
+    def backend_sep_temperature(self):
+        if self.backend_strategy == 'hint':
+            return self.memory['backend']['hint'].get('sep_temperature', 1.0)
         else:
             return 1.0
+    
+    @property
+    def backend_checkpoint(self):
+        return self.ckpt['gradient']['mem']['backend']
     
     @property
     def truncation_mode(self):
@@ -341,21 +391,18 @@ class Cfg:
 cfg = Cfg(
     log=LOG,
     ckpt=CKPT,
-    hint=HINT,
     model=MODEL,
+    memory=MEMORY,
     loader=LOADER,
-    fusion=FUSION,
     md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
     eval_dir=EVAL_DIR,
-    mem_config=MEMORY,
     train_log=TRAIN_LOG,
     model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
-    annotation=ANNOTATION,
     log_interval=LOG_INTERVAL,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
@@ -753,8 +800,8 @@ def generate_messages(category, vocab):
 
 def get_initial_prompt():
     if cfg.use_initial_prompt:
-        if cfg.skill_integration_strategy == 'hint':
-            return generate_messages('hint', cfg.skill_vocab[cfg.hint_category])
+        if cfg.backend_strategy == 'hint':
+            return generate_messages('hint', cfg.backend_vocab[cfg.backend_hint_category])
 
 def md_train(
     model,
@@ -840,12 +887,12 @@ def md_train(
                 is_encoder_decoder=is_encoder_decoder
             )
 
-            if model.skill_coef:
+            if model.mem_coef:
                 if model.has_anno:
-                    skill_loss = outputs['losses']
+                    mem_loss = outputs['losses']
                 else:
-                    skill_loss = model.skill_memory.compute_losses(outputs)['total_loss']
-                loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+                    mem_loss = model.skill_memory.compute_losses(outputs)['total_loss']
+                loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
             else:
                 loss = lm_loss
 
@@ -965,12 +1012,12 @@ def md_validate(
                     is_encoder_decoder=is_encoder_decoder
                 )
 
-                if model.skill_coef:
+                if model.mem_coef:
                     if model.has_anno:
-                        skill_loss = outputs['losses']
+                        mem_loss = outputs['losses']
                     else:
-                        skill_loss = model.skill_memory.compute_losses(outputs)['total_loss']
-                    loss = model.lm_coef * lm_loss + model.skill_coef * skill_loss
+                        mem_loss = model.skill_memory.compute_losses(outputs)['total_loss']
+                    loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
                 else:
                     loss = lm_loss
             

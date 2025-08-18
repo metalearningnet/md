@@ -543,7 +543,7 @@ class SimPOTrainer(Trainer):
             losses,
         ) = self.get_logps(model, batch)
 
-        skill_loss = losses if losses is not None else 0.0
+        mem_loss = losses if losses is not None else 0.0
 
         losses, chosen_rewards, rejected_rewards = self.simpo_loss(
             policy_chosen_logps,
@@ -562,7 +562,7 @@ class SimPOTrainer(Trainer):
             metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
         
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
-        total_loss = model.lm_coef * loss + model.skill_coef * skill_loss
+        total_loss = model.lm_coef * loss + model.mem_coef * mem_loss
         
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
@@ -573,7 +573,7 @@ class SimPOTrainer(Trainer):
         metrics[f"{prefix}logits/rejected"] = policy_rejected_logits.detach().mean().cpu()
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
         metrics[f"{prefix}total_loss"] = total_loss
-        metrics[f"{prefix}skill_loss"] = skill_loss
+        metrics[f"{prefix}mem_loss"] = mem_loss
         metrics[f"{prefix}lm_loss"] = loss
         
         return total_loss, metrics
