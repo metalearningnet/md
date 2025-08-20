@@ -182,34 +182,19 @@ class Cfg:
         return self.model['lm'].get('max_target_length', 1024)
     
     @property
-    def mem_frontend_coef(self):
-        return self.model['mem'].get('frontend_coef', 0.5)
-    
-    @property
-    def mem_backend_coef(self):
-        return self.model['mem'].get('backend_coef', 0.5)
-    
-    @property
     def mem_coef(self):
         return self.model.get('mem_coef', 0.2)
     
     @property
     def mem_info(self):
-        if self.has_frontend:
-            frontend_strategy = self.frontend_strategy
-            backend_strategy = self.backend_strategy
-            if backend_strategy == 'hint':
-                backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
-            return '{' + f'frontend: {frontend_strategy}, backend: {backend_strategy}' + '}'
-        else:
-            backend_strategy = self.backend_strategy
-            if backend_strategy == 'hint':
-                backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
-            return backend_strategy
+        backend_strategy = self.backend_strategy
+        if backend_strategy == 'hint':
+            backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
+        return backend_strategy
     
     @property
     def has_frontend(self):
-        return self.model['mem']['frontend']
+        return self.model['frontend']
 
     @property
     def use_cache(self):
@@ -228,10 +213,6 @@ class Cfg:
         return self.ckpt_dir / MD_FILE
     
     @property
-    def frontend_skill_config(self):
-        return self.memory['frontend']['skill']
-    
-    @property
     def frontend_mem_type(self):
         return self.memory['frontend']['mem_type']
     
@@ -240,20 +221,8 @@ class Cfg:
         return self.memory['frontend'][self.frontend_mem_type]
     
     @property
-    def frontend_strategy(self):
-        return self.memory['frontend'].get('strategy', 'fusion')
-    
-    @property
-    def frontend_fusion_adapter(self):
-        return self.memory['frontend']['fusion']['adapter']
-    
-    @property
     def frontend_update_memory(self):
         return self.memory['frontend'].get('update_memory', True)
-    
-    @property
-    def frontend_checkpoint(self):
-        return self.ckpt['gradient']['mem']['frontend']
     
     @property
     def backend_vocab(self):
@@ -352,7 +321,7 @@ class Cfg:
     
     @property
     def backend_checkpoint(self):
-        return self.ckpt['gradient']['mem']['backend']
+        return self.ckpt['gradient']['mem']
     
     @property
     def truncation_mode(self):

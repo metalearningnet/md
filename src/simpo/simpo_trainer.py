@@ -430,18 +430,17 @@ class SimPOTrainer(Trainer):
                 results[f'{i}_logits'] = logits
                 if i == 'chosen':
                     results[f'{i}_labels'] = labels
-                
-                if losses is not None:
-                    loss_list.append(losses)
+                    if losses is not None:
+                        loss_list.append(losses)
 
             losses = torch.stack(loss_list).mean() if loss_list else None
 
             return (
-                results['chosen_logps'], 
-                results['rejected_logps'], 
-                results['chosen_logits'], 
-                results['rejected_logits'], 
-                results['chosen_labels'], 
+                results['chosen_logps'],
+                results['rejected_logps'],
+                results['chosen_logits'],
+                results['rejected_logits'],
+                results['chosen_labels'],
                 losses
             )
         else:
@@ -550,7 +549,7 @@ class SimPOTrainer(Trainer):
             policy_rejected_logps
         )
 
-        loss = losses.mean()
+        lm_loss = losses.mean()
         
         if self.sft_weight > 0.0:
             if not self.is_encoder_decoder:
@@ -558,11 +557,11 @@ class SimPOTrainer(Trainer):
                 chosen_labels = chosen_labels[..., 1:].clone()
             loss_func = nn.CrossEntropyLoss()
             sft_loss = loss_func(policy_chosen_logits.view(-1, policy_chosen_logits.shape[-1]), chosen_labels.view(-1))
-            loss = self.sft_weight * sft_loss + loss
+            lm_loss = self.sft_weight * sft_loss + lm_loss
             metrics[f"{prefix}sft_loss"] = sft_loss.detach().cpu()
         
         reward_accuracies = (chosen_rewards > rejected_rewards).float()
-        total_loss = model.lm_coef * loss + model.mem_coef * mem_loss
+        total_loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
         
         metrics[f"{prefix}rewards/chosen"] = chosen_rewards.mean().cpu()
         metrics[f"{prefix}rewards/rejected"] = rejected_rewards.mean().cpu()
@@ -574,7 +573,7 @@ class SimPOTrainer(Trainer):
         metrics[f"{prefix}logits/chosen"] = policy_chosen_logits.detach().mean().cpu()
         metrics[f"{prefix}total_loss"] = total_loss
         metrics[f"{prefix}mem_loss"] = mem_loss
-        metrics[f"{prefix}lm_loss"] = loss
+        metrics[f"{prefix}lm_loss"] = lm_loss
         
         return total_loss, metrics
 

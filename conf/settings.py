@@ -9,54 +9,31 @@ MODEL = {
         "max_prompt_length": 512                                # Maximum input prompt length
     },
 
-    # Training Objective Balancing
     "lm_coef": 0.8,                                             # Language modeling loss weight
     "mem_coef": 0.2,                                            # Memory system loss weight
 
-    # Memory System Configuration
-    "mem": {
-        "frontend": False,                                      # Whether to enable the frontend memory processing module
-        
-        "frontend_coef": 0.5,                                   # Frontend loss weight (only used when frontend=True)
-                                                                # When frontend=True: L_mem = mem_coef*(frontend_coef*L_front + backend_coef*L_back)
-        
-        "backend_coef": 0.5,                                    # Backend loss weight (ignored when frontend=False)
-                                                                # When frontend=False: L_mem = mem_coef*L_back
-    },
-
-    "use_initial_prompt": True,                                 # Whether to prepend an initial prompt to inputs
-
     "sft": False,                                               # Supervised fine-tuning mode
-
-    "use_cache": False,                                         # Enable KV caching for faster autoregressive decoding
+    "frontend": False,                                          # Whether to enable the frontend memory processing module
+    "use_initial_prompt": True,                                 # Whether to prepend an initial prompt to inputs
+    
+    "use_cache": False,                                         # Whether to enable KV caching for faster autoregressive decoding
 }
 
-# Memory System Architecture
+# Memory System Configuration
 MEMORY = {
+    # Frontend Memory (Preprocessing)
     "frontend": {
-        "skill": {
-            "state_dim": 256,                                   # Dimension of state embeddings
-            "action_dim": 64,                                   # Dimension of action space
-            "hidden_dim": 128,                                  # Hidden layer dimension
-
-            "mi_coef": 0.6,                                     # Weight for state-memory mutual information
-            "kl_coef": 0.03,                                    # Weight for memory consistency regularization
-            "adv_coef": 0.15,                                   # Weight for action-memory disentanglement
-            "entropy_coef": 0.05,                               # Weight for policy exploration incentive
-
-            "manual_per_sample_grads": False                    # Use manual per-sample gradient computation
-        },
-
         "mem_type": "mac",                                      # Memory architecture type (Memory-as-Context)
 
         "mac": {
-            "depth": 2,                                         # Number of stacked MAC blocks
+            "depth": 1,                                         # Number of stacked MAC blocks
             "segment_len": 32,                                  # Segment length processed per MAC block
             "longterm_mem_tokens": 32,                          # Tokens allocated for extended memory retention
             "persistent_mem_tokens": 16,                        # Tokens reserved for long-lasting contextual memory
 
             "use_flex_attn": False,                             # Use FlexAttention for potentially faster/sliding window attention
             "sliding_window_attn": True,                        # Use sliding window attention for efficiency
+            "manual_per_sample_grads": False,                   # Use manual per-sample gradient computation
 
             "neural_mem_heads": 4,                              # Number of attention heads in neural memory
             "neural_mem_head_dim": 64,                          # Dimension per head in neural memory
@@ -74,20 +51,10 @@ MEMORY = {
             "neural_mem_per_head_learned_parameters": False     # Independent parameters per memory head
         },
 
-        "strategy": "fusion",                                   # Integration strategy with backend memory
-
-        "fusion": {
-            "adapter": {
-                "proj_scale": -1,                               # Hidden dimension expansion factor (-1 for auto)
-                "proj_dropout": 0.1,                            # Dropout rate for adapter layers
-                "min_proj_dim": -1,                             # Minimum hidden dimension size (-1 for auto)
-                "norm_position": "post"                         # LayerNorm placement: 'pre' | 'post'
-            }
-        },
-
         "update_memory": True                                   # Allow memory updates during inference
     },
 
+    # Backend Memory (Skill Integration)
     "backend": {
         "skill": {
             "state_dim": 256,                                   # Dimension of state embeddings
@@ -98,20 +65,19 @@ MEMORY = {
             "kl_coef": 0.03,                                    # Weight for memory consistency regularization
             "adv_coef": 0.15,                                   # Weight for action-memory disentanglement
             "entropy_coef": 0.05,                               # Weight for policy exploration incentive
-
-            "manual_per_sample_grads": False                    # Use manual gradient computation
         },
 
         "mem_type": "mac",                                      # Memory architecture type (Memory-as-Context)
 
         "mac": {
-            "depth": 2,                                         # Number of stacked MAC blocks
+            "depth": 1,                                         # Number of stacked MAC blocks
             "segment_len": 32,                                  # Segment length processed per MAC block
             "longterm_mem_tokens": 32,                          # Tokens allocated for extended memory retention
             "persistent_mem_tokens": 16,                        # Tokens reserved for long-lasting contextual memory
 
             "use_flex_attn": False,                             # Use FlexAttention for potentially faster/sliding window attention
             "sliding_window_attn": True,                        # Use sliding window attention for efficiency
+            "manual_per_sample_grads": False,                   # Use manual gradient computation
 
             "neural_mem_heads": 4,                              # Number of attention heads in neural memory
             "neural_mem_head_dim": 64,                          # Dimension per head in neural memory
@@ -164,18 +130,15 @@ MEMORY = {
     }
 }
 
-# Gradient Checkpointing Configuration
+# Memory Optimization
 CKPT = {
     "gradient": {
-        "lm": False,                                            # Gradient checkpointing for LM
-        "mem": {                                                # Gradient checkpointing for memory
-            "frontent": False,
-            "backend": False
-        }
+        "lm": False,                                            # Checkpoint LM
+        "mem": False                                            # Checkpoint memory system
     }
 }
 
-# Optimization Configuration
+# Training Configuration
 OPTIMIZER = {
     "preference": "SimPO",                                      # Preference optimization method: 'SimPO' | 'NCA'
 
@@ -187,7 +150,7 @@ OPTIMIZER = {
     }
 }
 
-# Data Loading Configuration
+# Data Handling
 LOADER = {
     "truncation_mode": "keep_start"                             # Sequence truncation strategy: 'keep_start' | 'keep_end'
 }
@@ -195,5 +158,5 @@ LOADER = {
 # Numerical Precision
 PRECISION = "bf16-mixed"                                        # Mixed-precision training mode: '16-mixed' | 'bf16-mixed'
 
-# Logging Configuration
+# Monitoring
 LOG = True

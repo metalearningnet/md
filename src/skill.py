@@ -44,7 +44,7 @@ class SkillMemory(nn.Module):
     def __init__(self,
                  mem_type: str = 'mac',
                  state_dim: int = 256,
-                 num_tokens: int = 151672,
+                 num_tokens: int = 1024,
                  action_dim: int = 64,
                  hidden_dim: int = 128,
                  mi_coef: float = 0.5,
@@ -53,7 +53,6 @@ class SkillMemory(nn.Module):
                  entropy_coef: float = 0.3,
                  checkpoint: bool = False,
                  update_memory: bool = True,
-                 manual_per_sample_grads: bool = False,
                  mem_config: dict = dict()):
         super().__init__()
 
@@ -79,6 +78,7 @@ class SkillMemory(nn.Module):
             mac_neural_mem_momentum = mac_kwargs.get('neural_mem_momentum', True)
             mac_neural_mem_momentum_order = mac_kwargs.get('neural_mem_momentum_order', 1)
             mac_neural_mem_qk_rmsnorm = mac_kwargs.get('neural_mem_qk_rmsnorm', True)
+            mac_manual_per_sample_grads = mac_kwargs.get('manual_per_sample_grads', False)
             mac_neural_mem_weight_residual = mac_kwargs.get('neural_mem_weight_residual', True)
             mac_neural_mem_attn_pool_chunks = mac_kwargs.get('neural_mem_attn_pool_chunks', True)
             mac_neural_mem_use_accelerated_scan = mac_kwargs.get('neural_mem_use_accelerated_scan', False)
@@ -108,8 +108,8 @@ class SkillMemory(nn.Module):
                     momentum=mac_neural_mem_momentum,
                     qk_rmsnorm=mac_neural_mem_qk_rmsnorm,
                     momentum_order=mac_neural_mem_momentum_order,
-                    manual_per_sample_grads=manual_per_sample_grads,
                     attn_pool_chunks=mac_neural_mem_attn_pool_chunks,
+                    manual_per_sample_grads=mac_manual_per_sample_grads,
                     use_accelerated_scan=mac_neural_mem_use_accelerated_scan,
                     spectral_norm_surprises=mac_neural_mem_spectral_norm_surprises,
                     default_step_transform_max_lr=mac_neural_mem_step_transform_max_lr,

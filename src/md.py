@@ -2,6 +2,7 @@ import os
 import math
 import torch
 import torch.nn as nn
+from frontend import Frontend
 from skill import SkillMemory
 import torch.nn.functional as F
 from typing import Dict, Optional
@@ -128,7 +129,6 @@ class MD(nn.Module):
         assert self.backend_action_proj[-2].out_features == self.hidden_size
     
     def _init_mem_backend(self, config):
-        self.mem_backend_coef = config.mem_backend_coef
         self.backend_sep_logit_bias = self.min_sep_bias
         self.backend_sep_noise_scale = self.noise_scale
         self.backend_mem_type = config.backend_mem_type
@@ -158,23 +158,23 @@ class MD(nn.Module):
             self.backend_action_dim = self.num_tokens
         
         if self.backend_strategy == 'fusion':
-            self.backend_state_dim = self.hidden_size
+            self.mem_state_dim = self.hidden_size
         else:
-            self.backend_state_dim = self.backend_skill_config.get('state_dim', self.hidden_size)
+            self.mem_state_dim = self.backend_skill_config.get('state_dim', self.hidden_size)
         
         self.backend_hidden_dim = self.backend_skill_config.get('hidden_dim', self.hidden_size)
 
-        self.backend_proj = nn.Sequential(
-            nn.Linear(self.hidden_size, self.backend_state_dim*2),
+        self.mem_state_proj = nn.Sequential(
+            nn.Linear(self.hidden_size, self.mem_state_dim*2),
             nn.GELU(),
-            nn.Linear(self.backend_state_dim*2, self.backend_state_dim),
-            nn.LayerNorm(self.backend_state_dim)
+            nn.Linear(self.mem_state_dim*2, self.mem_state_dim),
+            nn.LayerNorm(self.mem_state_dim)
         )
 
         self.backend_skill_config.update({
             'num_tokens': self.num_tokens,
             'mem_type': self.backend_mem_type,
-            'state_dim': self.backend_state_dim,
+            'state_dim': self.mem_state_dim,
             'action_dim': self.backend_action_dim,
             'hidden_dim': self.backend_hidden_dim,
             'checkpoint': self.backend_checkpoint,
@@ -188,7 +188,17 @@ class MD(nn.Module):
             self._init_backend_fusion_adapter()
     
     def _init_mem_frontend(self, config):
-        self.mem_frontend_coef = config.mem_frontend_coef
+        self.frontend_mem_config = config.frontend_mem_config
+        self.frontend_mem_type = config.frontend_mem_type
+        self.frontend_update_memory = config.frontend_update_memory
+        self.frontend_config = {
+            'num_tokens': self.num_tokens,
+            'mem_type': self.frontend_mem_type,
+            'state_dim': self.mem_state_dim,
+            'mem_config': self.frontend_mem_config,
+            'update_memory': self.frontend_update_memory,
+        }
+        self.mem_frontend = Frontend(**self.frontend_config)
 
     def _init_mem(self, config):
         self.mem_coef = config.mem_coef
@@ -376,8 +386,12 @@ class MD(nn.Module):
             context_embeds = context_embeds * mask.unsqueeze(-1)
         
         with torch.autocast(self.device.type, enabled=False):
-            states = self.backend_proj(context_embeds)
-            skill_output = self.mem_backend(states)
+            states = self.mem_state_proj(context_embeds)
+            if self.has_frontend:
+                frontend_states = self.mem_frontend(states)
+                skill_output = self.mem_backend(frontend_states)
+            else:
+                skill_output = self.mem_backend(states)
 
         sep_index = self.mem_backend.action_dim - 1
         step_logits = skill_output['action_logits'][:, -1, :]
@@ -484,8 +498,12 @@ class MD(nn.Module):
         max_length = self.backend_anno_max_length + 1 if self.backend_enable_annotation else 1
         for step_idx in range(max_length):
             with torch.autocast(self.device.type, enabled=False):
-                states = self.backend_proj(current_embeds)
-                skill_output = self.mem_backend(states)
+                states = self.mem_state_proj(current_embeds)
+                if self.has_frontend:
+                    frontend_states = self.mem_frontend(states)
+                    skill_output = self.mem_backend(frontend_states)
+                else:
+                    skill_output = self.mem_backend(states)
             
             if return_loss:
                 mem_loss = self.mem_backend.compute_losses(skill_output)['total_loss']
@@ -1078,22 +1096,22 @@ class MD(nn.Module):
 
     def get_trainable_parameters(self):
         trainable_params = []
-
+        
         if self.backend_enable_fusion:
-            trainable_params.extend([
-                *self.backend_action_proj.parameters(),
-                *self.backend_fusion_gate.parameters(),
-                *self.backend_state_norm.parameters(),
-                *self.backend_action_norm.parameters()
-            ])
+            trainable_params.extend(self.backend_action_proj.parameters())
+            trainable_params.extend(self.backend_fusion_gate.parameters())
+            trainable_params.extend(self.backend_state_norm.parameters())
+            trainable_params.extend(self.backend_action_norm.parameters())
         
         trainable_params.extend(self.mem_backend.parameters())
-
+        trainable_params.extend(self.mem_state_proj.parameters())
+        
         if self.has_frontend:
-            pass
-
-        for param in self.lm.parameters():
-            if param.requires_grad:
-                trainable_params.append(param)
+            trainable_params.extend(self.mem_frontend.parameters())
+        
+        trainable_params.extend(
+            param for param in self.lm.parameters() 
+            if param.requires_grad
+        )
         
         return trainable_params

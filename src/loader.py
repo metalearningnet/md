@@ -4,7 +4,7 @@ from utils import DatasetMap
 from transformers import AutoTokenizer
 from datasets import Dataset, DatasetDict
 from typing import Optional, Union, Tuple, Dict, Any
-from utils import cfg, info, get_device, collate, warn
+from utils import get_device, collate, info, warn, cfg
 from torch.utils.data import DataLoader, Dataset, random_split
 
 LOADER_CPU_MAX = 8
@@ -52,7 +52,7 @@ class MDLoader(Dataset):
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         
         if self.tokenizer.pad_token is None:
-            info('add pad token')
+            warn('add pad token')
             if self.tokenizer.eos_token is not None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             else:
@@ -188,7 +188,7 @@ class MDLoader(Dataset):
             generator=torch.Generator().manual_seed(seed)
         )
         num_workers = self.get_workers()
-        info(f'DataLooader (train_size: {len(self) - val_size} val_size: {val_size} batch_size: {batch_size} seed: {seed})')
+        info(f'DataLooader (train_size: {len(self) - val_size}, val_size: {val_size}, batch_size: {batch_size}, seed: {seed})')
         return (
             DataLoader(
                 train_set,

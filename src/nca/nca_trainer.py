@@ -380,7 +380,7 @@ class NCATrainer(Trainer):
                         pad_to_length(batch["A3_labels"], max_length, pad_value=self.label_pad_token_id),
                     ),
                     dim=0,
-                ).to(self.accelerator.device),        
+                ).to(self.accelerator.device),
             }
 
         if self.is_encoder_decoder:
