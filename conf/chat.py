@@ -13,7 +13,7 @@ TEMPLATE = {
             {
                 "role": "system",
                 "content": {
-                    "head": "Cognitive Operations Guide",
+                    "head": "Use clear line breaks between sentences to improve readability and organization. Cognitive Operations are as follows:",
                     "body": {
                         "<recall>": "Retrieve foundational knowledge (facts/rules/data patterns)",
                         "<critique>": "Evaluate solution quality (identify errors/assumptions/risks)",

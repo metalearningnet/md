@@ -5,12 +5,11 @@ from pathlib import Path
 _script_dir = Path(__file__).parent
 sys.path.append(str(_script_dir))
 from train import train
-from test import test
+from evaluate import evaluate
 
 _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
-
-from utils import cfg, default_dataset_path, get_fabric_config
+from utils import default_dataset_path, get_fabric_config, cfg
 
 NR_EPOCHS = 1
 NR_SAMPLES = 1
@@ -27,7 +26,7 @@ class TestCkpt(unittest.TestCase):
             'fabric_config': get_fabric_config()
         }
 
-        self.test_args = {
+        self.eval_args = {
             'path': default_dataset_path,
             'split': 'test',
             'model_path': cfg.ckpt_path,
@@ -38,8 +37,8 @@ class TestCkpt(unittest.TestCase):
 
     def test_evaluation(self):
         train(self.train_args)
-        test_metrics = test(self.test_args)
-        self.assertIsInstance(test_metrics, dict)
+        eval_metrics = evaluate(self.eval_args)
+        self.assertIsInstance(eval_metrics, dict)
 
 if __name__ == '__main__':
     unittest.main()

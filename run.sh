@@ -4,8 +4,6 @@ set -euo pipefail
 
 readonly PROJECT_DIR=$(dirname "$(readlink -f "$0")")
 readonly PYTHON=python3
-readonly SEEDS=(13 21 42 79 100)
-readonly PREPARE_SCRIPTS=("post_process.py" "reward_model_annotate.py")
 
 readonly BOLD=$(tput bold)
 readonly RED=$(tput setaf 1)
@@ -37,8 +35,8 @@ ${BOLD}Usage:${RESET} $0 [OPTION]... [PYTHON_ARGS...]
 ${BOLD}Options:${RESET}
   --unittest CATEGORY    Run unit tests for specified category (skill|md|ckpt|loader)
   --train                Start the training process
-  --test                 Start the testing process
-  --prepare              Prepare the data for processing
+  --evaluate             Start the evaluation process
+  --prepare              Prepare the training data
   --generate             Generate evaluation results
   -h, --help             Show this help message
 
@@ -98,42 +96,29 @@ run_training() {
     fi
 }
 
-run_testing() {
-    local script_path="${PROJECT_DIR}/scripts/test.py"
-    log_info "Starting testing process..."
+run_evaluation() {
+    local script_path="${PROJECT_DIR}/scripts/evaluate.py"
+    log_info "Starting evaluation process..."
     validate_script "$script_path"
     
     if "$PYTHON" "$script_path" "$@"; then
-        log_success "Testing completed successfully"
+        log_success "Evaluation completed successfully"
     else
-        log_error "Testing failed"
+        log_error "Evaluation failed"
         exit 1
     fi
 }
 
 prepare_data() {
-    log_info "Preparing data with seeds: ${SEEDS[*]}"
+    local script_path="${PROJECT_DIR}/scripts/prepare.py"
+    log_info "Preparing training data..."
     
-    for seed in "${SEEDS[@]}"; do
-        log_info "Running decode.py with seed: ${seed}"
-        "$PYTHON" "${PROJECT_DIR}/scripts/decode.py" --seed "$seed" || {
-            log_error "Failed to run decode.py with seed ${seed}"
-            exit 1
-        }
-    done
-    
-    for script in "${PREPARE_SCRIPTS[@]}"; do
-        local script_path="${PROJECT_DIR}/scripts/${script}"
-        log_info "Running script: ${script}"
-        validate_script "$script_path"
-        
-        if ! "$PYTHON" "$script_path"; then
-            log_error "Failed to run ${script}"
-            exit 1
-        fi
-    done
-    
-    log_success "Data preparation completed"
+    if "$PYTHON" "$script_path"; then
+        log_success "Data preparation completed successfully"
+    else
+        log_error "Data preparation failed"
+        exit 1
+    fi
 }
 
 generate_results() {
@@ -172,9 +157,9 @@ main() {
                 run_training "$@"
                 return $?
                 ;;
-            --test)
+            --evaluate)
                 shift
-                run_testing "$@"
+                run_evaluation "$@"
                 return $?
                 ;;
             --prepare)

@@ -1,0 +1,45 @@
+# ====================================================
+# Reward-Based Training Data Configuration
+# ====================================================
+# Generates high-quality preference data for reinforcement learning.
+
+# Three-stage process:
+#   1. GENERATION: Create diverse responses using base LLM
+#   2. SCORING: Evaluate quality with reward model
+#   3. BINARIZATION: Form (chosen, rejected) training pairs
+
+generation:
+  model_name: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  prompts_dataset: "princeton-nlp/gemma2-ultrafeedback-armorm"
+  prompts_field: "prompt"
+
+  # Maximum number of prompts to process (set to -1 for unlimited processing)
+  max_examples: 5000
+  
+  split: "train"
+
+  vllm:
+    max_model_len: 16384
+    gpu_memory_utilization: 0.95
+  
+  sampling:
+    temperature: 0.7
+    top_p: 0.95
+    top_k: 50
+    max_tokens: 1280
+    repetition_penalty: 1.1
+    seeds: [42, 43, 44, 45, 46]
+
+reward_model:
+  name: "sfairXC/FsfairX-LLaMA3-RM-v0.1"
+  trust_remote_code: true
+  dtype: "bfloat16"
+
+processing:
+  filter_identical_responses: true
+  generation_file_prefix: "output"
+
+output:
+  save_hf_dataset: true
+  scored_file: "all_outputs_rm.json"
+  binarized_file: "all_outputs_bin.json"

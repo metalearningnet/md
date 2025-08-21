@@ -14,17 +14,17 @@ from utils import (
   default_dataset_path, clear_directory, set_dist_config, cfg
 )
 
-def test(config: dict):
+def evaluate(config: dict):
     """
     config:
         - path: Dataset path.
         - name: Config name.
         - split: Dataset split name (e.g., 'test').
-        - batch_size: Testing batch size.
+        - batch_size: Evaluation batch size.
         - samples: Number of samples.
         - precision: Numerical Precision.
         - ckpt_path: Checkpoint path.
-        - dist: Whether to enable distributed testing.
+        - dist: Whether to enable distributed evaluation.
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - log: Whether to enable logging.
         - log_dir: Directory where logs should be saved.
@@ -85,7 +85,7 @@ def test(config: dict):
         test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
         test_metrics = md_validate(model, test_loader, fabric, num_samples=num_samples, log_dir=log_dir, log_interval=log_interval)
 
-        print("\nTest Results:")
+        print("\nEvaluation Results:")
         for k, v in test_metrics.items():
             print(f"{k:20}: {v:.4f}")
         
@@ -96,9 +96,9 @@ def test(config: dict):
             torch.distributed.destroy_process_group()
 
 def main():
-    parser = argparse.ArgumentParser(description="Test the MD Model")
+    parser = argparse.ArgumentParser(description="Evaluate the MD Model")
 
-    # Testing configuration
+    # Evaluation configuration
     parser.add_argument("--path", type=str, default=default_dataset_path,
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
@@ -108,21 +108,21 @@ def main():
     parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--batch_size", type=int, default=1,
-                        help="Testing batch size")
+                        help="Evaluation batch size")
     parser.add_argument("--samples", type=int, default=-1,
-                        help="Number of testing samples")
+                        help="Number of evaluation samples")
 
-    # Distributed testing configuration
+    # Distributed evaluation configuration
     parser.add_argument("--addr", type=str, default=None,
-                        help="Master address for distributed testing")
+                        help="Master address for distributed evaluation")
     parser.add_argument("--port", type=int, default=None,
-                        help="Master port for distributed testing")
+                        help="Master port for distributed evaluation")
     parser.add_argument("--nodes", type=int, default=None,
-                        help="The number of nodes for distributed testing")
+                        help="The number of nodes for distributed evaluation")
 
     # System configuration
     parser.add_argument("--dist", action="store_true", default=False,
-                        help="Enable distributed testing")
+                        help="Enable distributed evaluation")
     parser.add_argument("--log", action="store_true", default=cfg.log,
                         help="Whether to enable logging")
     parser.add_argument("--log_dir", type=str, default=cfg.test_log,
@@ -158,7 +158,7 @@ def main():
             num_nodes=args.nodes
         )
 
-    test(config)
+    evaluate(config)
     
 if __name__ == '__main__':
     main()

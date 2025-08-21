@@ -39,7 +39,7 @@ check_commands() {
 
 install_model_only() {
     log_info "Installing model..."
-    if ! "$PYTHON" scripts/get_model.py; then
+    if ! "$PYTHON" scripts/download.py --model; then
         log_error "Model installation failed"
     fi
 
