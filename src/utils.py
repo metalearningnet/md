@@ -383,7 +383,7 @@ if not cfg.sft and cfg.po == 'NCA':
 elif not cfg.sft and cfg.po == 'SimPO':
     from simpo.simpo_utils import DatasetMap
     from simpo.simpo_utils import simpo_collate as collate
-    default_dataset_path = "princeton-nlp/gemma2-ultrafeedback-armorm"
+    default_dataset_path = "metalearningnet/qwen3-ultrafeedback"
 else:
     default_dataset_path = "databricks/databricks-dolly-15k"
     from transformers import PreTrainedTokenizer

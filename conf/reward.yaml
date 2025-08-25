@@ -14,7 +14,7 @@ generation:
   prompts_field: "prompt"
 
   # Maximum number of prompts to process (set to -1 for unlimited processing)
-  max_examples: 5000
+  max_examples: -1
   
   split: "train"
 

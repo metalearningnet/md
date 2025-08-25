@@ -1,11 +1,11 @@
 import os
 import torch
-from utils import DatasetMap
+from pathlib import Path
 from transformers import AutoTokenizer
 from datasets import Dataset, DatasetDict
 from typing import Optional, Union, Tuple, Dict, Any
-from utils import get_device, collate, info, warn, cfg
 from torch.utils.data import DataLoader, Dataset, random_split
+from utils import DatasetMap, get_device, collate, info, warn, cfg
 
 LOADER_CPU_MAX = 8
 
@@ -90,19 +90,31 @@ class MDLoader(Dataset):
         fallback_split: str = 'train'
     ):
         try:
-            from datasets import get_dataset_split_names, load_dataset
-            split_names = get_dataset_split_names(path, config_name=name)
-            
-            if not split_names:
-                raise RuntimeError(f"No splits found for dataset: {path}")
-            
-            if split is None or split not in split_names:
-                original_split = split
-                split = fallback_split if fallback_split in split_names else split_names[0]
-                if original_split is not None:
-                    warn(f"Split '{original_split}' not available. Using '{split}' instead.")
-            
-            self.dataset = load_dataset(path, name, split=split)
+            if Path(path).exists():
+                if Path(path).is_dir():
+                    from datasets import load_from_disk
+                    dataset = load_from_disk(path)
+                    if split not in dataset:
+                        warn(f"Split '{split}' not available. Using '{fallback_split}' instead.")
+                        split = fallback_split
+                    self.dataset = dataset[split]
+                    info(f"Loaded local dataset (path: {path}, split: {split})")
+                else:
+                    raise RuntimeError(f"Local dataset path is not valid: {path} (not a directory)")
+            else:
+                from datasets import get_dataset_split_names, load_dataset
+                split_names = get_dataset_split_names(path, config_name=name)
+                
+                if not split_names:
+                    raise RuntimeError(f"No splits found for dataset: {path}")
+                
+                if split is None or split not in split_names:
+                    original_split = split
+                    split = fallback_split if fallback_split in split_names else split_names[0]
+                    if original_split is not None:
+                        warn(f"Split '{original_split}' not available. Using '{split}' instead.")
+                
+                self.dataset = load_dataset(path, name, split=split)
         
         except Exception as e:
             raise RuntimeError(
