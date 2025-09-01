@@ -10,6 +10,8 @@ sys.path.append(str(_src_dir))
 
 from skill import SkillMemory
 
+MEM_TYPE = 'mal'
+
 class TestSkill(unittest.TestCase):
     def setUp(self):
         self.seq_len = 10
@@ -20,6 +22,7 @@ class TestSkill(unittest.TestCase):
         
         self.states = torch.randn(self.batch_size, self.seq_len, self.state_dim)
         self.skill_memory = SkillMemory(
+            mem_type=MEM_TYPE,
             state_dim=self.state_dim,
             action_dim=self.action_dim,
             hidden_dim=self.hidden_dim

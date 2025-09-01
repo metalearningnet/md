@@ -2,6 +2,7 @@ import os
 import sys
 import yaml
 import time
+import copy
 import torch
 import shutil
 import random
@@ -67,6 +68,8 @@ TRAIN_LOG = LOG_DIR / 'train'
 TEST_LOG = LOG_DIR / 'test'
 DIST_FILE = 'dist.yaml'
 PEFT_FILE = 'peft.yaml'
+MAC_FILE = 'mac.yaml'
+MAL_FILE = 'mal.yaml'
 
 SEED = 42
 RETRY_MAX = 5
@@ -92,6 +95,12 @@ BLUE = '\033[1;34m'
 YELLOW = '\033[1;33m'
 
 STRATEGY = 'deepspeed' # Options: 'deepspeed' | 'ddp'
+
+with open(_conf_dir / MAC_FILE) as f:
+    default_mac_config = yaml.safe_load(f)
+
+with open(_conf_dir / MAL_FILE) as f:
+    default_mal_config = yaml.safe_load(f)
 
 def info(s):
     if VERBOSE:
@@ -131,6 +140,28 @@ class Cfg:
     optimizer: dict
     log_interval: int
     remove_unused_columns: bool
+    
+    def mem_config(self, component, mem_type):
+        valid_components = ['frontend', 'backend']
+        config_mapping = {
+            'mac': (default_mac_config, 'mac'),
+            'mal': (default_mal_config, 'mal'),
+        }
+
+        if mem_type not in config_mapping:
+            valid_types = ', '.join(config_mapping.keys())
+            raise ValueError(f"Invalid memory type: '{mem_type}'. Valid types are: {valid_types}")
+
+        if component not in valid_components:
+            raise ValueError(f"Invalid component: '{component}'. Valid components are: {valid_components}")
+
+        default_config, config_key = config_mapping[mem_type]
+        config = copy.deepcopy(default_config)
+
+        custom_config = self.memory[component][config_key]
+        config.update(custom_config)
+
+        return config
     
     @property
     def attn(self):
@@ -218,7 +249,7 @@ class Cfg:
     
     @property
     def frontend_mem_config(self):
-        return self.memory['frontend'][self.frontend_mem_type]
+        return self.mem_config('frontend', self.frontend_mem_type)
     
     @property
     def frontend_update_memory(self):
@@ -239,7 +270,7 @@ class Cfg:
     
     @property
     def backend_mem_config(self):
-        return self.memory['backend'][self.backend_mem_type]
+        return self.mem_config('backend', self.backend_mem_type)
     
     @property
     def backend_fusion_adapter(self):

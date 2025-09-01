@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils import info, get_device
-from titans import MemoryAsContextTransformer
 from torch.utils.checkpoint import checkpoint
 from torch.distributions import Normal, kl_divergence
+from titans import MemoryAsContextTransformer, NeuralMemory
 
 class GradientReversal(torch.autograd.Function):
     @staticmethod
@@ -58,35 +58,39 @@ class SkillMemory(nn.Module):
 
         info(f"Skill memory (mem_type: {mem_type}, state_dim: {state_dim}, action_dim: {action_dim}, hidden_dim: {hidden_dim})")
         
-        self.device = get_device()
+        self.mem_type = mem_type
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.checkpoint = checkpoint
+
+        self.device = get_device()
         
         if 'mac' == mem_type:
-            mac_kwargs = mem_config
-            mac_depth = mac_kwargs.get('depth', 1)
-            mac_segment_len = mac_kwargs.get('segment_len', 32)
-            mac_use_flex_attn = mac_kwargs.get('use_flex_attn', False)
-            mac_longterm_mem_tokens = mac_kwargs.get('longterm_mem_tokens', 32)
-            mac_persistent_mem_tokens = mac_kwargs.get('persistent_mem_tokens', 16)
-            mac_sliding_window_attn = mac_kwargs.get('sliding_window_attn', False)
-            mac_neural_mem_heads = mac_kwargs.get('neural_mem_heads', 4)
-            mac_neural_mem_head_dim = mac_kwargs.get('neural_mem_head_dim', 64)
-            mac_neural_mem_batch_size = mac_kwargs.get('neural_mem_batch_size')
-            mac_neural_mem_momentum = mac_kwargs.get('neural_mem_momentum', True)
-            mac_neural_mem_momentum_order = mac_kwargs.get('neural_mem_momentum_order', 1)
-            mac_neural_mem_qk_rmsnorm = mac_kwargs.get('neural_mem_qk_rmsnorm', True)
-            mac_manual_per_sample_grads = mac_kwargs.get('manual_per_sample_grads', False)
-            mac_neural_mem_weight_residual = mac_kwargs.get('neural_mem_weight_residual', True)
-            mac_neural_mem_attn_pool_chunks = mac_kwargs.get('neural_mem_attn_pool_chunks', True)
-            mac_neural_mem_use_accelerated_scan = mac_kwargs.get('neural_mem_use_accelerated_scan', False)
-            mac_neural_mem_step_transform_max_lr = mac_kwargs.get('neural_mem_step_transform_max_lr', 1e-1)
-            mac_neural_mem_qkv_receives_diff_views = mac_kwargs.get('neural_mem_qkv_receives_diff_views', True)
-            mac_neural_mem_spectral_norm_surprises = mac_kwargs.get('neural_mem_spectral_norm_surprises', True)
-            mac_neural_mem_per_head_learned_parameters = mac_kwargs.get('neural_mem_per_head_learned_parameters', False)
-            mac_neural_mem_per_parameter_lr_modulation = mac_kwargs.get('neural_mem_per_parameter_lr_modulation', True)
+            mac_depth = mem_config.get('depth', 1)
+            mac_segment_len = mem_config.get('segment_len', 32)
+            mac_use_flex_attn = mem_config.get('use_flex_attn', False)
+            mac_longterm_mem_tokens = mem_config.get('longterm_mem_tokens', 32)
+            mac_sliding_window_attn = mem_config.get('sliding_window_attn', False)
+            mac_persistent_mem_tokens = mem_config.get('persistent_mem_tokens', 16)
+            mac_manual_per_sample_grads = mem_config.get('manual_per_sample_grads', False)
+            
+            mac_neural_mem_heads = mem_config.get('neural_mem_heads', 4)
+            mac_neural_mem_head_dim = mem_config.get('neural_mem_head_dim', 64)
+            mac_neural_mem_batch_size = mem_config.get('neural_mem_batch_size')
+            mac_neural_mem_momentum = mem_config.get('neural_mem_momentum', True)
+            mac_neural_mem_qk_rmsnorm = mem_config.get('neural_mem_qk_rmsnorm', True)
+            mac_neural_mem_momentum_order = mem_config.get('neural_mem_momentum_order', 1)
+            mac_neural_mem_weight_residual = mem_config.get('neural_mem_weight_residual', True)
+            mac_neural_mem_attn_pool_chunks = mem_config.get('neural_mem_attn_pool_chunks', True)
+            mac_neural_mem_gated_transition = mem_config.get('neural_mem_gated_transition', False)
+            mac_neural_mem_use_accelerated_scan = mem_config.get('neural_mem_use_accelerated_scan', False)
+            mac_neural_mem_step_transform_max_lr = mem_config.get('neural_mem_step_transform_max_lr', 1e-1)
+            mac_neural_mem_qkv_receives_diff_views = mem_config.get('neural_mem_qkv_receives_diff_views', True)
+            mac_neural_mem_spectral_norm_surprises = mem_config.get('neural_mem_spectral_norm_surprises', True)
+            mac_neural_mem_model_norm_add_residual = mem_config.get('neural_mem_model_norm_add_residual', True)
+            mac_neural_mem_per_head_learned_parameters = mem_config.get('neural_mem_per_head_learned_parameters', False)
+            mac_neural_mem_per_parameter_lr_modulation = mem_config.get('neural_mem_per_parameter_lr_modulation', True)
             
             self.mem = MemoryAsContextTransformer(
                 dim=state_dim,
@@ -108,14 +112,57 @@ class SkillMemory(nn.Module):
                     momentum=mac_neural_mem_momentum,
                     qk_rmsnorm=mac_neural_mem_qk_rmsnorm,
                     momentum_order=mac_neural_mem_momentum_order,
+                    gated_transition=mac_neural_mem_gated_transition,
                     attn_pool_chunks=mac_neural_mem_attn_pool_chunks,
                     manual_per_sample_grads=mac_manual_per_sample_grads,
                     use_accelerated_scan=mac_neural_mem_use_accelerated_scan,
+                    step_transform_max_lr=mac_neural_mem_step_transform_max_lr,
                     spectral_norm_surprises=mac_neural_mem_spectral_norm_surprises,
-                    default_step_transform_max_lr=mac_neural_mem_step_transform_max_lr,
+                    mem_model_norm_add_residual=mac_neural_mem_model_norm_add_residual,
                     per_head_learned_parameters=mac_neural_mem_per_head_learned_parameters,
                     per_parameter_lr_modulation=mac_neural_mem_per_parameter_lr_modulation
                 )
+            )
+        elif 'mal' == mem_type:
+            heads = mem_config.get('heads', 4)
+            dim_head = mem_config.get('dim_head', 64)
+            chunk_size = mem_config.get('chunk_size', 32)
+            momentum_order = mem_config.get('momentum_order', 1)
+            step_transform_max_lr = mem_config.get('step_transform_max_lr', 0.1)
+
+            momentum = mem_config.get('momentum', True)
+            qk_rmsnorm = mem_config.get('qk_rmsnorm', True)
+            attn_pool_chunks = mem_config.get('attn_pool_chunks', True)
+            gated_transition = mem_config.get('gated_transition', False)
+            use_accelerated_scan = mem_config.get('use_accelerated_scan', False)
+            accept_weight_residual = mem_config.get('accept_weight_residual', False)
+            spectral_norm_surprises = mem_config.get('spectral_norm_surprises', True)
+            qkv_receives_diff_views = mem_config.get('qkv_receives_diff_views', False)
+            manual_per_sample_grads = mem_config.get('manual_per_sample_grads', False)
+            mem_model_norm_add_residual = mem_config.get('mem_model_norm_add_residual', True)
+            per_parameter_lr_modulation = mem_config.get('per_parameter_lr_modulation', True)
+            per_head_learned_parameters = mem_config.get('per_head_learned_parameters', True)
+
+            self.mem = NeuralMemory(
+                dim=state_dim,
+                heads=heads,
+                dim_head=dim_head,
+                chunk_size=chunk_size,
+                momentum_order=momentum_order,
+                step_transform_max_lr=step_transform_max_lr,
+                momentum=momentum,
+                qk_rmsnorm=qk_rmsnorm,
+                update_memory=update_memory,
+                attn_pool_chunks=attn_pool_chunks,
+                gated_transition=gated_transition,
+                use_accelerated_scan=use_accelerated_scan,
+                accept_weight_residual=accept_weight_residual,
+                spectral_norm_surprises=spectral_norm_surprises,
+                qkv_receives_diff_views=qkv_receives_diff_views,
+                manual_per_sample_grads=manual_per_sample_grads,
+                mem_model_norm_add_residual=mem_model_norm_add_residual,
+                per_parameter_lr_modulation=per_parameter_lr_modulation,
+                per_head_learned_parameters=per_head_learned_parameters
             )
         else:
             raise ValueError(f"No memory configuration")
@@ -165,6 +212,7 @@ class SkillMemory(nn.Module):
         self.kl_coef = kl_coef
         self.adv_coef = adv_coef
         self.entropy_coef = entropy_coef
+        self.calc_kl = kl_coef != 0.0
     
     def get_action_logits(self, states, m):
         mean, log_std = self.policy(states, m)
@@ -188,25 +236,34 @@ class SkillMemory(nn.Module):
         return prior_mean, prior_std
     
     def get_mem(self, states):
+        if states.size(1) == 0:
+            raise AssertionError("seq_len > 0")
         mem_output = self.mem(states)
+        if self.mem_type == 'mal':
+            mem_output = mem_output[0]
         return self.mem_output_proj(mem_output), mem_output
     
     def forward(self, states):
         if self.checkpoint:
             m, mem_output = checkpoint(self.get_mem, states, use_reentrant=True)
-            prior_mean, prior_std = checkpoint(self.get_prior, m, use_reentrant=True)
+            if self.calc_kl:
+                prior_mean, prior_std = checkpoint(self.get_prior, m, use_reentrant=True)
         else:
             m, mem_output = self.get_mem(states)
-            prior_mean, prior_std = self.get_prior(m)
-            
-        prior_dist = Normal(prior_mean, prior_std)
-
-        mem_std = F.softplus(self.memory_var)
-        mem_std = torch.clamp(mem_std, min=0.1, max=2.0)
-        if m.size(1) > 1:
-            mem_dist = Normal(m[:, 1:], mem_std.expand_as(m[:, 1:]))
+            if self.calc_kl:
+                prior_mean, prior_std = self.get_prior(m)
+        
+        if self.calc_kl:
+            prior_dist = Normal(prior_mean, prior_std)
+            mem_std = F.softplus(self.memory_var)
+            mem_std = torch.clamp(mem_std, min=0.1, max=2.0)
+            if m.size(1) > 1:
+                mem_dist = Normal(m[:, 1:], mem_std.expand_as(m[:, 1:]))
+            else:
+                mem_dist = Normal(m, mem_std.expand_as(m))
         else:
-            mem_dist = Normal(m, mem_std.expand_as(m))
+            mem_dist = None
+            prior_dist = None
         
         action_logits, entropy = self.get_action_logits(states, m)
 
@@ -215,8 +272,8 @@ class SkillMemory(nn.Module):
             'states': states,
             'entropy': entropy,
             'mem_dist': mem_dist,
-            'mem_output': mem_output,
             'prior_dist': prior_dist,
+            'mem_output': mem_output,
             'action_logits': action_logits
         }
     
@@ -259,9 +316,12 @@ class SkillMemory(nn.Module):
         adv_loss = F.mse_loss(pred_m, mem_output.detach())
 
         # KL Regularization
-        kl_loss = kl_divergence(mem_dist, prior_dist)
-        kl_loss = torch.clamp(kl_loss, max=1e3)
-        kl_loss = kl_loss.mean()
+        if self.calc_kl:
+            kl_loss = kl_divergence(mem_dist, prior_dist)
+            kl_loss = torch.clamp(kl_loss, max=1e3)
+            kl_loss = kl_loss.mean()
+        else:
+            kl_loss = 0.0
 
         total_loss = (
             self.mi_coef * mi_loss +

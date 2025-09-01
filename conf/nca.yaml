@@ -9,11 +9,11 @@ gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
 hub_model_id: zephyr-7b-NCA-qlora
-learning_rate: 5e-6
+learning_rate: 0.000005
 log_level: info
 logging_steps: 10
 lr_scheduler_type: cosine
-max_length: 1024
+max_length: 1280
 max_prompt_length: 512
 num_train_epochs: 1
 optim: paged_adamw_32bit

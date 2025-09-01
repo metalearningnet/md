@@ -315,7 +315,7 @@ class NeuralMemory(Module):
         model: Module | None = None,
         store_memory_loss_fn: Callable = default_loss_fn,
         adaptive_step_transform: Callable | None = None,
-        default_step_transform_max_lr = 1.,
+        step_transform_max_lr = 1.,
         per_parameter_lr_modulation = False, # allow outer network to control learning rate per weight matrix of memory network
         max_mem_layer_modulation = 1., # max of 10.
         per_head_learned_parameters = True,
@@ -340,7 +340,7 @@ class NeuralMemory(Module):
         gated_transition = False,
         mem_model_norm_add_residual = True, # by default, layernorm output and add residual as proposed in TTT paper, but could be removed
         update_memory = True,
-        manual_per_sample_grads = True,
+        manual_per_sample_grads = False,
         default_model_kwargs: dict = dict(
             depth = 2,
             expansion_factor = 4.
@@ -366,7 +366,7 @@ class NeuralMemory(Module):
         self.assoc_scan = AssocScan(use_accelerated = use_accelerated_scan)
 
         # key values receiving different views
-
+        
         self.qkv_receives_diff_views = qkv_receives_diff_views
 
         # norms
@@ -502,7 +502,7 @@ class NeuralMemory(Module):
         )
 
         if not exists(adaptive_step_transform):
-            adaptive_step_transform = partial(default_adaptive_step_transform, max_lr = default_step_transform_max_lr)
+            adaptive_step_transform = partial(default_adaptive_step_transform, max_lr = step_transform_max_lr)
 
         self.adaptive_step_transform = adaptive_step_transform
 

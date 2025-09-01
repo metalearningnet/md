@@ -1,4 +1,6 @@
+# ====================================================
 # Distributed Training Strategy
+# ====================================================
 strategy: "deepspeed"       # Options: 
                             # - 'ddp': PyTorch's DistributedDataParallel
                             # - 'fsdp': Fully Sharded Data Parallel

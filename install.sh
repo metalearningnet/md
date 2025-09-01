@@ -146,5 +146,3 @@ else
         log_warn "Model directory not found. Run with --model to install it."
     fi
 fi
-
-log_info "Installation completed successfully!"

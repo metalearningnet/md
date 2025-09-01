@@ -1,0 +1,21 @@
+# ====================================================
+# MAL (Memory as a Layer) Configuration
+# ====================================================
+heads: 4                                              # Number of attention heads in neural memory
+dim_head: 64                                          # Dimension per head in neural memory
+chunk_size: 32                                        # Processing window size for memory operations
+momentum_order: 1                                     # Highest order of momentum to calculate
+step_transform_max_lr: 0.1                            # Upper limit for the effective learning rate used in memory updates
+
+momentum: true                                        # Enable momentum-based memory updates
+qk_rmsnorm: true                                      # Apply RMSNorm to Q/K projections
+attn_pool_chunks: true                                # whether to use attention pooling for chunk derived momentum
+gated_transition: false                               # Learnable transition gate interpolates between weight update strategies
+use_accelerated_scan: false                           # Use an optimized version of the associative scan for faster computation
+accept_weight_residual: false                         # Adds residual connections in neural memory weight updates
+spectral_norm_surprises: true                         # Apply spectral normalization to memory updates
+qkv_receives_diff_views: false                        # Q/K/V projections come from different layers/views
+manual_per_sample_grads: false                        # Use manual gradient computation
+mem_model_norm_add_residual: true                     # Applies layer normalization to memory model outputs with residual connections
+per_parameter_lr_modulation: true                     # Parameter-specific learning rate adaptation
+per_head_learned_parameters: false                    # Independent parameters per memory head

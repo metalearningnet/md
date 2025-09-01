@@ -1,0 +1,28 @@
+# ====================================================
+# MAC (Memory as a Context) Configuration
+# ====================================================
+depth: 1                                              # Number of stacked MAC blocks
+segment_len: 32                                       # Segment length processed per MAC block
+longterm_mem_tokens: 32                               # Tokens allocated for extended memory retention
+persistent_mem_tokens: 16                             # Tokens reserved for long-lasting contextual memory
+
+use_flex_attn: false                                  # Use FlexAttention for potentially faster/sliding window attention
+sliding_window_attn: true                             # Use sliding window attention for efficiency
+manual_per_sample_grads: false                        # Use manual gradient computation
+
+neural_mem_heads: 4                                   # Number of attention heads in neural memory
+neural_mem_head_dim: 64                               # Dimension per head in neural memory
+neural_mem_momentum_order: 1                          # Highest order of momentum to calculate
+neural_mem_step_transform_max_lr: 0.1                 # Upper limit for the effective learning rate used in memory updates
+
+neural_mem_momentum: true                             # Enable momentum-based memory updates
+neural_mem_qk_rmsnorm: true                           # Apply RMSNorm to Q/K projections
+neural_mem_weight_residual: true                      # Adds residual connections in neural memory weight updates
+neural_mem_attn_pool_chunks: true                     # whether to use attention pooling for chunk derived momentum
+neural_mem_gated_transition: false                    # Learnable transition gate interpolates between weight update strategies
+neural_mem_use_accelerated_scan: false                # Use an optimized version of the associative scan for faster computation
+neural_mem_model_norm_add_residual: true              # Applies layer normalization to memory model outputs with residual connections
+neural_mem_qkv_receives_diff_views: true              # Q/K/V projections come from different layers/views
+neural_mem_spectral_norm_surprises: true              # Apply spectral normalization to memory updates
+neural_mem_per_parameter_lr_modulation: true          # Parameter-specific learning rate adaptation
+neural_mem_per_head_learned_parameters: false         # Independent parameters per memory head
