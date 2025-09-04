@@ -23,17 +23,19 @@ MODEL = {
 MEMORY = {
     # Frontend Memory (Preprocessing)
     "frontend": {
-        "mem_type": "mac",                                  # Memory type: 'mac' (Memory as a Context) | 'mal' (Memory as a Layer)
+        "memory": {
+            "type": "mac",                                  # Memory type: 'mac' (Memory as a Context) | 'mal' (Memory as a Layer)
+            
+            "mac": {
+                "depth": 1                                  # Number of stacked MAC blocks
+            },
+            
+            "mal": {
+                "chunk_size": 16                            # Processing window size for memory operations
+            },
 
-        "mac": {
-            "depth": 1                                      # Number of stacked MAC blocks
-        },
-
-        "mal": {
-            "chunk_size": 16                                # Processing window size for memory operations
-        },
-
-        "update_memory": True                               # Allow memory updates during inference
+            "update": True                                  # Allow memory updates during inference
+        }
     },
 
     # Backend Memory (Skills)
@@ -44,53 +46,57 @@ MEMORY = {
             "hidden_dim": 128,                              # Hidden layer dimension
 
             "mi_coef": 0.6,                                 # Weight for state-memory mutual information
-            "kl_coef": 0.05,                                # Weight for memory consistency regularization
+            "kl_coef": 0.0,                                 # Weight for memory consistency regularization
             "adv_coef": 0.15,                               # Weight for action-memory disentanglement
             "entropy_coef": 0.05,                           # Weight for policy exploration incentive
         },
 
-        "mem_type": "mac",                                  # Memory type: 'mac' (Memory as a Context) | 'mal' (Memory as a Layer)
+        "memory": {
+            "type": "mac",                                  # Memory type: 'mac' (Memory as a Context) | 'mal' (Memory as a Layer)
+            
+            "mac": {
+                "depth": 1,                                 # Number of stacked MAC blocks
+            },
 
-        "mac": {
-            "depth": 1,                                     # Number of stacked MAC blocks
+            "mal": {
+                "chunk_size": 16                            # Processing window size for memory operations
+            },
+
+            "update": True                                  # Allow memory updates during inference
         },
 
-        "mal": {
-            "chunk_size": 16                                # Processing window size for memory operations
-        },
+        "strategy": {
+            "type": "hint",                                 # Integration strategy with LLM: 'fusion' | 'annotation' | 'hint'
 
-        "strategy": "hint",                                 # Integration strategy with LLM: 'fusion' | 'annotation' | 'hint'
+            "fusion": {
+                "adapter": {
+                    "proj_scale": -1,                       # Hidden dimension expansion factor (-1 for auto)
+                    "proj_dropout": 0.1,                    # Dropout rate for adapter layers
+                    "min_proj_dim": -1,                     # Minimum hidden dimension size (-1 for auto)
+                    "norm_position": "post"                 # LayerNorm placement: 'pre' | 'post'
+                }
+            },
 
-        "fusion": {
-            "adapter": {
-                "proj_scale": -1,                           # Hidden dimension expansion factor (-1 for auto)
-                "proj_dropout": 0.1,                        # Dropout rate for adapter layers
-                "min_proj_dim": -1,                         # Minimum hidden dimension size (-1 for auto)
-                "norm_position": "post"                     # LayerNorm placement: 'pre' | 'post'
+            "annotation": {
+                "words": 8,                                 # Vocabulary size for annotations
+                "max_length": 2,                            # Maximum tokens per annotation
+                "max_annotations": 4,                       # Maximum annotations per response (-1 for unlimited)
+                "min_interval": 128,                        # Minimum tokens between annotations
+                "tune": True                                # Fine-tune annotation embeddings
+            },
+
+            "hint": {
+                "category": "minimal",                      # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
+                "max_hints": 64,                            # Maximum hints per response (-1 for unlimited)
+                "min_interval": 8,                          # Minimum tokens between hints
+                "tune": True,                               # Fine-tune hint embeddings
+                "sentence_alignment": True,                 # Trigger special token generation at sentence boundaries.
+                "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the [SEP] token logits that trigger hint generation
+                "sep_temperature": 0.7                      # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
             }
         },
 
-        "annotation": {
-            "words": 8,                                     # Vocabulary size for annotations
-            "max_length": 2,                                # Maximum tokens per annotation
-            "max_annotations": 4,                           # Maximum annotations per response (-1 for unlimited)
-            "min_interval": 128,                            # Minimum tokens between annotations
-            "tune": True                                    # Fine-tune annotation embeddings
-        },
-
-        "hint": {
-            "category": "minimal",                          # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
-            "max_hints": 64,                                # Maximum hints per response (-1 for unlimited)
-            "min_interval": 8,                              # Minimum tokens between hints
-            "tune": True,                                   # Fine-tune hint embeddings
-            "sentence_alignment": True,                     # Trigger special token generation at sentence boundaries.
-            "sep_logit_bias": 3.0,                          # Controls hint insertion frequency by biasing the [SEP] token logits that trigger hint generation
-            "sep_temperature": 0.7                          # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
-        },
-
         "context_window": 4,                                # Token lookahead window for generation
-
-        "update_memory": True                               # Allow memory updates during inference
     }
 }
 

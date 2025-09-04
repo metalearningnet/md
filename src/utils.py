@@ -58,18 +58,23 @@ MD_TAG = 'md'
 MD_FILE = f'{MD_TAG}.pt'
 
 ROOT_DIR = Path(__file__).parent.parent
-MODEL_DIR = ROOT_DIR  / 'model'
+MODEL_DIR = ROOT_DIR / 'models'
 CONF_DIR = ROOT_DIR / 'conf'
 OUT_DIR = ROOT_DIR / 'output'
-CKPT_DIR = OUT_DIR / 'checkpoints'
 LOG_DIR = OUT_DIR / 'logs'
+
 EVAL_DIR = OUT_DIR / 'results'
-TRAIN_LOG = LOG_DIR / 'train'
+CKPT_DIR = OUT_DIR / 'checkpoints'
+
 TEST_LOG = LOG_DIR / 'test'
-DIST_FILE = 'dist.yaml'
-PEFT_FILE = 'peft.yaml'
+TRAIN_LOG = LOG_DIR / 'train'
+
+LM_DIR = MODEL_DIR / 'lm'
+
 MAC_FILE = 'mac.yaml'
 MAL_FILE = 'mal.yaml'
+DIST_FILE = 'dist.yaml'
+PEFT_FILE = 'peft.yaml'
 
 SEED = 42
 RETRY_MAX = 5
@@ -80,10 +85,10 @@ RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
 
 SYLLABLES = [
-    'xo', 'zu', 'ky', 'vle', 'nz', 'mra', 'xy',
-    'stu', 'vya', 'plo', 'ske', 'blu', 'twy',
     'jho', 'tsu', 'vlu', 'bya',
+    'stu', 'vya', 'plo', 'ske', 'blu', 'twy',
     'ghy', 'klo', 'zhi', 'fli', 'spu', 'dwe',
+    'xo', 'zu', 'ky', 'vle', 'nz', 'mra', 'xy',
     'fyo', 'twu', 'pyo', 'nyo', 'kwe', 'psu', 'vri'
 ]
 
@@ -130,13 +135,13 @@ class Cfg:
     loader: dict
     memory: dict
     md_file: str
+    lm_dir: Path
     log_dir: Path
     test_log: str
     train_log: str
     precision: str
     eval_dir: Path
     ckpt_dir: Path
-    model_dir: Path
     optimizer: dict
     log_interval: int
     remove_unused_columns: bool
@@ -158,7 +163,7 @@ class Cfg:
         default_config, config_key = config_mapping[mem_type]
         config = copy.deepcopy(default_config)
 
-        custom_config = self.memory[component][config_key]
+        custom_config = self.memory[component]['memory'][config_key]
         config.update(custom_config)
 
         return config
@@ -182,7 +187,7 @@ class Cfg:
     
     @property
     def lm_name(self):
-        return os.path.basename(self.model['lm']['path'])
+        return os.path.basename(self.lm_path)
     
     @property
     def lm_coef(self):
@@ -245,7 +250,7 @@ class Cfg:
     
     @property
     def frontend_mem_type(self):
-        return self.memory['frontend']['mem_type']
+        return self.memory['frontend']['memory']['type']
     
     @property
     def frontend_mem_config(self):
@@ -253,7 +258,7 @@ class Cfg:
     
     @property
     def frontend_update_memory(self):
-        return self.memory['frontend'].get('update_memory', True)
+        return self.memory['frontend']['memory'].get('update', True)
     
     @property
     def backend_vocab(self):
@@ -266,7 +271,7 @@ class Cfg:
     
     @property
     def backend_mem_type(self):
-        return self.memory['backend']['mem_type']
+        return self.memory['backend']['memory']['type']
     
     @property
     def backend_mem_config(self):
@@ -274,32 +279,32 @@ class Cfg:
     
     @property
     def backend_fusion_adapter(self):
-        return self.memory['backend']['fusion']['adapter']
+        return self.memory['backend']['strategy']['fusion']['adapter']
     
     @property
     def backend_anno_max_length(self):
-        return self.memory['backend']['annotation'].get('max_length', 3)
+        return self.memory['backend']['strategy']['annotation'].get('max_length', 3)
     
     @property
     def backend_max_annotations(self):
-        return self.memory['backend']['annotation'].get('max_annotations', -1)
+        return self.memory['backend']['strategy']['annotation'].get('max_annotations', -1)
     
     @property
     def backend_strategy(self):
-        return self.memory['backend'].get('strategy', 'hint')
+        return self.memory['backend']['strategy'].get('type', 'hint')
     
     @property
     def backend_hint_category(self):
-        return self.memory['backend']['hint']['category']
+        return self.memory['backend']['strategy']['hint']['category']
     
     @property
     def backend_max_hints(self):
-        return self.memory['backend']['hint'].get('max_hints', -1)
+        return self.memory['backend']['strategy']['hint'].get('max_hints', -1)
     
     @property
     def backend_special_tokens(self):
         if self.backend_strategy == 'annotation':
-            return self.memory['backend']['annotation'].get('words', 8)
+            return self.memory['backend']['strategy']['annotation'].get('words', 8)
         elif self.backend_strategy == 'hint':
             return len(VOCAB['hint'][self.backend_hint_category])
         else:
@@ -311,49 +316,49 @@ class Cfg:
     
     @property
     def backend_update_memory(self):
-        return self.memory['backend'].get('update_memory', True)
+        return self.memory['backend']['memory'].get('update', True)
     
     @property
     def backend_tune_special_token_embeddings(self):
         if self.backend_strategy == 'hint':
-            return self.memory['backend']['hint'].get('tune', False)
+            return self.memory['backend']['strategy']['hint'].get('tune', False)
         elif self.backend_strategy == 'annotation':
-            return self.memory['backend']['annotation'].get('tune', False)
+            return self.memory['backend']['strategy']['annotation'].get('tune', False)
         else:
             return False
         
     @property
     def backend_sentence_alignment(self):
         if self.backend_strategy == 'hint':
-            return self.memory['backend']['hint'].get('sentence_alignment')
+            return self.memory['backend']['strategy']['hint'].get('sentence_alignment')
     
     @property
     def backend_min_interval(self):
         if self.backend_strategy == 'hint':
-            return self.memory['backend']['hint'].get('min_interval', 8)
+            return self.memory['backend']['strategy']['hint'].get('min_interval', 8)
         elif self.backend_strategy == 'annotation':
-            return self.memory['backend']['annotation'].get('min_interval', 8)
+            return self.memory['backend']['strategy']['annotation'].get('min_interval', 8)
         else:
             return 1
     
     @property
     def backend_sep_logit_bias(self):
         if self.backend_strategy == 'hint':
-            return self.memory['backend']['hint'].get('sep_logit_bias', 0.0)
+            return self.memory['backend']['strategy']['hint'].get('sep_logit_bias', 0.0)
         else:
             return 0.0
     
     @property
     def backend_sep_temperature(self):
         if self.backend_strategy == 'hint':
-            return self.memory['backend']['hint'].get('sep_temperature', 1.0)
+            return self.memory['backend']['strategy']['hint'].get('sep_temperature', 1.0)
         else:
             return 1.0
     
     @property
     def backend_checkpoint(self):
         return self.ckpt['gradient']['mem']
-    
+
     @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
@@ -394,13 +399,13 @@ cfg = Cfg(
     model=MODEL,
     memory=MEMORY,
     loader=LOADER,
+    lm_dir=LM_DIR,
     md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
     eval_dir=EVAL_DIR,
     train_log=TRAIN_LOG,
-    model_dir=MODEL_DIR,
     precision=PRECISION,
     optimizer=OPTIMIZER,
     log_interval=LOG_INTERVAL,

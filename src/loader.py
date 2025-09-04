@@ -13,20 +13,21 @@ class MDLoader(Dataset):
     def __init__(self,
                  path: str,
                  name: Optional[str] = None,
-                 tokenizer_name: str = cfg.model_dir,
+                 split: str = 'train',
+                 tokenizer_name: str = cfg.lm_dir,
                  max_length: int = cfg.max_length,
                  min_length: int = cfg.min_length,
                  max_prompt_length: int = cfg.max_prompt_length,
                  max_target_length: int = cfg.max_target_length,
                  label_pad_token_id: int = -100,
                  is_encoder_decoder: bool = False,
-                 split: str = 'train',
                  truncation_mode: str = cfg.truncation_mode,
                  dataset: Optional[Union[Dataset, DatasetDict]] = None):
         """       
         Args:
             path: Path of the dataset to load.
             name: Configuration name for the dataset.
+            split: Predefined dataset split to load (e.g., 'train', 'test').
             tokenizer_name: Name or path of the pretrained tokenizer to use.
             max_length: Maximum total sequence length.
             min_length: Minimum sequence length to keep during filtering.
@@ -34,7 +35,6 @@ class MDLoader(Dataset):
             max_target_length: Maximum allowed length for the target sequence.
             label_pad_token_id: Token ID used for padding labels.
             is_encoder_decoder: Whether the model uses separate encoder-decoder architecture
-            split: Predefined dataset split to load (e.g., 'train', 'test').
             truncation_mode: Mode for truncating prompts.
             dataset: Preloaded dataset to use instead of loading from dataset_name.
         """

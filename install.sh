@@ -2,29 +2,36 @@
 set -euo pipefail
 
 PYTHON=${PYTHON:-python3}
-MODEL_DIR=${MODEL_DIR:-model}
+LM_DIR=${LM_DIR:-models/lm}
+
 OS=$(uname -s)
 ARCH=$(uname -m)
 
-readonly BOLD=$(tput bold)
-readonly RED=$(tput setaf 1)
-readonly YELLOW=$(tput setaf 3)
-readonly BLUE=$(tput setaf 4)
-readonly RESET=$(tput sgr0)
+readonly BOLD=$(tput bold 2>/dev/null || echo "")
+readonly RESET=$(tput sgr0 2>/dev/null || echo "")
+readonly RED=$(tput setaf 1 2>/dev/null || echo "")
+readonly BLUE=$(tput setaf 4 2>/dev/null || echo "")
+readonly YELLOW=$(tput setaf 3 2>/dev/null || echo "")
 
-log_info()  { echo -e "${BLUE}${BOLD}[INFO]${RESET} $1"; }
+log_info()  { echo -e "${BLUE}${BOLD}[INFO]${RESET} $1" >&1; }
 log_warn()  { echo -e "${YELLOW}${BOLD}[WARN]${RESET} $1" >&2; }
 log_error() { echo -e "${RED}${BOLD}[ERROR]${RESET} $1" >&2; exit 1; }
 
 usage() {
-    cat <<EOF
-Usage: $0 [OPTIONS]
-Options:
-  --conda         Install required conda packages
-  --model         Install model only (ignores other options)
-  --vllm          Enable installation of vLLM
-  --flash_attn    Enable installation of flash attion
-  -h, --help      Show this help message
+    cat << 'EOF'
+Usage: ./install.sh [OPTIONS]
+
+Install models or dependencies for the MD project.
+
+Model Options:
+  --model           Download the language model
+
+Dependency Options:
+  --conda           Install required conda packages
+  --vllm            Install vLLM (Linux only)
+  --flash-attn      Install flash-attn (Linux only)
+
+  -h, --help        Show this help message
 EOF
     exit 0
 }
@@ -37,79 +44,41 @@ check_commands() {
     fi
 }
 
-install_model_only() {
-    log_info "Installing model..."
-    if ! "$PYTHON" scripts/download.py --model; then
-        log_error "Model installation failed"
+install_lm() {
+    log_info "Downloading language model..."
+    if ! "$PYTHON" scripts/download.py --lm; then
+        log_error "Language model download failed"
     fi
-
-    [ -d "$MODEL_DIR" ] || log_error "Model directory verification failed"
+    if [[ ! -d "$LM_DIR" ]]; then
+        log_error "Language model directory '$LM_DIR' not found after download"
+    fi
 }
 
-ARGS=()
-MODE=""
-
-ENABLE_VLLM=false
-ENABLE_FLASH_ATTN=false
-
-INSTALL_VLLM=false
-INSTALL_CONDA=false
-INSTALL_FLASH_ATTN=false
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -h|--help) usage ;;
-        --conda) INSTALL_CONDA=true; ARGS+=("$1"); shift ;;
-        --model) MODE="model"; shift ;;
-        --vllm) ENABLE_VLLM=true; ARGS+=("$1"); shift ;;
-        --flash_attn) ENABLE_FLASH_ATTN=true; ARGS+=("$1"); shift ;;
-        *) log_error "Unknown option: $1" ;;
+install_conda_packages() {
+    local packages=()
+    case "$OS" in
+        Linux)
+            packages=(gxx_linux-64 cudatoolkit-dev libaio cmake sentencepiece)
+            ;;
+        Darwin)
+            packages=(cmake sentencepiece)
+            ;;
+        *)
+            log_error "Unsupported OS: $OS"
+            ;;
     esac
-done
 
-check_commands
-
-if [[ "$ENABLE_VLLM" == true && "$OS" == "Linux" ]]; then
-    INSTALL_VLLM=true
-elif [[ "$ENABLE_VLLM" == true && "$OS" != "Linux" ]]; then
-    log_warn "vLLM can only be installed on Linux. Ignoring --vllm."
-fi
-
-if [[ "$ENABLE_FLASH_ATTN" == true && "$OS" == "Linux" ]]; then
-    INSTALL_FLASH_ATTN=true
-elif [[ "$ENABLE_FLASH_ATTN" == true && "$OS" != "Linux" ]]; then
-    log_warn "flash-attn can only be installed on Linux. Ignoring --flash_attn."
-fi
-
-case "$OS" in
-    Linux)
-        CONDA_PACKAGES=(gxx_linux-64 cudatoolkit-dev libaio cmake sentencepiece)
-        DEEPSPEED_SUPPORTED=true
-        ;;
-    Darwin)
-        CONDA_PACKAGES=(cmake sentencepiece)
-        DEEPSPEED_SUPPORTED=false
-        ;;
-    *)
-        log_error "Unsupported platform: $OS"
-        ;;
-esac
-
-if [[ "$MODE" == "model" ]]; then
-    install_model_only
-else
-    log_info "Platform: $OS ($ARCH)"
-
-    if [[ "$INSTALL_CONDA" == true && ${#CONDA_PACKAGES[@]} -gt 0 ]]; then
-        log_info "Installing conda packages..."
-        conda install -y -c conda-forge "${CONDA_PACKAGES[@]}" || \
-            log_error "Conda installation failed"
+    if [[ ${#packages[@]} -gt 0 ]]; then
+        log_info "Installing conda packages: ${packages[*]}"
+        conda install -y -c conda-forge "${packages[@]}" || \
+            log_error "Conda package installation failed"
     else
-        log_warn "Skipping conda packages"
+        log_warn "No conda packages to install for $OS"
     fi
+}
 
-    log_info "Installing Python dependencies..."
-    PYTHON_PACKAGES=(
+install_python_packages() {
+    local py_packages=(
         torch torchvision torchaudio
         transformers sentencepiece accelerate evaluate
         tensordict einops einx lightning
@@ -118,31 +87,83 @@ else
         trl peft assoc_scan tensorboard wandb timm
     )
 
-    pip install --no-cache-dir "${PYTHON_PACKAGES[@]}" || \
-        log_error "Python package installation failed"
+    log_info "Installing core Python dependencies..."
+    pip install --no-cache-dir "${py_packages[@]}" || \
+        log_error "Failed to install Python packages"
 
     if [[ "$INSTALL_VLLM" == true ]]; then
-        log_info "Installing vLLM..."
-        pip install vllm || log_warn "vLLM installation failed"
-    else
-        log_warn "Skipping vLLM"
+        if [[ "$OS" == "Linux" ]]; then
+            log_info "Installing vLLM..."
+            pip install vllm || log_warn "vLLM installation failed"
+        else
+            log_warn "vLLM is only supported on Linux. Skipping."
+        fi
     fi
 
     if [[ "$INSTALL_FLASH_ATTN" == true ]]; then
-        log_info "Installing flash-attn..."
-        pip install flash-attn || log_warn "flash-attn installation failed"
-    else
-        log_warn "Skipping flash-attn"
+        if [[ "$OS" == "Linux" ]]; then
+            log_info "Installing flash-attn..."
+            pip install flash-attn --no-build-isolation || log_warn "flash-attn installation failed"
+        else
+            log_warn "flash-attn is only supported on Linux. Skipping."
+        fi
     fi
 
-    if [[ "$DEEPSPEED_SUPPORTED" == true && "$ARCH" == "x86_64" ]]; then
+    if [[ "$OS" == "Linux" && "$ARCH" == "x86_64" ]]; then
         log_info "Installing DeepSpeed..."
         pip install --upgrade deepspeed || log_warn "DeepSpeed installation failed"
+    elif [[ "$OS" == "Linux" ]]; then
+        log_warn "DeepSpeed is only supported on x86_64. Skipping."
     else
-        log_warn "Skipping DeepSpeed"
+        log_warn "DeepSpeed is not supported on $OS. Skipping."
+    fi
+}
+
+INSTALL_LM=false
+INSTALL_VLLM=false
+INSTALL_CONDA=false
+INSTALL_FLASH_ATTN=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            usage
+            ;;
+        --model)
+            INSTALL_LM=true
+            ;;
+        --conda)
+            INSTALL_CONDA=true
+            ;;
+        --vllm)
+            INSTALL_VLLM=true
+            ;;
+        --flash-attn)
+            INSTALL_FLASH_ATTN=true
+            ;;
+        *)
+            log_error "Unknown option: $1"
+            ;;
+    esac
+    shift
+done
+
+check_commands
+
+if [[ "$INSTALL_LM" == true ]]; then
+    install_lm
+fi
+
+if [[ "$INSTALL_CONDA" == true || "$INSTALL_VLLM" == true || "$INSTALL_FLASH_ATTN"  == true || "$INSTALL_LM" == false ]]; then
+    log_info "Installing dependencies..."
+
+    if [[ "$INSTALL_CONDA" == true ]]; then
+        install_conda_packages
     fi
 
-    if [[ ! -d "$MODEL_DIR" ]]; then
-        log_warn "Model directory not found. Run with --model to install it."
+    install_python_packages
+
+    if [[ ! -d "$LM_DIR" ]]; then
+        install_lm
     fi
 fi

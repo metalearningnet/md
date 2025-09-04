@@ -10,8 +10,8 @@ from huggingface_hub import model_info
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
-    cfg, info, warn, get_device, load_peft_config, get_special_token_by_index,
-    LogitsDecoder, SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID
+    SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID,
+    LogitsDecoder, get_device, load_peft_config, get_special_token_by_index, info, warn, cfg
 )
 
 class SafeEmbeddingWrapper(nn.Module):
@@ -76,8 +76,8 @@ class MD(nn.Module):
 
         self.dist = dist
         self.device = get_device()
+        self.lm_dir = config.lm_dir
         self.use_cache = config.use_cache
-        self.model_dir = config.model_dir
         self.max_length = config.max_length
         self.has_mem = config.mem_coef != 0.0
         self.has_frontend = config.has_frontend
@@ -135,6 +135,7 @@ class MD(nn.Module):
         self.backend_max_hints = config.backend_max_hints
         self.backend_checkpoint = config.backend_checkpoint
         self.backend_mem_config = config.backend_mem_config
+        self.backend_gen_sep = self.backend_enable_annotation
         self.backend_min_interval = config.backend_min_interval
         self.backend_skill_config = config.backend_skill_config
         self.backend_max_sep_bias = config.backend_sep_logit_bias
@@ -148,9 +149,13 @@ class MD(nn.Module):
         self.backend_sentence_alignment = config.backend_sentence_alignment
         self.backend_anno = self.backend_enable_hint or self.backend_enable_annotation
         self.backend_tune_special_token_embeddings = config.backend_tune_special_token_embeddings
-        self.backend_max_annos = self.backend_max_annotations if self.backend_enable_annotation else self.backend_max_hints
+        
+        if self.backend_enable_annotation:
+            self.backend_max_annos = self.backend_max_annotations
+        else:
+            self.backend_max_annos = self.backend_max_hints
 
-        assert self.backend_strategy in  ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.backend_strategy}"
+        assert self.backend_strategy in ['fusion', 'annotation', 'hint'], f"Invalid skill integration strategy: {self.backend_strategy}"
         
         if self.backend_strategy in ['hint', 'annotation']:
             self.backend_action_dim = self.backend_special_tokens + 1
@@ -250,7 +255,10 @@ class MD(nn.Module):
         self.lm_checkpoint = config.lm_checkpoint
         self.lm_temperature = config.lm_temperature
     
-        lm_config = AutoConfig.from_pretrained(self.model_dir)
+        if not os.path.exists(self.lm_dir):
+            raise FileNotFoundError(f"Language model path {self.lm_dir} does not exist")
+        
+        lm_config = AutoConfig.from_pretrained(self.lm_dir)
         lm_config.use_cache = self.use_cache
 
         info = model_info(self.lm_path)
@@ -259,7 +267,7 @@ class MD(nn.Module):
             raise ValueError(f"Expected model type {model_type}, got {lm_config.model_type}")
         
         model = AutoModelForCausalLM.from_pretrained(
-            self.model_dir,
+            self.lm_dir,
             config=lm_config,
             trust_remote_code=True,
             attn_implementation=self.attn
@@ -320,7 +328,7 @@ class MD(nn.Module):
         else:
             special_tokens = []
         
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
         
         if special_tokens:
             self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
@@ -495,7 +503,11 @@ class MD(nn.Module):
             special_embeddings = self.embedding_layer(special_ids)
             sep_embed = self.embedding_layer(self.token_sep_id_tensor) if self.backend_enable_annotation else None
         
-        max_length = self.backend_anno_max_length + 1 if self.backend_enable_annotation else 1
+        if self.backend_enable_annotation:
+            max_length = self.backend_anno_max_length + 1
+        else:
+            max_length = 1
+        
         for step_idx in range(max_length):
             with torch.autocast(self.device.type, enabled=False):
                 states = self.mem_state_proj(current_embeds)
@@ -508,16 +520,17 @@ class MD(nn.Module):
             if return_loss:
                 mem_loss = self.mem_backend.compute_losses(skill_output)['total_loss']
                 loss_list.append(mem_loss)
+            
             step_logits = skill_output['action_logits'][:, -1, :]
 
-            # Prevent SEP token sampling in non-annotation mode
-            if not self.backend_enable_annotation:
+            # Prevent SEP token sampling
+            if not self.backend_gen_sep:
                 step_logits = step_logits.clone()
                 step_logits[:, self.mem_backend.action_dim - 1] = -float('inf')
             
             anno_indices = self._get_anno_next_token(step_logits)
             
-            if step_idx == max_length - 1 and self.backend_enable_annotation:
+            if step_idx == max_length - 1 and self.backend_gen_sep:
                 force_sep_mask = (sep_count == 0)
                 anno_indices = torch.where(
                     force_sep_mask,
@@ -526,13 +539,13 @@ class MD(nn.Module):
                 )
             
             is_sep = (anno_indices == self.mem_backend.action_dim - 1)
-            if self.backend_enable_annotation:
+            if self.backend_gen_sep:
                 sep_count += is_sep.int()
             
             safe_indices = anno_indices.masked_fill(is_sep, 0)
             non_sep_embeds = special_embeddings[safe_indices]
 
-            if self.backend_enable_annotation:
+            if self.backend_gen_sep:
                 next_embeds = torch.where(
                     is_sep.unsqueeze(-1),
                     sep_embed,
@@ -542,7 +555,7 @@ class MD(nn.Module):
                 next_embeds = non_sep_embeds
             
             if return_ids:
-                if self.backend_enable_annotation:
+                if self.backend_gen_sep:
                     non_sep_ids = special_ids[safe_indices]
                     next_ids = torch.where(
                         is_sep,
@@ -555,7 +568,7 @@ class MD(nn.Module):
             
             annotation_embeds.append(next_embeds.unsqueeze(1))
             
-            if self.backend_enable_annotation and (sep_count >= 1).all():
+            if self.backend_gen_sep and (sep_count >= 1).all():
                 break
             
             current_embeds = torch.cat([current_embeds, next_embeds.unsqueeze(1)], dim=1)
@@ -1108,7 +1121,7 @@ class MD(nn.Module):
         
         if self.has_frontend:
             trainable_params.extend(self.mem_frontend.parameters())
-        
+
         trainable_params.extend(
             param for param in self.lm.parameters() 
             if param.requires_grad

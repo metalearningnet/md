@@ -23,10 +23,21 @@ MD operates as an upstream processor that concatenates with existing LLMs:
 
 ### Installation
 
+#### Install dependencies
 ```bash
 git clone https://github.com/metalearningnet/md.git
 cd md
 ./install.sh
+```
+
+#### Install language model
+```bash
+./install.sh --model
+```
+
+#### Install vllm (required for data preparation)
+```bash
+./install.sh --vllm
 ```
 
 ### Basic Operations
