@@ -37,11 +37,12 @@ ${BOLD}Options:${RESET}
   --evaluate             Start the evaluation process
   --prepare              Prepare the training data
   --generate             Generate evaluation results
+  
   -h, --help             Show this help message
 
 ${BOLD}Examples:${RESET}
-  $0 --train --samples 1024 --epochs 2 --batch_size 4
-  $0 --generate --samples 16
+  $0 --train --examples 1024 --epochs 2 --batch-size 4
+  $0 --generate --examples 16
   $0 --unittest md
   $0 --prepare
 EOF
@@ -76,7 +77,7 @@ run_unittests() {
             fi
             ;;
         *)
-            log_error "Invalid test category: '${category}'. Valid options: skill|md|loader|ckpt"
+            log_error "Invalid test category: '${category}'. Valid options: skill|md|ckpt|loader"
             show_help
             ;;
     esac

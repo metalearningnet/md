@@ -21,7 +21,7 @@ def evaluate(config: dict):
         - name: Config name.
         - split: Dataset split name (e.g., 'test').
         - batch_size: Evaluation batch size.
-        - samples: Number of samples.
+        - examples: Number of examples.
         - precision: Numerical Precision.
         - ckpt_path: Checkpoint path.
         - dist: Whether to enable distributed evaluation.
@@ -35,7 +35,7 @@ def evaluate(config: dict):
         config_name = config.get('name')
         split = config.get('split', 'test')
         batch_size = config.get('batch_size', 1)
-        num_samples = config.get('samples', -1)
+        num_examples = config.get('examples', -1)
         precision = config.get('precision', 'bf16-mixed')
         ckpt_path = config.get('ckpt_path')
         dist = config.get('dist', False)
@@ -83,7 +83,7 @@ def evaluate(config: dict):
 
         test_loader = loader.get_dataloader(batch_size=batch_size, shuffle=False)
         test_loader = fabric.setup_dataloaders(test_loader, use_distributed_sampler=True)
-        test_metrics = md_validate(model, test_loader, fabric, num_samples=num_samples, log_dir=log_dir, log_interval=log_interval)
+        test_metrics = md_validate(model, test_loader, fabric, num_examples=num_examples, log_dir=log_dir, log_interval=log_interval)
 
         print("\nEvaluation Results:")
         for k, v in test_metrics.items():
@@ -102,15 +102,15 @@ def main():
     parser.add_argument("--path", type=str, default=default_dataset_path,
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
-                        help="Dataset name")
+                        help="Config name")
     parser.add_argument("--split", type=str, default="test",
                         help="Dataset split name")
-    parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
+    parser.add_argument("--ckpt-path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
-    parser.add_argument("--batch_size", type=int, default=1,
+    parser.add_argument("--batch-size", type=int, default=1,
                         help="Evaluation batch size")
-    parser.add_argument("--samples", type=int, default=-1,
-                        help="Number of evaluation samples")
+    parser.add_argument("--examples", type=int, default=-1,
+                        help="Number of evaluation examples")
 
     # Distributed evaluation configuration
     parser.add_argument("--addr", type=str, default=None,
@@ -125,9 +125,9 @@ def main():
                         help="Enable distributed evaluation")
     parser.add_argument("--log", action="store_true", default=cfg.log,
                         help="Whether to enable logging")
-    parser.add_argument("--log_dir", type=str, default=cfg.test_log,
+    parser.add_argument("--log-dir", type=str, default=cfg.test_log,
                         help="Directory where logs should be saved")
-    parser.add_argument("--log_interval", type=int, default=100,
+    parser.add_argument("--log-interval", type=int, default=100,
                         help="Interval at which to update and write logs")
 
     args = parser.parse_args()
@@ -140,7 +140,7 @@ def main():
         'name': args.name,
         'split': args.split,
         'batch_size': args.batch_size,
-        'samples': args.samples,
+        'examples': args.examples,
         'precision': cfg.precision,
         'ckpt_path': args.ckpt_path,
         'dist': args.dist,

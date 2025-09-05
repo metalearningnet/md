@@ -74,9 +74,9 @@ def generate(config: dict):
     """
     config:
         - path: Dataset path.
-        - name: Dataset name.
+        - name: Config name.
         - ckpt: Checkpoint path.
-        - samples: Number of samples.
+        - examples: Number of examples.
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - generator: LLM name.
         - output_file: Output file path.
@@ -86,7 +86,7 @@ def generate(config: dict):
         dataset_path = config['path']
         dataset_name = config.get('name')
         ckpt_path = config.get('ckpt')
-        samples = config.get('samples', -1)
+        examples = config.get('examples', -1)
         fabric_config = config['fabric_config']
         generator = config['generator']
         output_file = config['output_file']
@@ -109,13 +109,13 @@ def generate(config: dict):
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)
 
-        total_samples = len(eval_set)
-        if samples != -1:
-            total_samples = min(samples, total_samples)
+        total_examples = len(eval_set)
+        if examples != -1:
+            total_examples = min(examples, total_examples)
 
         progress_bar = tqdm(
-            eval_set.head(total_samples).iterrows(),
-            total=total_samples,
+            eval_set.head(total_examples).iterrows(),
+            total=total_examples,
             desc="Generating responses"
         )
 
@@ -150,9 +150,9 @@ def main():
     parser.add_argument("--path", type=str,
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
-                        help="Dataset name")
-    parser.add_argument("--samples", type=int, default=-1,
-                        help="Number of samples to generate responses for")
+                        help="Config name")
+    parser.add_argument("--examples", type=int, default=-1,
+                        help="Number of examples to generate responses for")
     parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--out", type=str,
@@ -183,7 +183,7 @@ def main():
         'path': args.path,
         'name': args.name,
         'ckpt': args.ckpt,
-        'samples': args.samples,
+        'examples': args.examples,
         'output_file': args.out, 
         'generator': args.generator,
         'fabric_config': fabric_config,

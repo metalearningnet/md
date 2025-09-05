@@ -222,7 +222,7 @@ class Cfg:
         return self.model.get('mem_coef', 0.2)
     
     @property
-    def mem_info(self):
+    def strategy_info(self):
         backend_strategy = self.backend_strategy
         if backend_strategy == 'hint':
             backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
@@ -813,7 +813,7 @@ def md_train(
     loader,
     optimizer,
     fabric,
-    num_samples=-1,
+    num_examples=-1,
     log_dir=None,
     log_interval=1,
     trainer=None,
@@ -831,8 +831,8 @@ def md_train(
 
     writer = SummaryWriter(log_dir) if log_dir else None
     
-    if num_samples > 0:
-        max_steps = min(num_samples, len(loader))
+    if num_examples > 0:
+        max_steps = min(num_examples, len(loader))
         loader_iter = iter(islice(loader, max_steps))
     else:
         max_steps = len(loader)
@@ -938,7 +938,7 @@ def md_validate(
     model, 
     loader,
     fabric,
-    num_samples=-1,
+    num_examples=-1,
     log_dir=None,
     log_interval=1,
     trainer=None,
@@ -959,8 +959,8 @@ def md_validate(
 
     writer = SummaryWriter(log_dir) if log_dir else None
     
-    if num_samples > 0:
-        max_steps = min(num_samples, len(loader))
+    if num_examples > 0:
+        max_steps = min(num_examples, len(loader))
         loader_iter = iter(islice(loader, max_steps))
     else:
         max_steps = len(loader)
@@ -1036,11 +1036,11 @@ def md_validate(
 
     if trainer is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-        gathered_samples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
-        if fabric.is_global_zero and gathered_samples > 0:
-            avg_loss = gathered_loss / gathered_samples
+        gathered_examples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
+        if fabric.is_global_zero and gathered_examples > 0:
+            avg_loss = gathered_loss / gathered_examples
             metrics['avg_loss'] = avg_loss
-            print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
+            print(f"Average Loss: {avg_loss:.4f} | Examples: {gathered_examples}")
 
         if metrics['steps'] > 0:
             metrics['total_loss'] /= metrics['steps']

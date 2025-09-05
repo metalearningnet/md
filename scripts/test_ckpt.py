@@ -12,7 +12,7 @@ sys.path.append(str(_src_dir))
 from utils import default_dataset_path, get_fabric_config, cfg
 
 NR_EPOCHS = 1
-NR_SAMPLES = 1
+NR_EXAMPLES = 1
 
 class TestCkpt(unittest.TestCase):
     def setUp(self):
@@ -20,7 +20,7 @@ class TestCkpt(unittest.TestCase):
             'path': default_dataset_path,
             'split': 'train',
             'epochs': NR_EPOCHS,
-            'samples': NR_SAMPLES,
+            'examples': NR_EXAMPLES,
             'ckpt_path': cfg.ckpt_path,
             'batch_size': 1,
             'fabric_config': get_fabric_config()
@@ -30,7 +30,7 @@ class TestCkpt(unittest.TestCase):
             'path': default_dataset_path,
             'split': 'test',
             'model_path': cfg.ckpt_path,
-            'samples': 1,
+            'examples': NR_EXAMPLES,
             'batch_size': 1,
             'fabric_config': get_fabric_config()
         }

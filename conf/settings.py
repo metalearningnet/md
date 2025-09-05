@@ -3,10 +3,10 @@ MODEL = {
     "lm": {
         "path": "Qwen/Qwen3-0.6B",                          # Pretrained model identifier from HuggingFace Hub
         "temperature": 0.7,                                 # Sampling temperature (0.0: deterministic, 1.0: creative)
-        "freeze": True,                                     # Freeze base LM weights during training
         "max_length": 1280,                                 # Maximum total sequence length (prompt + response)
         "max_target_length": 1024,                          # Maximum generated output length in tokens
-        "max_prompt_length": 512                            # Maximum input prompt length
+        "max_prompt_length": 512,                           # Maximum input prompt length
+        "freeze": True                                      # Freeze base LM weights during training
     },
 
     "lm_coef": 0.8,                                         # Language modeling loss weight
@@ -89,10 +89,10 @@ MEMORY = {
                 "category": "minimal",                      # Hint complexity level: 'minimal' | 'standard' | 'enhanced' | 'advanced'
                 "max_hints": 64,                            # Maximum hints per response (-1 for unlimited)
                 "min_interval": 8,                          # Minimum tokens between hints
-                "tune": True,                               # Fine-tune hint embeddings
                 "sentence_alignment": True,                 # Trigger special token generation at sentence boundaries.
                 "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the [SEP] token logits that trigger hint generation
-                "sep_temperature": 0.7                      # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
+                "sep_temperature": 0.7,                     # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
+                "tune": True                                # Fine-tune hint embeddings
             }
         },
 

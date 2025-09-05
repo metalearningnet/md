@@ -481,7 +481,7 @@ class SimPOTrainer(Trainer):
             chosen_logits = all_logits[:len_chosen]
             rejected_logits = all_logits[len_chosen:]
             chosen_labels = concatenated_batch["concatenated_labels"][:len_chosen]
-            losses = self.model.skill_memory.compute_losses(model_out)['total_loss']
+            losses = self.model.mem.compute_losses(model_out)['total_loss']
 
             return (chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_labels, losses)
 

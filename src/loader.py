@@ -200,7 +200,7 @@ class MDLoader(Dataset):
             generator=torch.Generator().manual_seed(seed)
         )
         num_workers = self.get_workers()
-        info(f'DataLooader (train_size: {len(self) - val_size}, val_size: {val_size}, batch_size: {batch_size}, seed: {seed})')
+        info(f'DataLooader (batch_size: {batch_size}, seed: {seed}, train_size: {len(self) - val_size}, val_size: {val_size})')
         return (
             DataLoader(
                 train_set,

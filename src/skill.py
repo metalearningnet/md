@@ -56,7 +56,7 @@ class SkillMemory(nn.Module):
                  mem_config: dict = dict()):
         super().__init__()
 
-        info(f"Skill memory (mem_type: {mem_type}, state_dim: {state_dim}, action_dim: {action_dim}, hidden_dim: {hidden_dim})")
+        info(f"Skill memory (mem: {mem_type}, state_dim: {state_dim}, action_dim: {action_dim}, hidden_dim: {hidden_dim})")
         
         self.mem_type = mem_type
         self.state_dim = state_dim
