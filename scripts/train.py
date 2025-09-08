@@ -26,7 +26,7 @@ def train(config: dict):
         - seed: Random seed.
         - epochs: Number of epochs.
         - batch_size: Training batch size.
-        - samples: Number of samples.
+        - examples: Number of examples.
         - lr: Learning rate.
         - eps: Numerical stability term for AdamW optimizer.
         - betas: Betas for AdamW optimizer.
@@ -49,7 +49,7 @@ def train(config: dict):
         seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
         batch_size = config.get('batch_size', 1)
-        num_samples = config.get('samples', -1)
+        num_examples = config.get('examples', -1)
         lr = config.get('lr', 3e-5)
         eps = config.get('eps', 1e-6)
         betas = config.get('betas', (0.9, 0.95))
@@ -64,7 +64,7 @@ def train(config: dict):
         log_dir = Path(config.get('log_dir', ''))
         log_interval = config.get('log_interval', 1)
         
-        val_samples = max(int(num_samples * val_split), 1) if num_samples != -1 else -1
+        val_examples = max(int(num_examples * val_split), 1) if num_examples != -1 else -1
         
         if 'strategy' not in fabric_config:
             strategy = get_strategy(precision)
@@ -94,15 +94,12 @@ def train(config: dict):
             betas=betas,
             weight_decay=weight_decay
         )
-        model, optimizer = fabric.setup(model, optimizer)
+        model, _ = fabric.setup(model, optimizer)
         
         if model.has_anno:
             model.mark_forward_method('annotate')
         
-        if cfg.sft:
-            info(f"Training process (dataset: {dataset_path}, sft: enabled)")
-        else:
-            info(f"Training process (dataset: {dataset_path})")
+        info(f"Training process (dataset: {dataset_path})")
         
         loader = MDLoader(
             path=dataset_path,
@@ -134,8 +131,8 @@ def train(config: dict):
             log_dir = None
             log_interval = 0
 
-        if num_samples > 0:
-            steps = min(num_samples, len(train_loader))
+        if num_examples > 0:
+            steps = min(num_examples, len(train_loader))
         else:
             steps = len(train_loader)
         total_steps = num_epochs * steps
@@ -146,9 +143,8 @@ def train(config: dict):
             train_metrics = md_train(
                 model=model,
                 loader=train_loader,
-                optimizer=optimizer,
                 fabric=fabric,
-                num_samples=num_samples,
+                num_examples=num_examples,
                 log_dir=log_dir,
                 log_interval=log_interval,
                 trainer=trainer
@@ -163,7 +159,7 @@ def train(config: dict):
                     torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
                     print(f"Saved epoch {epoch+1} checkpoint")
             
-            val_metrics = md_validate(model, val_loader, fabric, num_samples=val_samples, trainer=trainer)
+            val_metrics = md_validate(model, val_loader, fabric, num_examples=val_examples, trainer=trainer)
             
             if fabric.is_global_zero:
                 log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
@@ -187,34 +183,34 @@ def main():
     parser.add_argument("--path", type=str, default=default_dataset_path,
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
-                        help="Dataset name")
+                        help="Config name")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
     parser.add_argument("--split", type=str, default="train",
                         help="Predefined dataset split")
-    parser.add_argument("--val_split", type=float, default=0.1,
+    parser.add_argument("--val-split", type=float, default=0.1,
                         help="Validation split ratio")
 
     # Training configuration
     parser.add_argument("--epochs", type=int, default=1,
                         help="Number of training epochs")
-    parser.add_argument("--samples", type=int, default=-1,
-                        help="Number of training samples")
-    parser.add_argument("--batch_size", type=int, default=1,
+    parser.add_argument("--examples", type=int, default=-1,
+                        help="Number of training examples")
+    parser.add_argument("--batch-size", type=int, default=1,
                         help="Training batch size")
 
     # System configuration
-    parser.add_argument("--ckpt_path", type=str, default=cfg.ckpt_path,
+    parser.add_argument("--ckpt-path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
-    parser.add_argument("--save_interval", type=int, default=1,
+    parser.add_argument("--save-interval", type=int, default=1,
                         help="Checkpoint saving frequency")
     parser.add_argument("--restore", action="store_true", default=False,
                         help="Restore the model from the provided checkpoint")
     parser.add_argument("--log", action="store_true", default=cfg.log,
                         help="Whether to enable logging")
-    parser.add_argument("--log_dir", type=str, default=cfg.train_log,
+    parser.add_argument("--log-dir", type=str, default=cfg.train_log,
                         help="Directory where logs should be saved")
-    parser.add_argument("--log_interval", type=int, default=100,
+    parser.add_argument("--log-interval", type=int, default=100,
                         help="Interval at which to update and write logs")
     
     # Distributed training configuration
@@ -238,7 +234,7 @@ def main():
         
         'epochs': args.epochs,
         'batch_size': args.batch_size,
-        'samples': args.samples,
+        'examples': args.examples,
 
         'lr': cfg.lr,
         'eps': cfg.eps,

@@ -222,7 +222,7 @@ class Cfg:
         return self.model.get('mem_coef', 0.2)
     
     @property
-    def mem_info(self):
+    def strategy_info(self):
         backend_strategy = self.backend_strategy
         if backend_strategy == 'hint':
             backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
@@ -358,7 +358,7 @@ class Cfg:
     @property
     def backend_checkpoint(self):
         return self.ckpt['gradient']['mem']
-
+    
     @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
@@ -808,12 +808,79 @@ def get_initial_prompt():
         if cfg.backend_strategy == 'hint':
             return generate_messages('hint', cfg.backend_vocab[cfg.backend_hint_category])
 
+def get_loss(
+    model,
+    fabric,
+    batch,
+    trainer=None,
+    label_pad_token_id=LABEL_PAD_TOKEN_ID
+):
+    is_encoder_decoder = model.config.is_encoder_decoder
+    train_eval = 'train' if model.training else 'eval'
+    if SHOW_OUTPUT:
+        logits_decoder = LogitsDecoder(model.config, model.tokenizer, model.temperature)
+    
+    if trainer:
+        loss, train_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval=train_eval)
+        trainer.store_metrics(metrics=train_metrics, train_eval=train_eval)
+    else:
+        labels = batch['labels']
+        input_ids = batch['input_ids']
+        attention_mask = batch['attention_mask']
+
+        if SHOW_INPUT and fabric.is_global_zero:
+            for i in range(min(2, len(input_ids))):
+                show_input(f"Batch {i}: {model.tokenizer.decode(input_ids[i])}")
+
+        if SHOW_LABELS and fabric.is_global_zero:
+            for i in range(min(2, len(labels))):
+                valid_ids = [tid for tid in labels[i] if tid != label_pad_token_id]
+                show_labels(f"Batch {i}: {model.tokenizer.decode(valid_ids)}")
+        
+        if model.has_anno:
+            outputs = model.annotate(input_ids=input_ids, input_labels=labels, return_loss=True)
+        else:
+            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+        
+        output_logits = outputs['logits']
+        
+        if SHOW_OUTPUT and fabric.is_global_zero:
+            for i in range(min(2, len(output_logits))):
+                output_ids = logits_decoder.decode_logits(output_logits[i])
+                show_output(f"Batch {i}: {model.tokenizer.decode(output_ids)}")
+        
+        if model.training and not output_logits.requires_grad:
+            raise RuntimeError("Model outputs are not tracking gradients")
+
+        lm_loss = get_lm_loss(
+            logits=output_logits,
+            labels=labels,
+            ignore_index=label_pad_token_id,
+            is_encoder_decoder=is_encoder_decoder
+        )
+
+        if model.mem_coef:
+            if model.has_anno:
+                mem_loss = outputs['losses']
+            else:
+                mem_loss = model.mem.compute_losses(outputs)['total_loss']
+            loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
+        else:
+            loss = lm_loss
+
+        if model.training and not loss.requires_grad:
+            raise RuntimeError("Loss tensor has no gradient connection")
+
+    if model.training:
+        fabric.backward(loss)
+    
+    return loss
+
 def md_train(
     model,
     loader,
-    optimizer,
     fabric,
-    num_samples=-1,
+    num_examples=-1,
     log_dir=None,
     log_interval=1,
     trainer=None,
@@ -829,10 +896,10 @@ def md_train(
         'total_loss': 0.0
     }
 
-    writer = SummaryWriter(log_dir) if log_dir else None
+    summary_writer = SummaryWriter(log_dir) if log_dir else None
     
-    if num_samples > 0:
-        max_steps = min(num_samples, len(loader))
+    if num_examples > 0:
+        max_steps = min(num_examples, len(loader))
         loader_iter = iter(islice(loader, max_steps))
     else:
         max_steps = len(loader)
@@ -846,81 +913,18 @@ def md_train(
         total=max_steps
     )
     
-    is_encoder_decoder = model.config.is_encoder_decoder
-
-    if SHOW_OUTPUT:
-        logits_decoder = LogitsDecoder(model.config, model.tokenizer, model.temperature)
-    
     for batch in pbar:
         model.step()
-        if trainer:
-            loss, train_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='train')
-            trainer.store_metrics(metrics=train_metrics, train_eval='train')
-        else:
-            labels = batch['labels']
-            input_ids = batch['input_ids']
-            attention_mask = batch['attention_mask']
-
-            if SHOW_INPUT and fabric.is_global_zero:
-                for i in range(min(2, len(input_ids))):
-                    show_input(f"Batch {i}: {model.tokenizer.decode(input_ids[i])}")
-
-            if SHOW_LABELS and fabric.is_global_zero:
-                for i in range(min(2, len(labels))):
-                    valid_ids = [tid for tid in labels[i] if tid != label_pad_token_id]
-                    show_labels(f"Batch {i}: {model.tokenizer.decode(valid_ids)}")
-            
-            if model.has_anno:
-                outputs = model.annotate(input_ids=input_ids, input_labels=labels, return_loss=True)
-            else:
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            
-            output_logits = outputs['logits']
-            
-            if SHOW_OUTPUT and fabric.is_global_zero:
-                for i in range(min(2, len(output_logits))):
-                    output_ids = logits_decoder.decode_logits(output_logits[i])
-                    show_output(f"Batch {i}: {model.tokenizer.decode(output_ids)}")
-            
-            if not output_logits.requires_grad:
-                raise RuntimeError("Model outputs are not tracking gradients")
-    
-            lm_loss = get_lm_loss(
-                logits=output_logits,
-                labels=labels,
-                ignore_index=label_pad_token_id,
-                is_encoder_decoder=is_encoder_decoder
-            )
-
-            if model.mem_coef:
-                if model.has_anno:
-                    mem_loss = outputs['losses']
-                else:
-                    mem_loss = model.skill_memory.compute_losses(outputs)['total_loss']
-                loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
-            else:
-                loss = lm_loss
-
-            if not loss.requires_grad:
-                raise RuntimeError("Loss tensor has no gradient connection")
-
-        if optimizer:
-            optimizer.zero_grad()
-            fabric.backward(loss)
-            optimizer.step()
-        else:
-            fabric.backward(loss)
+        loss = get_loss(model, fabric, batch, trainer, label_pad_token_id)
         
         metrics['steps'] += 1
         metrics['total_loss'] += loss.item()
         
-        if writer:
+        if summary_writer:
             sample_progress = int((metrics['steps'] / max_steps) * 100)
             if sample_progress % log_interval == 0:
-                writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
+                summary_writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
     
-    pbar.close()
-
     if trainer is None:
         if metrics['steps'] > 0:
             metrics['total_loss'] /= metrics['steps']
@@ -929,8 +933,10 @@ def md_train(
         for key, val in train_metrics.items():
             metrics[key] = torch.tensor(val).mean().item()
 
-    if writer:
-        writer.close()
+    pbar.close()
+
+    if summary_writer:
+        summary_writer.close()
 
     return metrics
 
@@ -938,7 +944,7 @@ def md_validate(
     model, 
     loader,
     fabric,
-    num_samples=-1,
+    num_examples=-1,
     log_dir=None,
     log_interval=1,
     trainer=None,
@@ -957,10 +963,10 @@ def md_validate(
         'total_loss': 0.0
     }
 
-    writer = SummaryWriter(log_dir) if log_dir else None
+    summary_writer = SummaryWriter(log_dir) if log_dir else None
     
-    if num_samples > 0:
-        max_steps = min(num_samples, len(loader))
+    if num_examples > 0:
+        max_steps = min(num_examples, len(loader))
         loader_iter = iter(islice(loader, max_steps))
     else:
         max_steps = len(loader)
@@ -974,73 +980,25 @@ def md_validate(
         total=max_steps
     )
 
-    is_encoder_decoder = model.config.is_encoder_decoder
-
-    if SHOW_OUTPUT:
-        logits_decoder = LogitsDecoder(model.config, model.tokenizer, model.temperature)
-
     with torch.no_grad():
         for batch in pbar:
-            if trainer:
-                loss, eval_metrics = trainer.get_batch_loss_metrics(model, batch, train_eval='eval')
-                trainer.store_metrics(metrics=eval_metrics, train_eval='eval')
-            else:
-                labels = batch['labels']
-                input_ids = batch['input_ids']
-                attention_mask = batch['attention_mask']
-                
-                if SHOW_INPUT and fabric.is_global_zero:
-                    for i in range(min(2, len(input_ids))):
-                        show_input(f"Batch {i}: {model.tokenizer.decode(input_ids[i])}")
-
-                if SHOW_LABELS and fabric.is_global_zero:
-                    for i in range(min(2, len(labels))):
-                        valid_ids = [tid for tid in labels[i] if tid != label_pad_token_id]
-                        show_labels(f"Batch {i}: {model.tokenizer.decode(valid_ids)}")
-                
-                if model.has_anno:
-                    outputs = model.annotate(input_ids=input_ids, input_labels=labels, return_loss=True)
-                else:
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            
-                output_logits = outputs['logits']
-                
-                if SHOW_OUTPUT and fabric.is_global_zero:
-                    for i in range(min(2, len(output_logits))):
-                        output_ids = logits_decoder.decode_logits(output_logits[i])
-                        show_output(f"Batch {i}: {model.tokenizer.decode(output_ids)}")
-                
-                lm_loss = get_lm_loss(
-                    logits=output_logits,
-                    labels=labels,
-                    ignore_index=label_pad_token_id,
-                    is_encoder_decoder=is_encoder_decoder
-                )
-
-                if model.mem_coef:
-                    if model.has_anno:
-                        mem_loss = outputs['losses']
-                    else:
-                        mem_loss = model.skill_memory.compute_losses(outputs)['total_loss']
-                    loss = model.lm_coef * lm_loss + model.mem_coef * mem_loss
-                else:
-                    loss = lm_loss
+            loss = get_loss(model, fabric, batch, trainer, label_pad_token_id)
             
             metrics['steps'] += 1
             metrics['total_loss'] += loss.item()
 
-            if writer:
+            if summary_writer:
                 sample_progress = int((metrics['steps'] / max_steps) * 100)
                 if sample_progress % log_interval == 0:
-                    writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
+                    summary_writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
 
     if trainer is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()
-        gathered_samples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
-        if fabric.is_global_zero and gathered_samples > 0:
-            avg_loss = gathered_loss / gathered_samples
+        gathered_examples = fabric.all_gather(torch.tensor(metrics['steps'])).sum()
+        if fabric.is_global_zero and gathered_examples > 0:
+            avg_loss = gathered_loss / gathered_examples
             metrics['avg_loss'] = avg_loss
-            print(f"Average Loss: {avg_loss:.4f} | Samples: {gathered_samples}")
+            print(f"Average Loss: {avg_loss:.4f} | Examples: {gathered_examples}")
 
         if metrics['steps'] > 0:
             metrics['total_loss'] /= metrics['steps']
@@ -1053,8 +1011,10 @@ def md_validate(
                 metrics[f'avg_{key}'] = gathered_vals.mean().item()
                 print(f"avg_{key}: {metrics[f'avg_{key}']}")
 
-    if writer:
-        writer.close()
+    pbar.close()
+
+    if summary_writer:
+        summary_writer.close()
     
     return metrics
 

@@ -88,43 +88,51 @@ class MD(nn.Module):
         self._init_mem(config)
         self._init_params()
 
-        info(f"MD (hidden_dim: {self.hidden_size}, mem: {config.mem_info}, special_tokens: {self.num_special_tokens}, preference_optimizer: {config.po})")
+        alignment_info = f"{config.po}, special_tokens: {self.num_special_tokens}" if not config.sft else "sft"
+        info(f"MD (strategy: {config.strategy_info}, alignment: {alignment_info}, hidden_dim: {self.hidden_size})")
 
     def _init_backend_fusion_adapter(self):
         self.backend_fusion_gate = nn.Sequential(
-            nn.Linear(2 * self.hidden_size, self.hidden_size),
+            nn.Linear(2 * self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 2, self.hidden_size),
             nn.Sigmoid()
         )
         self.backend_state_norm = nn.LayerNorm(self.hidden_size)
         self.backend_action_norm = nn.LayerNorm(self.hidden_size)
-        min_dim = self.backend_fusion_adapter_config.get('min_proj_dim', -1)
-        proj_scale = self.backend_fusion_adapter_config.get('proj_scale', -1)
-        proj_dim = max(self.mem_backend.action_dim * proj_scale, min_dim, self.hidden_size)
-
-        norm_pos = self.backend_fusion_adapter_config.get('norm_position', 'post')
+        
+        config = self.backend_fusion_adapter_config
+        min_dim = config.get('min_proj_dim', -1)
+        proj_scale = config.get('proj_scale', -1)
+        proj_dropout = config.get('proj_dropout', 0.1)
+        norm_pos = config.get('norm_position', 'post')
+        
         assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
         
-        layers = [
-            nn.Linear(self.mem_backend.action_dim, proj_dim)
-        ]
+        action_dim = self.mem_backend.action_dim
+        proj_dim = max(action_dim * proj_scale, min_dim, self.hidden_size)
+        
+        layers = []
+        layers.append(nn.Linear(action_dim, proj_dim))
         
         if norm_pos == 'pre':
-            layers += [nn.LayerNorm(proj_dim), nn.GELU()]
+            layers.extend([nn.LayerNorm(proj_dim), nn.GELU()])
         else:
-            layers += [nn.GELU(), nn.LayerNorm(proj_dim)]
+            layers.extend([nn.GELU(), nn.LayerNorm(proj_dim)])
         
-        layers += [
+        layers.extend([
             nn.Linear(proj_dim, self.hidden_size),
-            nn.Dropout(self.backend_fusion_adapter_config.get('proj_dropout', 0.1))
-        ]
+            nn.Dropout(proj_dropout)
+        ])
         
         self.backend_action_proj = nn.Sequential(*layers)
         
-        nn.init.xavier_normal_(self.backend_action_proj[0].weight, gain=1.5957696)
-        nn.init.zeros_(self.backend_action_proj[0].bias)
-
-        nn.init.xavier_normal_(self.backend_action_proj[-2].weight, gain=1.0)
-        nn.init.zeros_(self.backend_action_proj[-2].bias)
+        with torch.no_grad():
+            nn.init.kaiming_normal_(self.backend_action_proj[0].weight, nonlinearity='relu')
+            nn.init.zeros_(self.backend_action_proj[0].bias)
+            
+            nn.init.xavier_normal_(self.backend_action_proj[-2].weight, gain=1.0)
+            nn.init.zeros_(self.backend_action_proj[-2].bias)
         
         assert self.backend_action_proj[-2].out_features == self.hidden_size
     
@@ -356,7 +364,7 @@ class MD(nn.Module):
             self.num_tokens = model.get_output_embeddings().weight.shape[0]
             self.lm_config.vocab_size = self.num_tokens
 
-            info(f"LM (model_type: {self.lm_config.model_type}, vocab_size: {self.num_tokens})")
+            info(f"LM (model: {self.lm_config.model_type}, vocab_size: {self.num_tokens})")
             
             assert self.token_sep_id not in self.token_special_ids, \
                 f"SEP token ID {self.token_sep_id} conflicts with special token IDs {self.token_special_ids}"
@@ -381,6 +389,19 @@ class MD(nn.Module):
         
         self.embedding_layer = SafeEmbeddingWrapper(self.lm.get_input_embeddings())
     
+    def _get_last_valid_actions(self, action_logits, mask=None):
+        assert action_logits.dim() == 3, f"Expected 3D action_logits, got {action_logits.dim()}D"
+        assert action_logits.shape[-1] == self.mem_backend.action_dim, \
+            f"Action dim mismatch in input: {action_logits.shape[-1]} vs {self.mem_backend.action_dim}"
+        if mask is not None:
+            seq_lengths = mask.sum(dim=1) - 1
+            batch_indices = torch.arange(action_logits.size(0), device=action_logits.device)
+            last_actions = action_logits[batch_indices, seq_lengths]
+        else:
+            last_actions = action_logits[:, -1, :]
+        
+        return last_actions
+    
     def _has_sep(
             self,
             context_embeds: torch.Tensor,
@@ -402,7 +423,7 @@ class MD(nn.Module):
                 skill_output = self.mem_backend(states)
 
         sep_index = self.mem_backend.action_dim - 1
-        step_logits = skill_output['action_logits'][:, -1, :]
+        step_logits = self._get_last_valid_actions(skill_output['action_logits'], mask)
         if self.backend_sep_logit_bias:
             step_logits = step_logits.clone()
             step_logits[:, sep_index] += self.backend_sep_logit_bias
@@ -611,17 +632,41 @@ class MD(nn.Module):
     
     def _get_next_token(self, logits):
         return self.logits_decoder.decode_logits(logits)
-
-    def _backend_fuse_features(self, state_embeds, action_embeds):
-        state_embeds = state_embeds.to(self.dtype)
-        action_embeds = action_embeds.to(self.dtype)
+    
+    def _backend_fuse(self, state_embeds, action_embeds, attention_mask=None):
+        updated_state_embeds = state_embeds.clone()
         
-        state_norm = self.backend_state_norm(state_embeds.float()).to(self.dtype)
-        action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
-
-        combined = torch.cat([state_norm, action_norm], dim=-1)
-        gate = self.backend_fusion_gate(combined.to(self.backend_fusion_gate[0].weight.dtype))
-        return gate * state_norm + (1 - gate) * action_norm
+        if self.training:
+            state_norm = self.backend_state_norm(state_embeds.float()).to(self.dtype)
+            action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
+            
+            combined = torch.cat([state_norm, action_norm], dim=-1)
+            gate_input = combined.to(self.backend_fusion_gate[0].weight.dtype)
+            gate = self.backend_fusion_gate(gate_input)
+            updated_state_embeds = gate * state_norm + (1 - gate) * action_norm
+        else:
+            if attention_mask is not None:
+                seq_lengths = attention_mask.sum(dim=1) - 1
+                batch_indices = torch.arange(state_embeds.size(0), device=state_embeds.device)
+                last_valid_states = updated_state_embeds[batch_indices, seq_lengths].clone()
+            else:
+                last_valid_states = updated_state_embeds[:, -1, :].clone()
+        
+            state_norm = self.backend_state_norm(last_valid_states.float()).to(self.dtype)
+            action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
+            
+            combined = torch.cat([state_norm, action_norm], dim=-1)
+            gate_input = combined.to(self.backend_fusion_gate[0].weight.dtype)
+            gate = self.backend_fusion_gate(gate_input)
+            fused_output = gate * state_norm + (1 - gate) * action_norm
+            fused_output = fused_output.to(updated_state_embeds.dtype)
+            
+            if attention_mask is not None:
+                updated_state_embeds[batch_indices, seq_lengths] = fused_output
+            else:
+                updated_state_embeds[:, -1] = fused_output
+        
+        return updated_state_embeds
     
     def _need_anno(self, count):
         return (
@@ -873,6 +918,27 @@ class MD(nn.Module):
         else:
             return False
 
+    def get_action_embed(self, state_embeds, attention_mask):
+        with torch.autocast(self.device.type, enabled=False):
+            skill_output = self.mem_backend(state_embeds)
+        action_logits = skill_output['action_logits']
+        last_valid_actions = self._get_last_valid_actions(action_logits, attention_mask)
+        return self.backend_action_proj(last_valid_actions), skill_output
+    
+    def fuse(self, state_embeds, action_embeds, attention_mask=None):
+        return self._backend_fuse(state_embeds, action_embeds, attention_mask)
+    
+    def get_fused_embeds(self, state_embeds, attention_mask=None):
+        if self.training:
+            skill_output = self.mem_backend(state_embeds)
+            action_logits = skill_output['action_logits']
+            action_embeds = self.backend_action_proj(action_logits)
+            state_embeds = self.fuse(state_embeds, action_embeds, attention_mask)
+        else:
+            action_embed, skill_output = self.get_action_embed(state_embeds, attention_mask)
+            state_embeds = self.fuse(state_embeds, action_embed, attention_mask)
+        return state_embeds, skill_output
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -938,11 +1004,9 @@ class MD(nn.Module):
             }
         else:
             if self.backend_enable_fusion:
-                with torch.autocast(self.device.type, enabled=False):
-                    skill_output = self.mem_backend(state_embeds)
-                action_logits = skill_output['action_logits']
-                action_embeds = self.backend_action_proj(action_logits)
-                state_embeds = self._backend_fuse_features(state_embeds, action_embeds)
+                state_embeds, skill_output = self.get_fused_embeds(state_embeds, attention_mask)
+            else:
+                skill_output = {}
             
             with torch.autocast(self.device.type, dtype=self.dtype):
                 lm_out = self.lm(inputs_embeds=state_embeds)
@@ -969,7 +1033,8 @@ class MD(nn.Module):
         annotations_added = [0] * batch_size
         active_indices = list(range(batch_size))
         
-        sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
+        if self.backend_anno:
+            sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, 1, -1)
         pad_masks = [torch.zeros(seq.size(0), dtype=torch.bool, device=device) for seq in sequences]
         
         for _ in range(self.max_length - input_ids.shape[1]):
@@ -1033,10 +1098,7 @@ class MD(nn.Module):
                 context_embeds = current_embeds[idx]
                 if self.backend_enable_fusion:
                     with torch.no_grad():
-                        skill_output = self.mem_backend(context_embeds)
-                        action_logits = skill_output['action_logits']
-                        action_embeds = self.backend_action_proj(action_logits)
-                        context_embeds = self._backend_fuse_features(context_embeds, action_embeds)
+                        context_embeds, _ = self.get_fused_embeds(context_embeds)
                 
                 with torch.autocast(device_type=self.device.type, dtype=self.dtype):
                     lm_out = self.lm(inputs_embeds=context_embeds)

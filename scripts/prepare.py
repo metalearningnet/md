@@ -63,7 +63,7 @@ def show_summary(output_data, config):
         print(f"\n=== Reward Model Output Summary ===")
         print(f"Model: {config['reward_model']['name']}")
         print(f"Output formats encountered: {track_output_format}")
-        print(f"Number of samples processed: {len(output_data)}")
+        print(f"Number of examples processed: {len(output_data)}")
         print(f"Score range: {min(min(data['all_rm_scores']) for data in output_data):.4f} to {max(max(data['all_rm_scores']) for data in output_data):.4f}")
         print("=" * 58)
     
@@ -152,16 +152,16 @@ def filter_and_combine_responses(
     
     all_res = []
     num_identical = 0
-    num_samples = len(all_output_data[0])
+    num_examples = len(all_output_data[0])
     
-    for i in range(num_samples):
+    for i in range(num_examples):
         prompt = all_output_data[0][i]['prompt']
         gen_text = []
         for data in all_output_data:
             gen_text.append(data[i]['generated_text'])
 
         if config['processing']['filter_identical_responses'] and len(set(gen_text)) == 1:
-            # Filter out samples where all generated responses are identical
+            # Filter out examples where all generated responses are identical
             num_identical += 1
             continue
 
@@ -170,8 +170,8 @@ def filter_and_combine_responses(
             'all_generated_responses': gen_text,
         })
     
-    print(f"Filtered out {num_identical} samples with identical generated responses")
-    print(f"Remaining samples: {len(all_res)}")
+    print(f"Filtered out {num_identical} examples with identical generated responses")
+    print(f"Remaining examples: {len(all_res)}")
     
     output_file = output_dir / "all_outputs.json"
     with open(output_file, 'w') as f:

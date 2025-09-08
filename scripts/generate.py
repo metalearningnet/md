@@ -47,7 +47,7 @@ def apply_chat_template(messages, tokenizer):
         print(f"Failed to format messages: {messages}")
         raise e
 
-def generate_response(model, prompt, quiet=False):
+def generate_response(model, prompt, skip_special_tokens=False):
     device = get_device()
     messages = [{'role': 'user', 'content': prompt}]
     initial_prompt = get_initial_prompt()
@@ -59,13 +59,13 @@ def generate_response(model, prompt, quiet=False):
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
             outputs = model.generate(inputs['input_ids'])
-        return prompt, model.tokenizer.decode(outputs[0], skip_special_tokens=quiet)
+        return prompt, model.tokenizer.decode(outputs[0], skip_special_tokens=skip_special_tokens)
     except RuntimeError as e:
         if "MPS device" in str(e):
             inputs = model.tokenizer(prompt, return_tensors='pt').to('cpu')
             with torch.no_grad():
                 outputs = model.generate(**inputs)
-            return prompt, model.tokenizer.decode(outputs[0], skip_special_tokens=quiet)
+            return prompt, model.tokenizer.decode(outputs[0], skip_special_tokens=skip_special_tokens)
         raise RuntimeError(f"Failed to generate response: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Failed to generate response: {str(e)}")
@@ -74,23 +74,23 @@ def generate(config: dict):
     """
     config:
         - path: Dataset path.
-        - name: Dataset name.
+        - name: Config name.
         - ckpt: Checkpoint path.
-        - samples: Number of samples.
+        - examples: Number of examples.
         - fabric_config: Configuration options for the Lightning Fabric setup.
-        - generator: LLM name.
+        - lm: LLM name.
         - output_file: Output file path.
-        - quiet: Hides special tokens in the output.
+        - skip_special_tokens: Hides special tokens in the output.
     """
     try:
         dataset_path = config['path']
         dataset_name = config.get('name')
         ckpt_path = config.get('ckpt')
-        samples = config.get('samples', -1)
+        examples = config.get('examples', -1)
         fabric_config = config['fabric_config']
-        generator = config['generator']
+        lm = config['lm']
         output_file = config['output_file']
-        quiet = config['quiet']
+        skip_special_tokens = config['skip_special_tokens']
         
         fabric = L.Fabric(**fabric_config)
         fabric.launch()
@@ -109,24 +109,24 @@ def generate(config: dict):
         results = []
         eval_set = get_eval_set(dataset_path, dataset_name)
 
-        total_samples = len(eval_set)
-        if samples != -1:
-            total_samples = min(samples, total_samples)
+        total_examples = len(eval_set)
+        if examples != -1:
+            total_examples = min(examples, total_examples)
 
         progress_bar = tqdm(
-            eval_set.head(total_samples).iterrows(),
-            total=total_samples,
+            eval_set.head(total_examples).iterrows(),
+            total=total_examples,
             desc="Generating responses"
         )
 
         for _, example in progress_bar:
             try:
-                prompt, response = generate_response(model, example['instruction'], quiet)
+                prompt, response = generate_response(model, example['instruction'], skip_special_tokens)
                 results.append({
                     'dataset': example['dataset'],
                     'instruction': example['instruction'],
                     'output': response[len(prompt):],
-                    'generator': generator
+                    'lm': lm
                 })
             except Exception as e:
                 print(f"Error processing example: {str(e)}")
@@ -150,16 +150,16 @@ def main():
     parser.add_argument("--path", type=str,
                         help="Dataset path")
     parser.add_argument("--name", type=str, default=None,
-                        help="Dataset name")
-    parser.add_argument("--samples", type=int, default=-1,
-                        help="Number of samples to generate responses for")
+                        help="Config name")
+    parser.add_argument("--examples", type=int, default=-1,
+                        help="Number of examples to generate responses for")
     parser.add_argument("--ckpt", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
     parser.add_argument("--out", type=str,
                         help="Output file path")
-    parser.add_argument("--generator", type=str, default=cfg.lm_name,
+    parser.add_argument("--lm", type=str, default=cfg.lm_name,
                         help="LLM name")
-    parser.add_argument("--quiet", action="store_true", default=False,
+    parser.add_argument("--skip-special-tokens", action="store_true", default=False,
                         help="Hides special tokens in the output")
 
     args = parser.parse_args()
@@ -183,11 +183,11 @@ def main():
         'path': args.path,
         'name': args.name,
         'ckpt': args.ckpt,
-        'samples': args.samples,
+        'examples': args.examples,
         'output_file': args.out, 
-        'generator': args.generator,
+        'lm': args.lm,
         'fabric_config': fabric_config,
-        'quiet': args.quiet
+        'skip_special_tokens': args.skip_special_tokens
     }
 
     generate(config)

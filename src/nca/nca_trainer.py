@@ -513,7 +513,7 @@ class NCATrainer(Trainer):
                 **model_kwargs,
             )
 
-            losses = model.skill_memory.compute_losses(model_out)['total_loss']
+            losses = model.mem.compute_losses(model_out)['total_loss']
             all_logits = model_out['logits']
             all_logps = self.get_batch_logps(
                 all_logits.to(torch.float32),

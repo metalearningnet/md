@@ -696,6 +696,8 @@ class NeuralMemory(Module):
         mask: Tensor | None = None,
         return_surprises = True
     ):
+        device = seq.device.type
+        
         if self.qkv_receives_diff_views:
             _, batch, seq_len = seq.shape[:3]
         else:
@@ -937,7 +939,8 @@ class NeuralMemory(Module):
                 # go from first order momentum all the way to the Nth
 
                 for one_adaptive_momentum, one_last_momentum in zip_longest(adaptive_momentum, last_momentum):
-                    momentum = self.assoc_scan(one_adaptive_momentum, momentum, prev = one_last_momentum) # momentum is S / surprise in the paper
+                    with torch.autocast(device, enabled=False):
+                        momentum = self.assoc_scan(one_adaptive_momentum, momentum, prev = one_last_momentum) # momentum is S / surprise in the paper
                     momentums.append(momentum)
 
                 momentums = stack(momentums)
@@ -960,7 +963,8 @@ class NeuralMemory(Module):
 
             # use associative scan again for learned forgetting (weight decay) - eq (13)
 
-            update = self.assoc_scan(1. - decay_factor, update, prev = last_update, remove_prev = False)
+            with torch.autocast(device, enabled=False):
+                update = self.assoc_scan(1. - decay_factor, update, prev = last_update, remove_prev = False)
 
             updates[param_name] = update
             next_last_update[param_name] = update[:, -1]

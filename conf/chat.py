@@ -1,9 +1,9 @@
 VOCAB = {
     "hint": {
         "minimal" : ["<recall>", "<critique>"],
-        "standard": ["<recall>", "<critique>", "<diversify>"],
-        "enhanced": ["<recall>", "<critique>", "<diversify>", "<reflect>"],
-        "advanced": ["<recall>", "<critique>", "<diversify>", "<reflect>", "<plan>"]
+        "standard": ["<recall>", "<critique>", "<reflect>"],
+        "enhanced": ["<recall>", "<critique>", "<reflect>", "<plan>"],
+        "advanced": ["<recall>", "<critique>", "<reflect>", "<plan>", "<diversify>"]
     }
 }
 
