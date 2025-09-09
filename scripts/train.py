@@ -33,7 +33,6 @@ def train(config: dict):
         - weight_decay: Weight decay.
         - precision: Numerical Precision.
         - ckpt_path: Checkpoint path.
-        - save_interval: Checkpoint frequency.
         - dist: Whether to enable distributed training.
         - fabric_config: Configuration options for the Lightning Fabric setup.
         - restore: Whether to restore the model from the provided checkpoint.
@@ -45,7 +44,7 @@ def train(config: dict):
         dataset_path = config['path']
         config_name = config.get('name')
         split = config.get('split', 'train')
-        val_split = config.get('val_split', 0.1)
+        val_split = config.get('val_split', 0.01)
         seed = config.get('seed', 42)
         num_epochs = config.get('epochs', 1)
         batch_size = config.get('batch_size', 1)
@@ -56,7 +55,6 @@ def train(config: dict):
         weight_decay = config.get('weight_decay', 0.1)
         precision = config.get('precision', 'bf16-mixed')
         ckpt_path = Path(config.get('ckpt_path', ''))
-        save_interval = config.get('save_interval', 1)
         dist = config.get('dist', False)
         fabric_config = config['fabric_config']
         restore = config.get('restore', False)
@@ -64,7 +62,7 @@ def train(config: dict):
         log_dir = Path(config.get('log_dir', ''))
         log_interval = config.get('log_interval', 1)
         
-        val_examples = max(int(num_examples * val_split), 1) if num_examples != -1 else -1
+        val_examples = max(int(num_examples * val_split), 0) if num_examples != -1 or val_split == 0 else -1
         
         if 'strategy' not in fabric_config:
             strategy = get_strategy(precision)
@@ -149,29 +147,23 @@ def train(config: dict):
                 log_interval=log_interval,
                 trainer=trainer
             )
+            print(f"Train Loss: {train_metrics['total_loss']:.4f}")
+            save_model = False
+            if val_examples != 0:
+                val_metrics = md_validate(model, val_loader, fabric, num_examples=val_examples, trainer=trainer)
+                
+                if fabric.is_global_zero:
+                    print(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
+                
+                if val_metrics.get('total_loss', np.inf) < best_val_loss:
+                    best_val_loss = val_metrics['total_loss']
+                    save_model = True
+            else:
+                save_model = True
             
-            log_info = [
-                f"Train Loss: {train_metrics['total_loss']:.4f}"
-            ]
-            
-            if (epoch + 1) % save_interval == 0:
-                if ckpt_dir:
-                    torch.save(model.state_dict(), ckpt_dir / f"{MD_TAG}_epoch_{epoch+1}.pt")
-                    print(f"Saved epoch {epoch+1} checkpoint")
-            
-            val_metrics = md_validate(model, val_loader, fabric, num_examples=val_examples, trainer=trainer)
-            
-            if fabric.is_global_zero:
-                log_info.append(f"Val Loss: {val_metrics.get('total_loss', 'N/A')}")
-            
-            print(" | ".join(log_info))
-            
-            if val_metrics.get('total_loss', np.inf) < best_val_loss:
-                best_val_loss = val_metrics['total_loss']
-                if ckpt_path:
-                    torch.save(model.state_dict(), ckpt_path)
-                print(f"Saved best model with val loss: {best_val_loss:.4f}")
-    
+            if ckpt_path and save_model:
+                model.save(ckpt_path)
+                print(f"Save model (epoch: {epoch + 1})")
     finally:
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
@@ -188,7 +180,7 @@ def main():
                         help="Random seed for reproducibility")
     parser.add_argument("--split", type=str, default="train",
                         help="Predefined dataset split")
-    parser.add_argument("--val-split", type=float, default=0.1,
+    parser.add_argument("--val-split", type=float, default=0.01,
                         help="Validation split ratio")
 
     # Training configuration
@@ -202,8 +194,6 @@ def main():
     # System configuration
     parser.add_argument("--ckpt-path", type=str, default=cfg.ckpt_path,
                         help="Checkpoint path")
-    parser.add_argument("--save-interval", type=int, default=1,
-                        help="Checkpoint saving frequency")
     parser.add_argument("--restore", action="store_true", default=False,
                         help="Restore the model from the provided checkpoint")
     parser.add_argument("--log", action="store_true", default=cfg.log,
@@ -242,15 +232,13 @@ def main():
         'weight_decay': cfg.weight_decay,
         'precision': cfg.precision,
 
-        'ckpt_path': args.ckpt_path,
-        'save_interval': args.save_interval,
-
         'log': args.log,
         'log_dir': args.log_dir,
         'log_interval': args.log_interval,
 
         'dist': args.dist,
         'restore': args.restore,
+        'ckpt_path': args.ckpt_path,
         'fabric_config': get_fabric_config(dist=args.dist)
     }
 

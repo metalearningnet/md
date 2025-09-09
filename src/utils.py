@@ -434,48 +434,73 @@ else:
         label_pad_token_id: int = -100
         
         def __call__(self, examples: dict) -> dict:
-            prompts = []
-            responses = []
-            
-            for instruction, response in zip(examples['instruction'], examples['response']):
-                prompt = f"Instruction: {instruction}\n\nResponse:"
-                prompts.append(prompt)
-                responses.append(response)
-
-            prompt_encodings = self.tokenizer(
-                prompts,
-                truncation=True,
-                max_length=self.max_prompt_length,
-                padding=False,
-                add_special_tokens=False
-            )
-
-            response_encodings = self.tokenizer(
-                responses,
-                truncation=True,
-                max_length=self.max_target_length,
-                padding=False,
-                add_special_tokens=False
-            )
-
             input_ids = []
             labels = []
-            for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
-                combined_ids = prompt_ids + response_ids
-                
-                if len(combined_ids) > self.max_length:
-                    if self.truncation_mode == 'keep_start':
-                        combined_ids = combined_ids[:self.max_length]
-                    else:
-                        combined_ids = combined_ids[-self.max_length:]
-                
-                # Create labels (-100 for prompt, response tokens for response)
-                label_ids = [self.label_pad_token_id] * len(prompt_ids) + response_ids
-                label_ids = label_ids[:len(combined_ids)]
-                
-                input_ids.append(combined_ids)
-                labels.append(label_ids)
 
+            if 'instruction' in examples and 'response' in examples:
+                prompts = []
+                responses = []
+                
+                for instruction, response in zip(examples['instruction'], examples['response']):
+                    prompt = f"Instruction: {instruction}\n\nResponse:"
+                    prompts.append(prompt)
+                    responses.append(response)
+
+                prompt_encodings = self.tokenizer(
+                    prompts,
+                    truncation=True,
+                    max_length=self.max_prompt_length,
+                    padding=False,
+                    add_special_tokens=False
+                )
+
+                response_encodings = self.tokenizer(
+                    responses,
+                    truncation=True,
+                    max_length=self.max_target_length,
+                    padding=False,
+                    add_special_tokens=False
+                )
+
+                input_ids = []
+                labels = []
+                for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
+                    combined_ids = prompt_ids + response_ids
+                    
+                    if len(combined_ids) > self.max_length:
+                        if self.truncation_mode == 'keep_start':
+                            combined_ids = combined_ids[:self.max_length]
+                        else:
+                            combined_ids = combined_ids[-self.max_length:]
+                    
+                    # Create labels (-100 for prompt, response tokens for response)
+                    label_ids = [self.label_pad_token_id] * len(prompt_ids) + response_ids
+                    label_ids = label_ids[:len(combined_ids)]
+                    
+                    input_ids.append(combined_ids)
+                    labels.append(label_ids)
+            elif 'text' in examples:
+                texts = examples['text']
+                text_encodings = self.tokenizer(
+                    texts,
+                    truncation=True,
+                    max_length=self.max_length,
+                    padding=False,
+                    add_special_tokens=False,
+                )
+
+                for text_ids in text_encodings["input_ids"]:
+                    if len(text_ids) > self.max_length:
+                        if self.truncation_mode == "keep_start":
+                            text_ids = text_ids[: self.max_length]
+                        else:
+                            text_ids = text_ids[-self.max_length :]
+                    
+                    input_ids.append(text_ids)
+                    labels.append(text_ids.copy())
+            else:
+                raise ValueError("Examples must contain either ('instruction' + 'response') or 'text'.")
+            
             return {
                 'input_ids': input_ids,
                 'attention_mask': [[1] * len(ids) for ids in input_ids],
@@ -876,6 +901,51 @@ def get_loss(
     
     return loss
 
+def validate_batch(batch):
+    if not batch:
+        return False
+    
+    batch_sizes = []
+    sequence_keys = ['input_ids', 'labels', 'attention_mask']
+    
+    for key in sequence_keys:
+        if key not in batch:
+            continue
+            
+        tensor = batch[key]
+        
+        if tensor is None:
+            return False
+        
+        if hasattr(tensor, 'numel'):
+            if tensor.numel() == 0:
+                return False
+            
+            if hasattr(tensor, 'shape'):
+                for dim in tensor.shape:
+                    if dim == 0:
+                        return False
+                
+                if len(tensor.shape) >= 1:
+                    batch_sizes.append(tensor.shape[0])
+        elif hasattr(tensor, '__len__'):
+            if len(tensor) == 0:
+                return False
+            
+            if len(tensor) > 0 and hasattr(tensor[0], '__len__'):
+                for seq in tensor:
+                    if len(seq) == 0:
+                        return False
+            
+            batch_sizes.append(len(tensor))
+        else:
+            return False
+    
+    if batch_sizes and len(set(batch_sizes)) > 1:
+        return False
+    
+    return True
+
 def md_train(
     model,
     loader,
@@ -893,7 +963,8 @@ def md_train(
     
     metrics = {
         'steps': 0,
-        'total_loss': 0.0
+        'total_loss': 0.0,
+        'skipped_batches': 0
     }
 
     summary_writer = SummaryWriter(log_dir) if log_dir else None
@@ -914,6 +985,11 @@ def md_train(
     )
     
     for batch in pbar:
+        if not validate_batch(batch):
+            metrics['skipped_batches'] += 1
+            pbar.set_description(f'Training (skipped: {metrics["skipped_batches"]})')
+            continue
+
         model.step()
         loss = get_loss(model, fabric, batch, trainer, label_pad_token_id)
         
@@ -960,7 +1036,9 @@ def md_validate(
 
     metrics = {
         'steps': 0,
-        'total_loss': 0.0
+        'avg_loss': 0.0,
+        'total_loss': 0.0,
+        'skipped_batches': 0
     }
 
     summary_writer = SummaryWriter(log_dir) if log_dir else None
@@ -982,6 +1060,11 @@ def md_validate(
 
     with torch.no_grad():
         for batch in pbar:
+            if not validate_batch(batch):
+                metrics['skipped_batches'] += 1
+                pbar.set_description(f'Validating (skipped: {metrics["skipped_batches"]})')
+                continue
+            
             loss = get_loss(model, fabric, batch, trainer, label_pad_token_id)
             
             metrics['steps'] += 1

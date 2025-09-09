@@ -2,6 +2,7 @@ import os
 import math
 import torch
 import torch.nn as nn
+from peft import PeftModel
 from frontend import Frontend
 from skill import SkillMemory
 import torch.nn.functional as F
@@ -289,6 +290,9 @@ class MD(nn.Module):
         
         if not self.lm_freeze:
             model = self._init_peft(model)
+            self.enable_peft = True
+        else:
+            self.enable_peft = False
         
         self.lm = model
         self.hidden_size = getattr(
@@ -1148,23 +1152,7 @@ class MD(nn.Module):
             raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
 
         model = cls(config=config, attn=attn, dist=dist, **kwargs)
-
-        try:
-            state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint {checkpoint_path}: {str(e)}") from e
-        
-        model_state = state_dict.get('model', state_dict)
-        model_state = model_state.get('state_dict', model_state)
-        
-        try:
-            missing, unexpected = model.load_state_dict(model_state, strict=False)
-            if missing:
-                warn(f"Missing keys: {missing}")
-            if unexpected:
-                warn(f"Unexpected keys: {unexpected}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading state dict: {str(e)}") from e
+        model = model.load(checkpoint_path, model)
 
         info(f"Loaded pre-trained model from {checkpoint_path}")
         return model.to(get_device())
@@ -1190,3 +1178,53 @@ class MD(nn.Module):
         )
         
         return trainable_params
+    
+    def lm_save_dir(self, ckpt_path):
+        parent = os.path.dirname(ckpt_path)
+        return os.path.join(parent, 'lm')
+
+    def save(self, ckpt_path):
+        if not self.enable_peft:
+            torch.save(self.state_dict(), ckpt_path)
+        else:
+            model_state = self.state_dict()
+            md_state = {k: v for k, v in model_state.items() if not k.startswith("lm.")}
+            torch.save(md_state, ckpt_path)
+            self.lm.save_pretrained(self.lm_save_dir(ckpt_path))
+
+    def load(self, ckpt_path, model):
+        try:
+            state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load checkpoint {ckpt_path}: {str(e)}") from e
+        
+        model_state = state_dict.get('model', state_dict)
+        model_state = model_state.get('state_dict', model_state)
+        
+        try:
+            missing, unexpected = model.load_state_dict(model_state, strict=False)
+            if unexpected:
+                warn(f"Unexpected keys: {unexpected}")
+            
+            if not self.enable_peft:
+                if missing:
+                    warn(f"Missing keys: {missing}")
+            else:
+                if missing:
+                    md_missing = []
+                    for i in missing:
+                        if not i.startswith('lm.'):
+                            md_missing.append(i)
+                    if md_missing:
+                        warn(f"Missing keys: {md_missing}")
+                base = AutoModelForCausalLM.from_pretrained(
+                    self.lm_dir,
+                    config=self.lm_config,
+                    trust_remote_code=True,
+                    attn_implementation=self.attn
+                )
+                model.lm = PeftModel.from_pretrained(base, self.lm_save_dir(ckpt_path))
+            
+            return model
+        except Exception as e:
+            raise RuntimeError(f"Error loading state dict: {str(e)}") from e
