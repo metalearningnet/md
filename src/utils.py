@@ -999,7 +999,7 @@ def md_train(
         if summary_writer:
             sample_progress = int((metrics['steps'] / max_steps) * 100)
             if sample_progress % log_interval == 0:
-                summary_writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
+                summary_writer.add_scalar("loss/steps", loss.item(), metrics['steps'])
     
     if trainer is None:
         if metrics['steps'] > 0:
@@ -1073,7 +1073,7 @@ def md_validate(
             if summary_writer:
                 sample_progress = int((metrics['steps'] / max_steps) * 100)
                 if sample_progress % log_interval == 0:
-                    summary_writer.add_scalar("Loss/steps", loss.item(), metrics['steps'])
+                    summary_writer.add_scalar("loss/steps", loss.item(), metrics['steps'])
 
     if trainer is None:
         gathered_loss = fabric.all_gather(torch.tensor(metrics['total_loss'])).sum()

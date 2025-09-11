@@ -54,6 +54,23 @@ class AdaptedEmbedding(nn.Module):
         lora_out = (one_hot @ self.lora_A.T @ self.lora_B.T) * self.scaling
         return orig_out + lora_out
 
+class StateLoRAAdapter(nn.Module):
+    def __init__(self, input_dim, rank=4, alpha=8, preservation_strength=0.95):
+        super().__init__()
+        self.rank = rank
+        self.scaling = alpha / rank
+        self.preservation_strength = preservation_strength
+        
+        self.lora_A = nn.Linear(input_dim, rank, bias=False)
+        self.lora_B = nn.Linear(rank, input_dim, bias=False)
+        
+        nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B.weight)
+    
+    def forward(self, x):
+        lora_adjustment = self.scaling * self.lora_B(self.lora_A(x))
+        return x + self.preservation_strength * lora_adjustment
+
 class MD(nn.Module):
     def __init__(self,
                  config = cfg,
@@ -99,14 +116,14 @@ class MD(nn.Module):
             nn.Linear(self.hidden_size // 2, self.hidden_size),
             nn.Sigmoid()
         )
-        self.backend_state_norm = nn.LayerNorm(self.hidden_size)
-        self.backend_action_norm = nn.LayerNorm(self.hidden_size)
         
         config = self.backend_fusion_adapter_config
         min_dim = config.get('min_proj_dim', -1)
         proj_scale = config.get('proj_scale', -1)
         proj_dropout = config.get('proj_dropout', 0.1)
         norm_pos = config.get('norm_position', 'post')
+        min_preservation = config.get('min_preservation', 0.95)
+        max_preservation = config.get('min_preservation', 0.99)
         
         assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
         
@@ -136,6 +153,18 @@ class MD(nn.Module):
             nn.init.zeros_(self.backend_action_proj[-2].bias)
         
         assert self.backend_action_proj[-2].out_features == self.hidden_size
+
+        self.state_lora_adapter = StateLoRAAdapter(self.hidden_size)
+        self.state_importance_net = nn.Sequential(
+            nn.Linear(self.hidden_size, self.hidden_size // 4),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 4, 1),
+            nn.Sigmoid()
+        )
+        self.state_preservation_bias = nn.Parameter(torch.tensor(2.2))
+        self.preservation_strength = nn.Parameter(torch.tensor(2.0))
+        self.register_buffer('min_preservation', torch.tensor(min_preservation))
+        self.register_buffer('max_preservation', torch.tensor(max_preservation))
     
     def _init_mem_backend(self, config):
         self.backend_sep_logit_bias = self.min_sep_bias
@@ -638,37 +667,47 @@ class MD(nn.Module):
         return self.logits_decoder.decode_logits(logits)
     
     def _backend_fuse(self, state_embeds, action_embeds, attention_mask=None):
-        updated_state_embeds = state_embeds.clone()
-        
         if self.training:
-            state_norm = self.backend_state_norm(state_embeds.float()).to(self.dtype)
-            action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
+            state_enhanced = self.state_lora_adapter(state_embeds)
+            state_importance = torch.sigmoid(self.state_importance_net(state_enhanced))
             
-            combined = torch.cat([state_norm, action_norm], dim=-1)
+            combined = torch.cat([state_enhanced, action_embeds], dim=-1)
             gate_input = combined.to(self.backend_fusion_gate[0].weight.dtype)
-            gate = self.backend_fusion_gate(gate_input)
-            updated_state_embeds = gate * state_norm + (1 - gate) * action_norm
+            base_gate = self.backend_fusion_gate(gate_input)
+            
+            gate = torch.sigmoid(base_gate + self.state_preservation_bias) * state_importance
+            gate = torch.clamp(gate, self.min_preservation, self.max_preservation)
+            
+            fused = gate * state_enhanced + (1 - gate) * action_embeds
+            preservation_blend = torch.sigmoid(self.preservation_strength)
+            updated_state_embeds = preservation_blend * state_embeds + (1 - preservation_blend) * fused
         else:
             if attention_mask is not None:
                 seq_lengths = attention_mask.sum(dim=1) - 1
                 batch_indices = torch.arange(state_embeds.size(0), device=state_embeds.device)
-                last_valid_states = updated_state_embeds[batch_indices, seq_lengths].clone()
+                last_valid_states = state_embeds[batch_indices, seq_lengths]
             else:
-                last_valid_states = updated_state_embeds[:, -1, :].clone()
-        
-            state_norm = self.backend_state_norm(last_valid_states.float()).to(self.dtype)
-            action_norm = self.backend_action_norm(action_embeds.float()).to(self.dtype)
+                last_valid_states = state_embeds[:, -1, :]
             
-            combined = torch.cat([state_norm, action_norm], dim=-1)
+            state_enhanced = self.state_lora_adapter(last_valid_states)
+            state_importance = torch.sigmoid(self.state_importance_net(state_enhanced))
+            
+            combined = torch.cat([state_enhanced, action_embeds], dim=-1)
             gate_input = combined.to(self.backend_fusion_gate[0].weight.dtype)
-            gate = self.backend_fusion_gate(gate_input)
-            fused_output = gate * state_norm + (1 - gate) * action_norm
-            fused_output = fused_output.to(updated_state_embeds.dtype)
+            base_gate = self.backend_fusion_gate(gate_input)
             
+            gate = torch.sigmoid(base_gate + self.state_preservation_bias) * state_importance
+            gate = torch.clamp(gate, self.min_preservation, self.max_preservation)
+            
+            fused_output = gate * state_enhanced + (1 - gate) * action_embeds
+            preservation_blend = torch.sigmoid(self.preservation_strength)
+            final_output = preservation_blend * last_valid_states + (1 - preservation_blend) * fused_output
+            
+            updated_state_embeds = state_embeds.clone()
             if attention_mask is not None:
-                updated_state_embeds[batch_indices, seq_lengths] = fused_output
+                updated_state_embeds[batch_indices, seq_lengths] = final_output
             else:
-                updated_state_embeds[:, -1] = fused_output
+                updated_state_embeds[:, -1] = final_output
         
         return updated_state_embeds
     
@@ -1163,8 +1202,10 @@ class MD(nn.Module):
         if self.backend_enable_fusion:
             trainable_params.extend(self.backend_action_proj.parameters())
             trainable_params.extend(self.backend_fusion_gate.parameters())
-            trainable_params.extend(self.backend_state_norm.parameters())
-            trainable_params.extend(self.backend_action_norm.parameters())
+            trainable_params.extend(self.state_lora_adapter.parameters())
+            trainable_params.extend(self.state_importance_net.parameters())
+            trainable_params.append(self.state_preservation_bias)
+            trainable_params.append(self.preservation_strength)
         
         trainable_params.extend(self.mem_backend.parameters())
         trainable_params.extend(self.mem_state_proj.parameters())

@@ -163,7 +163,7 @@ if [[ "$INSTALL_CONDA" == true || "$INSTALL_VLLM" == true || "$INSTALL_FLASH_ATT
 
     install_python_packages
 
-    if [[ ! -d "$LM_DIR" ]]; then
+    if [[ ! -d "$LM_DIR" ||  -z "$(ls -A "$LM_DIR")" ]]; then
         install_lm
     fi
 fi

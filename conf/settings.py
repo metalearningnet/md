@@ -73,7 +73,9 @@ MEMORY = {
                     "proj_scale": -1,                       # Hidden dimension expansion factor (-1 for auto)
                     "proj_dropout": 0.1,                    # Dropout rate for adapter layers
                     "min_proj_dim": -1,                     # Minimum hidden dimension size (-1 for auto)
-                    "norm_position": "post"                 # LayerNorm placement: 'pre' | 'post'
+                    "norm_position": "pre",                 # LayerNorm placement: 'pre' | 'post'
+                    "min_preservation": 0.95,               # Minimum state preservation ratio
+                    "max_preservation": 0.99,               # Maximum state preservation ratio
                 }
             },
 
@@ -90,8 +92,8 @@ MEMORY = {
                 "max_hints": 64,                            # Maximum hints per response (-1 for unlimited)
                 "min_interval": 8,                          # Minimum tokens between hints
                 "sentence_alignment": True,                 # Trigger special token generation at sentence boundaries.
-                "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the [SEP] token logits that trigger hint generation
-                "sep_temperature": 0.7,                     # [SEP] insertion temperature (0.1=always trigger, 1.0=neutral)
+                "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the <SEP> token logits that trigger hint generation
+                "sep_temperature": 0.7,                     # <SEP> insertion temperature (0.1=always trigger, 1.0=neutral)
                 "tune": False                               # Fine-tune hint embeddings
             }
         },
