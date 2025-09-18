@@ -56,7 +56,7 @@ def evaluate(config: dict):
         fabric.launch()
 
         if ckpt_path:
-            model = MD.from_pretrained(checkpoint_path=ckpt_path, dist=dist)
+            model = MD.from_pretrained(ckpt_path=ckpt_path, dist=dist)
         else:
             model = MD.from_pretrained(dist=dist)
         

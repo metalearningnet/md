@@ -1,7 +1,7 @@
 MODEL = {
     # Language Model Configuration
     "lm": {
-        "path": "Qwen/Qwen3-0.6B",                          # Pretrained model identifier from HuggingFace Hub
+        "path": "Qwen/Qwen3-0.6B",                          # HuggingFace model ID (use 'models/md' for nested loading)
         "temperature": 0.7,                                 # Sampling temperature (0.0: deterministic, 1.0: creative)
         "max_length": 1280,                                 # Maximum total sequence length (prompt + response)
         "max_target_length": 1024,                          # Maximum generated output length in tokens
@@ -92,8 +92,8 @@ MEMORY = {
                 "max_hints": 64,                            # Maximum hints per response (-1 for unlimited)
                 "min_interval": 8,                          # Minimum tokens between hints
                 "sentence_alignment": True,                 # Trigger special token generation at sentence boundaries.
-                "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the <SEP> token logits that trigger hint generation
-                "sep_temperature": 0.7,                     # <SEP> insertion temperature (0.1=always trigger, 1.0=neutral)
+                "sep_logit_bias": 3.0,                      # Controls hint insertion frequency by biasing the <sep> token logits that trigger hint generation
+                "sep_temperature": 0.7,                     # <sep> insertion temperature (0.1=always trigger, 1.0=neutral)
                 "tune": False                               # Fine-tune hint embeddings
             }
         },

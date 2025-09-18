@@ -2,6 +2,7 @@ import os
 import math
 import torch
 import torch.nn as nn
+from pathlib import Path
 from peft import PeftModel
 from frontend import Frontend
 from skill import SkillMemory
@@ -11,8 +12,8 @@ from huggingface_hub import model_info
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
-    SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID,
-    LogitsDecoder, get_device, load_peft_config, get_special_token_by_index, info, warn, cfg
+    SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID, LogitsDecoder, AttrDict, Cfg,
+    get_device, load_peft_config, get_special_token_by_index, get_lm_dir, get_md_dir, get_ckpt_path, is_lm, info, warn, cfg
 )
 
 class SafeEmbeddingWrapper(nn.Module):
@@ -87,14 +88,20 @@ class MD(nn.Module):
         self.diversity_strength = 0.8
         self.bias_growth_power = 1.2
         self.noise_decay_power = 0.8
+        self.sentence_boundary_similarity = 0.8
 
         self.max_steps = 0
         self.current_step = 0
         self.label_pad_token_id = LABEL_PAD_TOKEN_ID
 
         self.dist = dist
+        self.md_cfg = config
+        self.ckpt_dir = None
         self.device = get_device()
+        
         self.lm_dir = config.lm_dir
+        self.md_dir = config.md_dir
+        self.md_path = config.md_path
         self.use_cache = config.use_cache
         self.max_length = config.max_length
         self.has_mem = config.mem_coef != 0.0
@@ -110,13 +117,6 @@ class MD(nn.Module):
         info(f"MD (strategy: {config.strategy_info}, alignment: {alignment_info}, hidden_dim: {self.hidden_size})")
 
     def _init_backend_fusion_adapter(self):
-        self.backend_fusion_gate = nn.Sequential(
-            nn.Linear(2 * self.hidden_size, self.hidden_size // 2),
-            nn.ReLU(),
-            nn.Linear(self.hidden_size // 2, self.hidden_size),
-            nn.Sigmoid()
-        )
-        
         config = self.backend_fusion_adapter_config
         min_dim = config.get('min_proj_dim', -1)
         proj_scale = config.get('proj_scale', -1)
@@ -127,6 +127,13 @@ class MD(nn.Module):
         
         assert norm_pos in ['pre', 'post'], f"Invalid norm_position: {norm_pos}"
         
+        self.backend_fusion_gate = nn.Sequential(
+            nn.Linear(2 * self.hidden_size, self.hidden_size // 2),
+            nn.ReLU(),
+            nn.Linear(self.hidden_size // 2, self.hidden_size),
+            nn.Sigmoid()
+        )
+
         action_dim = self.mem_backend.action_dim
         proj_dim = max(action_dim * proj_scale, min_dim, self.hidden_size)
         
@@ -216,8 +223,8 @@ class MD(nn.Module):
 
         self.backend_skill_config.update({
             'num_tokens': self.num_tokens,
-            'mem_type': self.backend_mem_type,
             'state_dim': self.mem_state_dim,
+            'mem_type': self.backend_mem_type,
             'action_dim': self.backend_action_dim,
             'hidden_dim': self.backend_hidden_dim,
             'checkpoint': self.backend_checkpoint,
@@ -236,8 +243,8 @@ class MD(nn.Module):
         self.frontend_update_memory = config.frontend_update_memory
         self.frontend_config = {
             'num_tokens': self.num_tokens,
-            'mem_type': self.frontend_mem_type,
             'state_dim': self.mem_state_dim,
+            'mem_type': self.frontend_mem_type,
             'mem_config': self.frontend_mem_config,
             'update_memory': self.frontend_update_memory,
         }
@@ -286,16 +293,7 @@ class MD(nn.Module):
                 self._make_special_token_embeddings_trainable(model)
                 return model
 
-    def _init_lm(self, config):
-        self.lm_path = config.lm_path
-        self.lm_coef = config.lm_coef
-        self.lm_freeze = config.lm_freeze
-        self.lm_checkpoint = config.lm_checkpoint
-        self.lm_temperature = config.lm_temperature
-    
-        if not os.path.exists(self.lm_dir):
-            raise FileNotFoundError(f"Language model path {self.lm_dir} does not exist")
-        
+    def _load_lm(self, config):
         lm_config = AutoConfig.from_pretrained(self.lm_dir)
         lm_config.use_cache = self.use_cache
 
@@ -319,11 +317,37 @@ class MD(nn.Module):
         
         if not self.lm_freeze:
             model = self._init_peft(model)
-            self.enable_peft = True
-        else:
-            self.enable_peft = False
         
-        self.lm = model
+        return model
+
+    def _load_md(self, config):
+        assert self.enable_nested_loading
+
+        md_config = Cfg.load()
+        if not md_config.ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint file {md_config.ckpt_path} does not exist")
+
+        model = MD.from_pretrained(config=md_config, ckpt_path=md_config.ckpt_path)
+        self.lm_config = model.lm_config
+        self._init_tokenizer(model, config, tokenizer=model.tokenizer)
+        
+        return model
+
+    def _init_lm(self, config):
+        self.lm_path = config.lm_path
+        self.lm_coef = config.lm_coef
+        self.lm_freeze = config.lm_freeze
+        self.lm_checkpoint = config.lm_checkpoint
+        self.lm_temperature = config.lm_temperature
+        
+        if not os.path.exists(self.lm_dir):
+            raise FileNotFoundError(f"Language model path {self.lm_dir} does not exist")
+        
+        if self.enable_nested_loading and not self.is_lm():
+            self.lm = self._load_md(config)
+        else:
+            self.lm = self._load_lm(config)
+        self.enable_peft = not self.lm_freeze
         self.hidden_size = getattr(
             self.lm_config,
             'hidden_size',
@@ -357,7 +381,7 @@ class MD(nn.Module):
         self.backend_enable_fusion = self.has_mem and self.backend_strategy == 'fusion'
         self.backend_enable_annotation = self.has_mem and self.backend_strategy == 'annotation'
     
-    def _init_tokenizer(self, model, config):
+    def _init_tokenizer(self, model, config, tokenizer=None):
         self._init_vocab(config)
 
         if self.backend_enable_annotation:
@@ -369,7 +393,7 @@ class MD(nn.Module):
         else:
             special_tokens = []
         
-        self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.lm_dir) if tokenizer is None else tokenizer
         
         if special_tokens:
             self.tokenizer.add_special_tokens({'additional_special_tokens': RESERVED_TOKENS})
@@ -377,7 +401,7 @@ class MD(nn.Module):
 
             self.token_sep_id = self.tokenizer.convert_tokens_to_ids(SEP_TOKEN)
             self.token_special_ids = self.tokenizer.convert_tokens_to_ids(special_tokens)
-            self.token_extended_ids =  self.token_special_ids + [self.token_sep_id]
+            self.token_extended_ids = self.token_special_ids + [self.token_sep_id]
 
             self.boundary_tokens = [self.tokenizer.tokenize(t) for t in BOUNDARY_TOKENS]
             device = next(model.parameters()).device
@@ -440,9 +464,12 @@ class MD(nn.Module):
             context_embeds: torch.Tensor,
             mask: Optional[torch.Tensor] = None,
             pad_mask: Optional[torch.Tensor] = None,
-            input_ids: Optional[torch.Tensor] = None
+            input_ids: Optional[torch.Tensor] = None,
+            boundary_embeds: Optional[torch.Tensor] = None
         ) -> torch.Tensor:
         assert context_embeds.dim() == 3
+        
+        use_embeddings = input_ids is None
 
         if mask is not None:
             context_embeds = context_embeds * mask.unsqueeze(-1)
@@ -465,7 +492,7 @@ class MD(nn.Module):
         temp_scaling[:, sep_index] = self.backend_sep_temperature
         step_logits = step_logits / temp_scaling
         
-        batch_size, seq_len, _ = context_embeds.shape
+        batch_size, seq_len, hidden_size = context_embeds.shape
         device = context_embeds.device
         
         has_content = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -479,33 +506,66 @@ class MD(nn.Module):
         if window_size > 0:
             window_pad_mask = pad_mask[:, -window_size:]
             has_content = ~window_pad_mask.any(dim=1)
-        
-        if input_ids is not None and window_size > 0 and self.backend_sentence_alignment:
-            recent_tokens = input_ids[:, -window_size:]
+
+        if window_size > 0 and self.backend_sentence_alignment:
+            recent_inputs = input_ids[:, -window_size:] if not use_embeddings else context_embeds[:, -window_size:]
             recent_pad_mask = pad_mask[:, -window_size:]
 
             # Find last non-padded token in window
             col_indices = torch.arange(window_size-1, -1, -1, device=device).expand(batch_size, window_size)
             non_pad_mask = ~recent_pad_mask
+            
             col_indices = col_indices.masked_fill(~non_pad_mask, -1)
             last_token_index = col_indices.max(dim=1)[0]
             
             # Get the actual last token position
             valid_mask = (last_token_index >= 0)
-            last_tokens = torch.full((batch_size,), self.tokenizer.pad_token_id, device=device)
-            last_tokens[valid_mask] = recent_tokens[
-                torch.arange(batch_size, device=device)[valid_mask],
-                last_token_index[valid_mask].clamp(min=0)
-            ]
+            if not use_embeddings:
+                last_tokens = torch.full((batch_size,), self.tokenizer.pad_token_id, device=device)
+                last_tokens[valid_mask] = recent_inputs[
+                    torch.arange(batch_size, device=device)[valid_mask],
+                    last_token_index[valid_mask].clamp(min=0)
+                ]
+                has_boundary = torch.isin(last_tokens, self.sentence_boundary_ids_tensor)
+            else:
+                last_embeddings = torch.zeros(batch_size, hidden_size, device=device)
+                last_embeddings[valid_mask] = recent_inputs[
+                    torch.arange(batch_size, device=device)[valid_mask],
+                    last_token_index[valid_mask].clamp(min=0)
+                ]
+                similarities = F.cosine_similarity(
+                    last_embeddings.unsqueeze(1),
+                    boundary_embeds.unsqueeze(0),
+                    dim=-1
+                )
+                has_boundary = (similarities.max(dim=1)[0] > self.sentence_boundary_similarity)
+
+                last_embeddings = torch.zeros(batch_size, hidden_size, device=device)
+                batch_indices = torch.arange(batch_size, device=device)
+                valid_batch_indices = batch_indices[valid_mask]
+                if len(valid_batch_indices) > 0:
+                    last_embeddings[valid_mask] = recent_inputs[
+                        valid_batch_indices,
+                        last_token_index[valid_mask].clamp(min=0)
+                    ]
+                
+                if boundary_embeds.numel() == 0:
+                    has_boundary = torch.ones(batch_size, dtype=torch.bool, device=device)
+                else:
+                    similarities = F.cosine_similarity(
+                        last_embeddings.unsqueeze(1),
+                        boundary_embeds.unsqueeze(0),
+                        dim=-1
+                    )
+                    has_boundary = (similarities.max(dim=1)[0] > self.sentence_boundary_similarity)
             
-            # Check if last token is a sentence boundary
-            has_boundary = torch.isin(last_tokens, self.sentence_boundary_ids_tensor)
             if self.backend_enable_hint and has_boundary.any():
-                special_token_mask = torch.isin(input_ids, self.token_special_ids_tensor)
-                last_special_pos = special_token_mask.long().argmax(dim=1)
-                token_counts = input_ids.size(1) - last_special_pos
-                has_sufficient_distance = token_counts >= self.backend_min_interval
-                has_boundary &= has_sufficient_distance
+                if not use_embeddings:
+                    special_token_mask = torch.isin(input_ids, self.token_special_ids_tensor)
+                    last_special_pos = special_token_mask.long().argmax(dim=1)
+                    token_counts = input_ids.size(1) - last_special_pos
+                    has_sufficient_distance = token_counts >= self.backend_min_interval
+                    has_boundary &= has_sufficient_distance
 
         if self.training:
             final_tau = 0.5
@@ -740,6 +800,21 @@ class MD(nn.Module):
     def set_max_steps(self, max_steps):
         self.max_steps = max_steps
     
+    def is_lm(self):
+        return is_lm(self.ckpt_dir)
+    
+    def get_input_embeddings(self):
+        assert self.is_lm()
+        return self.lm.get_input_embeddings()
+
+    def get_output_embeddings(self):
+        assert self.is_lm()
+        return self.lm.get_output_embeddings()
+    
+    def resize_token_embeddings(self, *args, **kwargs):
+        assert self.is_lm()
+        return self.lm.resize_token_embeddings(*args, **kwargs)
+    
     def step(self):
         if self.current_step < self.max_steps:
             self.current_step += 1
@@ -946,10 +1021,10 @@ class MD(nn.Module):
             losses = None
 
         return {
+            'losses': losses,
             'labels': full_labels,
             'states': full_embeds,
-            'logits': lm_out.logits,
-            'losses': losses
+            'logits': lm_out.logits
         }
 
     def is_valid_anno(self, annotation_embeds):
@@ -984,37 +1059,60 @@ class MD(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        device = input_ids.device
-        if torch.any(input_ids >= self.num_tokens):
-            input_ids = input_ids.clamp(0, self.num_tokens - 1)
+    ):
+        if inputs_embeds is None:
+            assert input_ids is not None
+            if torch.any(input_ids >= self.num_tokens):
+                input_ids = input_ids.clamp(0, self.num_tokens - 1)
+            device = input_ids.device
+        else:
+            device = inputs_embeds.device
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, device=device)
+            if input_ids is not None:
+                attention_mask = torch.ones_like(input_ids, device=device)
+            else:
+                attention_mask = torch.ones(inputs_embeds.shape[:2], device=device, dtype=torch.long)
         
-        state_embeds = self.embedding_layer(input_ids)
+        if inputs_embeds is None:
+            state_embeds = self.embedding_layer(input_ids)
+        else:
+            state_embeds = inputs_embeds
+        
         batch_size, _, hidden_size = state_embeds.shape
         
         if self.backend_anno:
             pad_mask = (attention_mask == 0)
+            if input_ids is not None:
+                input_ids_for_sep = input_ids
+                boundary_embeds = None
+            else:
+                input_ids_for_sep = None
+                boundary_embeds = self.embedding_layer(self.sentence_boundary_ids_tensor)
+            
             sep_detected = self._has_sep(
                 state_embeds, 
                 pad_mask=pad_mask,
-                input_ids=input_ids
+                input_ids=input_ids_for_sep,
+                boundary_embeds=boundary_embeds
             )
             
+            if sep_detected.dim() == 0:
+                sep_detected = sep_detected.unsqueeze(0)
+            elif sep_detected.dim() > 1:
+                sep_detected = sep_detected.squeeze()
+                if sep_detected.dim() == 0:
+                    sep_detected = sep_detected.unsqueeze(0)
+
             new_embeds = []
-            new_labels = []
-            
             sep_embed = self.embedding_layer(self.token_sep_id_tensor).view(1, -1)
 
             for i in range(batch_size):
                 seq_embeds = state_embeds[i]
-                seq_input_ids = input_ids[i]
                 new_embeds_list = [seq_embeds]
-                new_labels_list = [seq_input_ids]
             
                 if sep_detected[i].item():
                     seq_embeds = torch.cat([seq_embeds, sep_embed])
@@ -1024,12 +1122,9 @@ class MD(nn.Module):
                         annotation_embeds = annotation_embeds.squeeze(0)
                         if self.backend_enable_annotation:
                             annotation_embeds = torch.cat([sep_embed, annotation_embeds])
-                        anno_len = annotation_embeds.size(0)
                         new_embeds_list.append(annotation_embeds)
-                        new_labels_list.append(torch.full((anno_len,), self.label_pad_token_id, device=device))
                 
                 new_embeds.append(torch.cat(new_embeds_list))
-                new_labels.append(torch.cat(new_labels_list))
             
             max_len = max(tensor.size(0) for tensor in new_embeds)
             full_embeds = torch.zeros(batch_size, max_len, hidden_size, device=device)
@@ -1041,10 +1136,10 @@ class MD(nn.Module):
             with torch.autocast(self.device.type, dtype=self.dtype):
                 lm_out = self.lm(inputs_embeds=full_embeds)
         
-            return {
+            return AttrDict({
                 'logits': lm_out.logits,
                 'states': state_embeds
-            }
+            })
         else:
             if self.backend_enable_fusion:
                 state_embeds, skill_output = self.get_fused_embeds(state_embeds, attention_mask)
@@ -1054,10 +1149,10 @@ class MD(nn.Module):
             with torch.autocast(self.device.type, dtype=self.dtype):
                 lm_out = self.lm(inputs_embeds=state_embeds)
 
-            return {
+            return AttrDict({
                 'logits': lm_out.logits,
                 **skill_output
-            }
+            })
 
     def append_token(self, seq, token, device):
         if isinstance(token, torch.Tensor):
@@ -1066,7 +1161,10 @@ class MD(nn.Module):
             return torch.cat([seq, token.flatten()])
         return torch.cat([seq, torch.tensor([token], device=device)])
     
-    def _generate(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def _generate(
+            self,
+            input_ids: torch.Tensor
+        ) -> torch.Tensor:
         device = input_ids.device
         batch_size = input_ids.shape[0]
         sequences = [input_ids[i].clone() for i in range(batch_size)]
@@ -1184,17 +1282,18 @@ class MD(nn.Module):
         config = cfg,
         attn: str = None,
         dist: bool = False,
-        checkpoint_path: str = cfg.ckpt_path,
+        ckpt_path: str = cfg.ckpt_path,
         **kwargs
     ) -> 'MD':
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint path {checkpoint_path} does not exist")
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint path {ckpt_path} does not exist")
 
+        device = get_device()
         model = cls(config=config, attn=attn, dist=dist, **kwargs)
-        model = model.load(checkpoint_path, model)
+        model = model.load(ckpt_path, model).to(device)
 
-        info(f"Loaded pre-trained model from {checkpoint_path}")
-        return model.to(get_device())
+        info(f"Loaded pre-trained model from: '{ckpt_path}'")
+        return model
 
     def get_trainable_parameters(self):
         trainable_params = []
@@ -1213,27 +1312,55 @@ class MD(nn.Module):
         if self.has_frontend:
             trainable_params.extend(self.mem_frontend.parameters())
 
-        trainable_params.extend(
-            param for param in self.lm.parameters() 
-            if param.requires_grad
-        )
+        if not self.enable_nested_loading or self.is_lm():
+            trainable_params.extend(
+                param for param in self.lm.parameters()
+                if param.requires_grad
+            )
+        
+        if self.enable_nested_loading and not self.is_lm():
+            params = self.lm.get_trainable_parameters()
+            if self.lm_freeze:
+                for param in params:
+                    param.requires_grad = False
+            else:
+                trainable_params.extend(params)
         
         return trainable_params
     
-    def lm_save_dir(self, ckpt_path):
-        parent = os.path.dirname(ckpt_path)
-        return os.path.join(parent, 'lm')
+    @property
+    def enable_nested_loading(self):
+        return self.lm_path == self.md_path or self.is_lm()
+    
+    @property
+    def lm_save_dir(self):
+        if not self.enable_peft and self.is_lm():
+            return get_md_dir()
+        else:
+            return get_lm_dir()
+
+    def save_pretrained(self, dirname):
+        assert self.is_lm()
+        ckpt_path = get_ckpt_path(parent=dirname)
+        self.save(ckpt_path)
 
     def save(self, ckpt_path):
-        if not self.enable_peft:
+        if not self.enable_peft and (not self.enable_nested_loading or self.is_lm()):
             torch.save(self.state_dict(), ckpt_path)
         else:
             model_state = self.state_dict()
-            md_state = {k: v for k, v in model_state.items() if not k.startswith("lm.")}
+            md_state = {k: v for k, v in model_state.items() if not k.startswith('lm.')}
             torch.save(md_state, ckpt_path)
-            self.lm.save_pretrained(self.lm_save_dir(ckpt_path))
+            if self.enable_peft or (self.enable_nested_loading and not self.is_lm()):
+                self.lm.save_pretrained(self.lm_save_dir)
+        
+        if not self.enable_nested_loading:
+            self.md_dir.mkdir(parents=True, exist_ok=True)
+            self.md_cfg.save()
 
     def load(self, ckpt_path, model):
+        self.ckpt_dir = Path(ckpt_path).parent
+
         try:
             state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
         except Exception as e:
@@ -1247,10 +1374,10 @@ class MD(nn.Module):
             if unexpected:
                 warn(f"Unexpected keys: {unexpected}")
             
-            if not self.enable_peft:
+            if not self.enable_peft and not self.enable_nested_loading:
                 if missing:
                     warn(f"Missing keys: {missing}")
-            else:
+            elif self.enable_peft and (not self.enable_nested_loading or self.is_lm()):
                 if missing:
                     md_missing = []
                     for i in missing:
@@ -1265,7 +1392,6 @@ class MD(nn.Module):
                     attn_implementation=self.attn
                 )
                 model.lm = PeftModel.from_pretrained(base, self.lm_save_dir(ckpt_path))
-            
             return model
         except Exception as e:
             raise RuntimeError(f"Error loading state dict: {str(e)}") from e

@@ -62,8 +62,8 @@ class Frontend(nn.Module):
                     attn_pool_chunks=mac_neural_mem_attn_pool_chunks,
                     manual_per_sample_grads=mac_manual_per_sample_grads,
                     use_accelerated_scan=mac_neural_mem_use_accelerated_scan,
+                    step_transform_max_lr=mac_neural_mem_step_transform_max_lr,
                     spectral_norm_surprises=mac_neural_mem_spectral_norm_surprises,
-                    default_step_transform_max_lr=mac_neural_mem_step_transform_max_lr,
                     per_head_learned_parameters=mac_neural_mem_per_head_learned_parameters,
                     per_parameter_lr_modulation=mac_neural_mem_per_parameter_lr_modulation
                 )

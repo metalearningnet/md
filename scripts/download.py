@@ -7,6 +7,7 @@ _root_dir = Path(__file__).parent.parent
 _lm_dir = _root_dir / 'models' / 'lm'
 _conf_dir = _root_dir / 'conf'
 sys.path.append(str(_conf_dir))
+
 from settings import MODEL
 
 def download_model(name):

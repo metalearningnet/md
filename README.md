@@ -44,10 +44,11 @@ cd md
 
 | Command | Flags | Description |
 |---------|-------|-------------|
-| `./run.sh` | `--train` | Train with specified skills |
-| | `--test` | Run benchmark evaluation |
-| | `--prepare` | Preprocess dataset |
-| | `--generate` | Interactive generation |
+| `./run.sh` | `--train` | Train the model using skill memory |
+| | `--evaluate` | Evaluate model performance on standard datasets |
+| | `--prepare` | Preprocess and prepare training dataset |
+| | `--generate` | Generate sample outputs for qualitative testing |
+| | `--build lm` | Convert MD checkpoint into a compatible language model format |
 
 ## License
 

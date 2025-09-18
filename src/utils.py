@@ -3,6 +3,7 @@ import sys
 import yaml
 import time
 import copy
+import json
 import torch
 import shutil
 import random
@@ -18,11 +19,11 @@ from fastapi import FastAPI
 from packaging import version
 from pydantic import BaseModel
 import torch.nn.functional as F
-from dataclasses import dataclass
 from threading import Thread, Lock
 from itertools import product, islice
-from typing import Dict, Optional, List, Union
+from dataclasses import dataclass, asdict, fields
 from torch.utils.tensorboard import SummaryWriter
+from typing import Dict, Optional, List, Union, Any
 from lightning.fabric.accelerators import CUDAAccelerator
 from transformers import (
     modeling_utils,
@@ -54,9 +55,6 @@ SHOW_LABELS = False
 REMOVE_UNUSED_COLUMNS = False
 GRADIENT_ACCUMULATION_STEPS = 1
 
-MD_TAG = 'md'
-MD_FILE = f'{MD_TAG}.pt'
-
 ROOT_DIR = Path(__file__).parent.parent
 MODEL_DIR = ROOT_DIR / 'models'
 CONF_DIR = ROOT_DIR / 'conf'
@@ -69,8 +67,6 @@ CKPT_DIR = OUT_DIR / 'checkpoints'
 TEST_LOG = LOG_DIR / 'test'
 TRAIN_LOG = LOG_DIR / 'train'
 
-LM_DIR = MODEL_DIR / 'lm'
-
 MAC_FILE = 'mac.yaml'
 MAL_FILE = 'mal.yaml'
 DIST_FILE = 'dist.yaml'
@@ -80,7 +76,7 @@ SEED = 42
 RETRY_MAX = 5
 LOG_INTERVAL = 1
 
-SEP_TOKEN = '<separator>'
+SEP_TOKEN = '<sep>'
 RESERVED_TOKENS = [SEP_TOKEN]
 LABEL_PAD_TOKEN_ID = -100
 
@@ -127,6 +123,43 @@ def show_output(s):
     if VERBOSE:
         print(f'< [output] {s}')
 
+def get_lm_dir(parent: Path = MODEL_DIR):
+    return parent / 'lm'
+
+def get_md_dir(parent: Path = MODEL_DIR):
+    return parent / 'md'
+
+def get_md_cfg(parent: Path = get_md_dir()):
+    return parent / 'md.json'
+
+def get_ckpt_path(parent: Path = CKPT_DIR):
+    return parent / 'md.pt'
+
+def is_lm(parent: Path):
+    return parent == get_md_dir()
+
+class AttrDict(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for key, value in self.items():
+            if isinstance(value, dict):
+                self[key] = AttrDict(value)
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+    def __delattr__(self, name):
+        try:
+            del self[name]
+        except KeyError:
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+
 @dataclass
 class Cfg:
     log: bool
@@ -134,8 +167,8 @@ class Cfg:
     model: dict
     loader: dict
     memory: dict
-    md_file: str
     lm_dir: Path
+    md_dir: Path
     log_dir: Path
     test_log: str
     train_log: str
@@ -145,7 +178,7 @@ class Cfg:
     optimizer: dict
     log_interval: int
     remove_unused_columns: bool
-    
+
     def mem_config(self, component, mem_type):
         valid_components = ['frontend', 'backend']
         config_mapping = {
@@ -167,23 +200,58 @@ class Cfg:
         config.update(custom_config)
 
         return config
+
+    def to_dict(self):
+        return asdict(self)
+    
+    def to_json(self):
+        config_dict = self.to_dict()
+        for key, value in config_dict.items():
+            if isinstance(value, Path):
+                config_dict[key] = str(value)
+        return json.dumps(config_dict, indent=4)
+    
+    def save(self):
+        md_cfg = get_md_cfg()
+        md_cfg.parent.mkdir(parents=True, exist_ok=True)
+        with open(md_cfg, 'w') as f:
+            f.write(self.to_json())
+    
+    @classmethod
+    def from_dict(cls, config_dict: Dict[str, Any]) -> 'Cfg':
+        for field in fields(cls):
+            if field.type == Path and field.name in config_dict:
+                config_dict[field.name] = Path(config_dict[field.name])
+        return cls(**config_dict)
+    
+    @classmethod
+    def load(cls) -> 'Cfg':
+        md_cfg = get_md_cfg()
+        if not md_cfg.exists():
+            raise FileNotFoundError(f"Configuration file not found: {md_cfg}")
+        
+        with open(md_cfg, 'r') as f:
+            config_dict = json.loads(f.read())
+            cfg = cls.from_dict(config_dict)
+            cfg.ckpt_dir = get_md_dir()
+            return cfg
     
     @property
-    def attn(self):
-        if self.lm_name.startswith('gemma'):
-            return 'eager'
-        elif modeling_utils.is_flash_attn_2_available():
-            return 'flash_attention_2'
-        else:
-            return 'sdpa'
-    
+    def ckpt_path(self):
+        return get_ckpt_path(parent=self.ckpt_dir)
+
     @property
-    def lm_checkpoint(self):
-        return self.ckpt['gradient'].get('lm', False)
+    def md_path(self):
+        last_two = self.md_dir.parts[-2:]
+        return str(Path(*last_two))
     
     @property
     def lm_path(self):
         return self.model['lm']['path']
+
+    @property
+    def lm_checkpoint(self):
+        return self.ckpt['gradient'].get('lm', False)
     
     @property
     def lm_name(self):
@@ -199,7 +267,7 @@ class Cfg:
     
     @property
     def lm_temperature(self):
-        return self.model['lm'].get('temperature')
+        return self.model['lm'].get('temperature', 0.7)
     
     @property
     def min_length(self):
@@ -222,31 +290,20 @@ class Cfg:
         return self.model.get('mem_coef', 0.2)
     
     @property
-    def strategy_info(self):
-        backend_strategy = self.backend_strategy
-        if backend_strategy == 'hint':
-            backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
-        return backend_strategy
-    
-    @property
     def has_frontend(self):
-        return self.model['frontend']
+        return self.model.get('frontend', False)
 
     @property
     def use_cache(self):
-        return self.model['use_cache']
+        return self.model.get('use_cache', False)
     
     @property
     def use_initial_prompt(self):
-        return self.model['use_initial_prompt']
+        return self.model.get('use_initial_prompt', True)
     
     @property
     def sft(self):
         return self.model.get('sft', False)
-    
-    @property
-    def ckpt_path(self):
-        return self.ckpt_dir / MD_FILE
     
     @property
     def frontend_mem_type(self):
@@ -360,6 +417,22 @@ class Cfg:
         return self.ckpt['gradient']['mem']
     
     @property
+    def strategy_info(self):
+        backend_strategy = self.backend_strategy
+        if backend_strategy == 'hint':
+            backend_strategy = f'{backend_strategy}-{self.backend_hint_category}'
+        return backend_strategy
+    
+    @property
+    def attn(self):
+        if self.lm_name.startswith('gemma'):
+            return 'eager'
+        elif modeling_utils.is_flash_attn_2_available():
+            return 'flash_attention_2'
+        else:
+            return 'sdpa'
+    
+    @property
     def truncation_mode(self):
         return self.loader.get('truncation_mode', 'keep_end')
     
@@ -399,12 +472,12 @@ cfg = Cfg(
     model=MODEL,
     memory=MEMORY,
     loader=LOADER,
-    lm_dir=LM_DIR,
-    md_file=MD_FILE,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
     test_log=TEST_LOG,
     eval_dir=EVAL_DIR,
+    lm_dir=get_lm_dir(),
+    md_dir=get_md_dir(),
     train_log=TRAIN_LOG,
     precision=PRECISION,
     optimizer=OPTIMIZER,
@@ -434,9 +507,9 @@ else:
         label_pad_token_id: int = -100
         
         def __call__(self, examples: dict) -> dict:
-            input_ids = []
             labels = []
-
+            input_ids = []
+            
             if 'instruction' in examples and 'response' in examples:
                 prompts = []
                 responses = []
@@ -462,8 +535,6 @@ else:
                     add_special_tokens=False
                 )
 
-                input_ids = []
-                labels = []
                 for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
                     combined_ids = prompt_ids + response_ids
                     

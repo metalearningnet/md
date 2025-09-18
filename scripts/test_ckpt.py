@@ -4,11 +4,13 @@ from pathlib import Path
 
 _script_dir = Path(__file__).parent
 sys.path.append(str(_script_dir))
+
 from train import train
 from evaluate import evaluate
 
 _src_dir =  Path(__file__).parent.parent / 'src'
 sys.path.append(str(_src_dir))
+
 from utils import default_dataset_path, get_fabric_config, cfg
 
 NR_EPOCHS = 1

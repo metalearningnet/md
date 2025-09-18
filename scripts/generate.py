@@ -96,7 +96,7 @@ def generate(config: dict):
         fabric.launch()
 
         if ckpt_path:
-            model = MD.from_pretrained(checkpoint_path=ckpt_path)
+            model = MD.from_pretrained(ckpt_path=ckpt_path)
         else:
             model = MD.from_pretrained()
 

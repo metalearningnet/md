@@ -11,7 +11,7 @@ sys.path.append(str(_src_dir))
 from md import MD
 from loader import MDLoader
 from utils import (
-    MD_TAG, LABEL_PAD_TOKEN_ID, md_train, md_validate,
+    LABEL_PAD_TOKEN_ID, md_train, md_validate,
     get_strategy, get_trainer, get_fabric_config, get_num_devices,
     default_dataset_path, clear_directory, info, set_dist_config, cfg
 )
@@ -77,9 +77,9 @@ def train(config: dict):
         if not restore:
             model = MD(dist=dist)
         else:
-            info(f"Restore the model...")
+            info("Restore the model...")
             if ckpt_path:
-                model = MD.from_pretrained(checkpoint_path=ckpt_path, dist=dist)
+                model = MD.from_pretrained(ckpt_path=ckpt_path, dist=dist)
             else:
                 model = MD.from_pretrained(dist=dist)
 
