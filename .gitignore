@@ -1,7 +1,6 @@
-/model/
+/models/
 /nca/
-/outputs/
-/datasets/
+/output/
 /trainer_output/
 __pycache__/
 *.py[cod]

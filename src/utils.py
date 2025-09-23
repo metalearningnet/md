@@ -507,80 +507,92 @@ else:
         label_pad_token_id: int = -100
         
         def __call__(self, examples: dict) -> dict:
-            labels = []
-            input_ids = []
-            
-            if 'instruction' in examples and 'response' in examples:
-                prompts = []
-                responses = []
-                
-                for instruction, response in zip(examples['instruction'], examples['response']):
-                    prompt = f"Instruction: {instruction}\n\nResponse:"
-                    prompts.append(prompt)
-                    responses.append(response)
-
-                prompt_encodings = self.tokenizer(
-                    prompts,
-                    truncation=True,
-                    max_length=self.max_prompt_length,
-                    padding=False,
-                    add_special_tokens=False
-                )
-
-                response_encodings = self.tokenizer(
-                    responses,
-                    truncation=True,
-                    max_length=self.max_target_length,
-                    padding=False,
-                    add_special_tokens=False
-                )
-
-                for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
-                    combined_ids = prompt_ids + response_ids
-                    
-                    if len(combined_ids) > self.max_length:
-                        if self.truncation_mode == 'keep_start':
-                            combined_ids = combined_ids[:self.max_length]
-                        else:
-                            combined_ids = combined_ids[-self.max_length:]
-                    
-                    # Create labels (-100 for prompt, response tokens for response)
-                    label_ids = [self.label_pad_token_id] * len(prompt_ids) + response_ids
-                    label_ids = label_ids[:len(combined_ids)]
-                    
-                    input_ids.append(combined_ids)
-                    labels.append(label_ids)
+            if ('instruction' in examples or 'query' in examples) and 'response' in examples:
+                return self._process_instruction_response(examples)
             elif 'text' in examples:
-                texts = examples['text']
-                text_encodings = self.tokenizer(
-                    texts,
-                    truncation=True,
-                    max_length=self.max_length,
-                    padding=False,
-                    add_special_tokens=False,
-                )
-
-                for text_ids in text_encodings["input_ids"]:
-                    if len(text_ids) > self.max_length:
-                        if self.truncation_mode == "keep_start":
-                            text_ids = text_ids[: self.max_length]
-                        else:
-                            text_ids = text_ids[-self.max_length :]
-                    
-                    input_ids.append(text_ids)
-                    labels.append(text_ids.copy())
+                return self._process_text(examples)
             else:
-                raise ValueError("Examples must contain either ('instruction' + 'response') or 'text'.")
-            
+                raise ValueError("Examples must contain either ('instruction'/'query' + 'response') or 'text'.")
+        
+        def _format_output(self, input_ids, labels):
             return {
                 'input_ids': input_ids,
                 'attention_mask': [[1] * len(ids) for ids in input_ids],
                 'labels': labels
             }
+        
+        def _process_instruction_response(self, examples):
+            req_field = 'instruction' if 'instruction' in examples else 'query'
+            prompts = [f"Instruction: {inst}\n\nResponse:" for inst in examples[req_field]]
+            responses = examples['response']
 
+            prompt_encodings = self.tokenizer(
+                prompts,
+                truncation=True,
+                max_length=self.max_prompt_length,
+                padding=False,
+                add_special_tokens=False
+            )
+
+            response_encodings = self.tokenizer(
+                responses,
+                truncation=True,
+                max_length=self.max_target_length,
+                padding=False,
+                add_special_tokens=False,
+                return_attention_mask=False
+            )
+
+            labels = []
+            input_ids = []
+
+            for prompt_ids, response_ids in zip(prompt_encodings['input_ids'], response_encodings['input_ids']):
+                combined_ids = prompt_ids + response_ids
+                
+                if len(combined_ids) > self.max_length:
+                    if self.truncation_mode == 'keep_start':
+                        combined_ids = combined_ids[:self.max_length]
+                    else:
+                        combined_ids = combined_ids[-self.max_length:]
+                
+                # Create labels (-100 for prompt, response tokens for response)
+                label_ids = [self.label_pad_token_id] * len(prompt_ids) + response_ids
+                label_ids = label_ids[:len(combined_ids)]
+                
+                input_ids.append(combined_ids)
+                labels.append(label_ids)
+            
+            return self._format_output(input_ids, labels)
+        
+        def _process_text(self, examples):
+            texts = examples['text']
+            text_encodings = self.tokenizer(
+                texts,
+                truncation=True,
+                max_length=self.max_length,
+                padding=False,
+                add_special_tokens=False,
+                return_attention_mask=False
+            )
+
+            labels = []
+            input_ids = []
+
+            for text_ids in text_encodings['input_ids']:
+                if len(text_ids) > self.max_length:
+                    if self.truncation_mode == 'keep_start':
+                        text_ids = text_ids[: self.max_length]
+                    else:
+                        text_ids = text_ids[-self.max_length :]
+                
+                input_ids.append(text_ids)
+                labels.append(text_ids.copy())
+            
+            return self._format_output(input_ids, labels)
+        
         def generate(self, dataset):
             return dataset.map(
-                self.__call__,
+                self,
                 batched=True,
                 remove_columns=dataset.column_names,
                 num_proc=os.cpu_count()
