@@ -1391,7 +1391,7 @@ class MD(nn.Module):
                     trust_remote_code=True,
                     attn_implementation=self.attn
                 )
-                model.lm = PeftModel.from_pretrained(base, self.lm_save_dir(ckpt_path))
+                model.lm = PeftModel.from_pretrained(base, self.lm_save_dir)
             return model
         except Exception as e:
             raise RuntimeError(f"Error loading state dict: {str(e)}") from e

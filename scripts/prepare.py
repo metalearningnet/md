@@ -72,7 +72,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         config = yaml.safe_load(f)
     return config
 
-def generate_responses(config: Dict[str, Any], output_dir: Path) -> List[Dict[str, Any]]:
+def generate_responses(config: Dict[str, Any], output_dir: Path) -> List[List[Dict[str, Any]]]:
     print("Loading dataset...")
     dataset = load_dataset(
         config['generation']['prompts_dataset'],
@@ -80,7 +80,41 @@ def generate_responses(config: Dict[str, Any], output_dir: Path) -> List[Dict[st
     )
     
     prompts_field = config['generation']['prompts_field']
-    prompts = sorted(list(set(dataset[prompts_field])))
+
+    if isinstance(prompts_field, str):
+        prompts = sorted(list(set(dataset[prompts_field])))
+    elif isinstance(prompts_field, list):
+        prompts = []
+        seen_prompts = set()
+
+        for example in dataset:
+            prompt_parts = []
+            for field in prompts_field:
+                if field in example and example[field]:
+                    if field == 'options':
+                        # Special handling for options field
+                        options_content = example[field]
+                        if isinstance(options_content, list):
+                            options_text = '\n'.join(options_content)
+                        else:
+                            options_text = str(options_content)
+                        prompt_parts.append(f"Options: {options_text}")
+                    else:
+                        content = example[field]
+                        if isinstance(content, list):
+                            content = '\n'.join(content)
+                        prompt_parts.append(str(content))
+            
+            combined_prompt = '\n'.join(prompt_parts)
+            uniqueness_key = tuple(str(example.get(field, '')) for field in prompts_field)
+            if uniqueness_key not in seen_prompts:
+                seen_prompts.add(uniqueness_key)
+                prompts.append(combined_prompt)
+        
+        prompts = sorted(prompts)
+    else:
+        raise ValueError(f"prompts_field must be string or list, got {type(prompts_field)}")
+    
     print(f"Found {len(prompts)} unique prompts")
 
     max_examples = config['generation'].get('max_examples')
@@ -141,7 +175,7 @@ def generate_responses(config: Dict[str, Any], output_dir: Path) -> List[Dict[st
         
         all_output_data.append(output_data)
     
-    return all_output_data, prompts
+    return all_output_data
 
 def filter_and_combine_responses(
     all_output_data: List[List[Dict[str, Any]]],
@@ -301,7 +335,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
     
-    all_output_data, _ = generate_responses(config, output_dir)
+    all_output_data = generate_responses(config, output_dir)
     combined_data = filter_and_combine_responses(all_output_data, config, output_dir)
     scored_data = score_with_reward_model(combined_data, config, output_dir)
     binarized_data = binarize_data(scored_data)

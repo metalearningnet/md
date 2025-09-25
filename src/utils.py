@@ -506,13 +506,25 @@ else:
         max_target_length: int
         label_pad_token_id: int = -100
         
+        def _is_inst(self, examples):
+            return ('instruction' in examples or 'query' in examples) and 'response' in examples
+        
+        def _is_question(self, examples):
+            return 'question' in examples and 'rationale' in examples
+        
+        def _has_prompts(self, examples):
+           return self._is_inst(examples) or self._is_question(examples)
+
+        def _has_text(self, examples):
+            return 'text' in examples
+        
         def __call__(self, examples: dict) -> dict:
-            if ('instruction' in examples or 'query' in examples) and 'response' in examples:
-                return self._process_instruction_response(examples)
-            elif 'text' in examples:
+            if self._has_prompts(examples):
+                return self._process_prompts(examples)
+            elif self._has_text(examples):
                 return self._process_text(examples)
             else:
-                raise ValueError("Examples must contain either ('instruction'/'query' + 'response') or 'text'.")
+                raise ValueError("Examples must contain either ('instruction'/'query' + 'response'), ('question' + 'rationale') or 'text'.")
         
         def _format_output(self, input_ids, labels):
             return {
@@ -521,17 +533,41 @@ else:
                 'labels': labels
             }
         
-        def _process_instruction_response(self, examples):
-            req_field = 'instruction' if 'instruction' in examples else 'query'
-            prompts = [f"Instruction: {inst}\n\nResponse:" for inst in examples[req_field]]
-            responses = examples['response']
+        def _get_prompts(self, examples):
+            if self._is_inst(examples):
+                req_field = 'instruction' if 'instruction' in examples else 'query'
+                return [f"Instruction: {req}\n\nResponse:" for req in examples[req_field]]
+            elif self._is_question(examples):
+                if 'options' in examples:
+                    prompts = []
+                    for question, options in zip(examples['question'], examples['options']):
+                        req = f"{question}\nOptions: {options}"
+                        prompts.append(f"Instruction: {req}\n\nResponse:")
+                    return prompts
+                else:
+                    return [f"Instruction: {q}\n\nResponse:" for q in examples['question']]
+            else:
+                raise ValueError("Examples must contain requests")
+        
+        def _get_responses(self, examples):
+            if self._is_inst(examples):
+                return examples['response']
+            elif self._is_question(examples):
+                return examples['rationale']
+            else:
+                raise ValueError("Examples must contain responses")
+        
+        def _process_prompts(self, examples):
+            prompts = self._get_prompts(examples)
+            responses = self._get_responses(examples)
 
             prompt_encodings = self.tokenizer(
                 prompts,
                 truncation=True,
                 max_length=self.max_prompt_length,
                 padding=False,
-                add_special_tokens=False
+                add_special_tokens=False,
+                return_attention_mask=False
             )
 
             response_encodings = self.tokenizer(
