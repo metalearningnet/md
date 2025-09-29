@@ -29,7 +29,7 @@ log_error() {
 
 show_help() {
     cat <<EOF
-${BOLD}Usage:${RESET} $0 [OPTION]... [PYTHON_ARGS...]
+${BOLD}Usage:${RESET} $0 [OPTION]... [ARGS...]
 
 ${BOLD}Options:${RESET}
   --prepare              Prepare the training data

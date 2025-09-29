@@ -186,7 +186,6 @@ class MDLoader(Dataset):
     def get_dataloaders(
         self,
         batch_size: int,
-        val_batch_size: Optional[int] = None,
         val_split: Optional[float] = None,
         seed: int = 42
     ) -> Tuple[DataLoader, Optional[DataLoader]]:
@@ -212,7 +211,7 @@ class MDLoader(Dataset):
             ),
             DataLoader(
                 val_set,
-                batch_size=val_batch_size or batch_size,
+                batch_size=batch_size,
                 collate_fn=self.collate_fn,
                 shuffle=False,
                 pin_memory=torch.cuda.is_available(),

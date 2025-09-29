@@ -13,7 +13,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM
 from utils import (
     SEP_TOKEN, RESERVED_TOKENS, BOUNDARY_TOKENS, LABEL_PAD_TOKEN_ID, LogitsDecoder, AttrDict, Cfg,
-    get_device, load_peft_config, get_special_token_by_index, get_lm_dir, get_md_dir, get_ckpt_path, is_lm, info, warn, cfg
+    check_adapter_config, get_device, load_peft_config, get_special_token_by_index, get_lm_dir, get_md_dir, get_ckpt_path, is_lm, info, warn, cfg
 )
 
 class SafeEmbeddingWrapper(nn.Module):
@@ -294,6 +294,7 @@ class MD(nn.Module):
                 return model
 
     def _load_lm(self, config):
+        check_adapter_config(self.lm_dir)
         lm_config = AutoConfig.from_pretrained(self.lm_dir)
         lm_config.use_cache = self.use_cache
 

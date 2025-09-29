@@ -169,8 +169,8 @@ def main():
         args.name = DEFAULT_DATASET['name']
     
     if not args.out:
-        cfg.eval_dir.mkdir(parents=True, exist_ok=True)
-        args.out = str(cfg.eval_dir / f'{Path(args.name).stem}.json')
+        cfg.results_dir.mkdir(parents=True, exist_ok=True)
+        args.out = str(cfg.results_dir / f'{Path(args.name).stem}.json')
     
     if not Path(args.ckpt).exists():
         raise FileNotFoundError(f"Checkpoint path not found: {args.ckpt}")

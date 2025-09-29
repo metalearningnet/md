@@ -125,7 +125,7 @@ def main():
                         help="Enable distributed evaluation")
     parser.add_argument("--log", action="store_true", default=cfg.log,
                         help="Whether to enable logging")
-    parser.add_argument("--log-dir", type=str, default=cfg.test_log,
+    parser.add_argument("--log-dir", type=str, default=cfg.eval_log,
                         help="Directory where logs should be saved")
     parser.add_argument("--log-interval", type=int, default=100,
                         help="Interval at which to update and write logs")

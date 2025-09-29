@@ -61,16 +61,17 @@ CONF_DIR = ROOT_DIR / 'conf'
 OUT_DIR = ROOT_DIR / 'output'
 LOG_DIR = OUT_DIR / 'logs'
 
-EVAL_DIR = OUT_DIR / 'results'
 CKPT_DIR = OUT_DIR / 'checkpoints'
+RESULTS_DIR = OUT_DIR / 'results'
 
-TEST_LOG = LOG_DIR / 'test'
+EVAL_LOG = LOG_DIR / 'eval'
 TRAIN_LOG = LOG_DIR / 'train'
 
 MAC_FILE = 'mac.yaml'
 MAL_FILE = 'mal.yaml'
 DIST_FILE = 'dist.yaml'
 PEFT_FILE = 'peft.yaml'
+ADAPTER_FILE = 'adapter_config.json'
 
 SEED = 42
 RETRY_MAX = 5
@@ -170,13 +171,13 @@ class Cfg:
     lm_dir: Path
     md_dir: Path
     log_dir: Path
-    test_log: str
+    eval_log: str
     train_log: str
     precision: str
-    eval_dir: Path
     ckpt_dir: Path
     optimizer: dict
     log_interval: int
+    results_dir: Path
     remove_unused_columns: bool
 
     def mem_config(self, component, mem_type):
@@ -474,13 +475,13 @@ cfg = Cfg(
     loader=LOADER,
     log_dir=LOG_DIR,
     ckpt_dir=CKPT_DIR,
-    test_log=TEST_LOG,
-    eval_dir=EVAL_DIR,
+    eval_log=EVAL_LOG,
     lm_dir=get_lm_dir(),
     md_dir=get_md_dir(),
     train_log=TRAIN_LOG,
     precision=PRECISION,
     optimizer=OPTIMIZER,
+    results_dir=RESULTS_DIR,
     log_interval=LOG_INTERVAL,
     remove_unused_columns=REMOVE_UNUSED_COLUMNS
 )
@@ -1296,3 +1297,21 @@ def get_strategy(precision):
                 }
             }
             return DeepSpeedStrategy(config=strategy_config)
+
+def check_adapter_config(model_dir: Path):
+    adapter_config_path = model_dir / ADAPTER_FILE
+    if adapter_config_path.exists():
+        with open(adapter_config_path, 'r') as f:
+            config_dict = json.loads(f.read())
+            if 'base_model_name_or_path' not in config_dict:
+                raise KeyError(f"'base_model_name_or_path' not found in {adapter_config_path}")
+
+        model_path = str(model_dir)
+        saved_path = config_dict['base_model_name_or_path'].strip()
+
+        if model_path != saved_path:
+            warn(f"Updating model path from '{saved_path}' to '{model_path}' in adapter configuration")
+            config_dict['base_model_name_or_path'] = model_path
+
+            with open(adapter_config_path, 'w') as f:
+                json.dump(config_dict, f, indent=4)
